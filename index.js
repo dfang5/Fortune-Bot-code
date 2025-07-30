@@ -1,15 +1,19 @@
+// start of index.js (nihaoo you better read this or i'll skin you alive)
 const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder } = require('discord.js');
 require('dotenv').config();
 
+// Load environment variables
 const token = process.env.DISCORD_BOT_TOKEN;
 const clientId = process.env.DISCORD_CLIENT_ID;
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
+// Define the /info command
 const infoCommand = new SlashCommandBuilder()
   .setName('info')
   .setDescription('Shows general info about the bot.');
 
+// Register the slash command
 const rest = new REST({ version: '10' }).setToken(token);
 
 (async () => {
@@ -25,6 +29,7 @@ const rest = new REST({ version: '10' }).setToken(token);
   }
 })();
 
+// Respond to interactions
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
