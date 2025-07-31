@@ -36,7 +36,7 @@ const rest = new REST({ version: '10' }).setToken(token);
   }
 })();
 
-// Respond to slash interactions
+// Slash command handler
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
@@ -53,11 +53,33 @@ Commands: /info (this shows general info about the bot, and triggers the prompt 
   }
 });
 
-// Respond to !scavenge
+// Cooldown map
+const scavengeCooldowns = new Map(); // Stores userId -> timestamp of last scavenge
+const SCAVENGE_COOLDOWN = 2 * 60 * 60 * 1000; // 2 hours in milliseconds
+
+// Message command handler for !scavenge
 client.on('messageCreate', async message => {
   if (message.author.bot) return;
 
   if (message.content.toLowerCase() === '!scavenge') {
+    const userId = message.author.id;
+    const now = Date.now();
+
+    // Check cooldown
+    const lastScavenge = scavengeCooldowns.get(userId);
+    if (lastScavenge && (now - lastScavenge < SCAVENGE_COOLDOWN)) {
+      const remaining = SCAVENGE_COOLDOWN - (now - lastScavenge);
+
+      const hours = Math.floor(remaining / (1000 * 60 * 60));
+      const minutes = Math.floor((remaining % (1000 * 60 * 60)) / (1000 * 60));
+      const seconds = Math.floor((remaining % (1000 * 60)) / 1000);
+
+      return message.reply(`You cannot scavenge yet. You must wait another **${hours}h ${minutes}m ${seconds}s**.`);
+    }
+
+    // Set new cooldown timestamp
+    scavengeCooldowns.set(userId, now);
+
     const rarities = [
       {
         name: 'Common',
@@ -120,7 +142,6 @@ client.on('messageCreate', async message => {
 
     message.reply({ embeds: [embed] });
 
-    // Optional logging
     console.log(`User ${message.author.tag} scavenged and found ${artefact} (${result.name}) worth $${result.value}`);
   }
 });
