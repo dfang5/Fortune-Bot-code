@@ -1,0 +1,14 @@
+// Load cooldowns
+let cooldowns = {};
+try {
+  const rawCooldowns = fs.readFileSync('cooldowns.json');
+  cooldowns = JSON.parse(rawCooldowns);
+} catch (err) {
+  console.log('No existing cooldowns.json file. A new one will be created.');
+  cooldowns = {};
+}
+
+// Save cooldowns whenever updated
+function saveCooldowns() {
+  fs.writeFileSync('cooldowns.json', JSON.stringify(cooldowns, null, 2));
+}
