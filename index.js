@@ -1,8 +1,53 @@
+const fs = require('fs');
+const path = require('path');
 const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder } = require('discord.js');
 require('dotenv').config();
 
 const token = process.env.DISCORD_BOT_TOKEN;
 const clientId = process.env.DISCORD_CLIENT_ID;
+
+const DATA_FILE = path.join(__dirname, 'data.json');
+const COOLDOWN_FILE = path.join(__dirname, 'cooldowns.json');
+
+// --- Load Persistent User Data ---
+let userData = {};
+if (fs.existsSync(DATA_FILE)) {
+  try {
+    const rawData = fs.readFileSync(DATA_FILE);
+    userData = JSON.parse(rawData);
+  } catch (error) {
+    console.error('Failed to load user data:', error);
+  }
+}
+
+// --- Load Persistent Cooldowns ---
+let cooldowns = { scavenge: {}, labor: {} };
+if (fs.existsSync(COOLDOWN_FILE)) {
+  try {
+    const rawCooldowns = fs.readFileSync(COOLDOWN_FILE);
+    cooldowns = JSON.parse(rawCooldowns);
+  } catch (error) {
+    console.error('Failed to load cooldowns:', error);
+  }
+}
+
+// --- Save User Data to File ---
+function saveUserData() {
+  try {
+    fs.writeFileSync(DATA_FILE, JSON.stringify(userData, null, 2));
+  } catch (error) {
+    console.error('Failed to save user data:', error);
+  }
+}
+
+// --- Save Cooldowns to File ---
+function saveCooldowns() {
+  try {
+    fs.writeFileSync(COOLDOWN_FILE, JSON.stringify(cooldowns, null, 2));
+  } catch (error) {
+    console.error('Failed to save cooldowns:', error);
+  }
+}
 
 const client = new Client({
   intents: [
@@ -12,20 +57,16 @@ const client = new Client({
   ]
 });
 
-// --- Slash Command /info Registration ---
+// --- Register Slash Command /info ---
 const infoCommand = new SlashCommandBuilder()
   .setName('info')
   .setDescription('Shows general info about the bot.');
 
 const rest = new REST({ version: '10' }).setToken(token);
-
 (async () => {
   try {
     console.log('Registering slash command /info...');
-    await rest.put(
-      Routes.applicationCommands(clientId),
-      { body: [infoCommand.toJSON()] },
-    );
+    await rest.put(Routes.applicationCommands(clientId), { body: [infoCommand.toJSON()] });
     console.log('Slash command /info registered successfully.');
   } catch (error) {
     console.error('Failed to register command:', error);
@@ -40,19 +81,17 @@ client.on('interactionCreate', async interaction => {
     const infoMessage = `
 \`\`\`
 Welcome to Fortune Bot, where you build your fortune in the form of virtual currency, collect rare artefacts, items, and equipment, trade with other players, and live in a world empowered by your own decisions! 
-
-Commands: /info (this shows general info about the bot, and triggers the prompt you are seeing now.)
+Slash [/] Commands:
+/info (this shows general info about the bot.)
+Prefix [!] Commands:
+!scavenge, !labor, !inventory
 \`\`\`
     `;
     await interaction.reply(infoMessage.trim());
   }
 });
 
-// --- Inventory and Cooldowns Setup ---
-const userData = new Map(); // Stores userId -> { cash, artefacts: [] }
-const scavengeCooldowns = new Map();
-const laborCooldowns = new Map();
-
+// --- Cooldown Timers ---
 const SCAVENGE_COOLDOWN = 2 * 60 * 60 * 1000; // 2 hours
 const LABOR_COOLDOWN = 40 * 60 * 1000;        // 40 minutes
 
@@ -62,21 +101,25 @@ client.on('messageCreate', async message => {
   const userId = message.author.id;
   const content = message.content.toLowerCase();
 
+  if (!userData[userId]) {
+    userData[userId] = { cash: 0, artefacts: [] };
+  }
+
   // --- !scavenge Command ---
   if (content === '!scavenge') {
     const now = Date.now();
-    const lastScavenge = scavengeCooldowns.get(userId);
+    const lastScavenge = cooldowns.scavenge[userId] || 0;
 
-    if (lastScavenge && (now - lastScavenge < SCAVENGE_COOLDOWN)) {
+    if (now - lastScavenge < SCAVENGE_COOLDOWN) {
       const remaining = SCAVENGE_COOLDOWN - (now - lastScavenge);
       const hours = Math.floor(remaining / 3600000);
       const minutes = Math.floor((remaining % 3600000) / 60000);
       const seconds = Math.floor((remaining % 60000) / 1000);
-
       return message.reply(`You cannot scavenge yet. You must wait another **${hours}h ${minutes}m ${seconds}s**.`);
     }
 
-    scavengeCooldowns.set(userId, now);
+    cooldowns.scavenge[userId] = now;
+    saveCooldowns();
 
     const rarities = [
       { name: 'Common', chance: 75, color: 0xAAAAAA, value: 100, items: ['Quartz', 'Mica', 'Olivine'] },
@@ -89,7 +132,6 @@ client.on('messageCreate', async message => {
     const roll = Math.random() * 100;
     let cumulative = 0;
     let result;
-
     for (const rarity of rarities) {
       cumulative += rarity.chance;
       if (roll <= cumulative) {
@@ -97,56 +139,45 @@ client.on('messageCreate', async message => {
         break;
       }
     }
-
     if (!result) result = rarities[0];
 
     const artefact = result.items[Math.floor(Math.random() * result.items.length)];
+    userData[userId].cash += result.value;
+    userData[userId].artefacts.push(artefact);
+    saveUserData();
 
     const embed = new EmbedBuilder()
       .setDescription(`You have found a **${artefact}**!`)
       .setColor(result.color);
 
-    message.reply({ embeds: [embed] });
-
-    if (!userData.has(userId)) {
-      userData.set(userId, { cash: 0, artefacts: [] });
-    }
-    const user = userData.get(userId);
-    user.cash += result.value;
-    user.artefacts.push(artefact);
+    return message.reply({ embeds: [embed] });
   }
 
   // --- !labor Command ---
   else if (content === '!labor') {
     const now = Date.now();
-    const lastLabor = laborCooldowns.get(userId);
+    const lastLabor = cooldowns.labor[userId] || 0;
 
-    if (lastLabor && (now - lastLabor < LABOR_COOLDOWN)) {
+    if (now - lastLabor < LABOR_COOLDOWN) {
       const remaining = LABOR_COOLDOWN - (now - lastLabor);
       const minutes = Math.floor(remaining / 60000);
       const seconds = Math.floor((remaining % 60000) / 1000);
       return message.reply(`You must wait **${minutes}m ${seconds}s** before laboring again.`);
     }
 
-    laborCooldowns.set(userId, now);
+    cooldowns.labor[userId] = now;
+    saveCooldowns();
 
     const earned = Math.floor(Math.random() * (400 - 50 + 1)) + 50;
+    userData[userId].cash += earned;
+    saveUserData();
 
-    if (!userData.has(userId)) {
-      userData.set(userId, { cash: 0, artefacts: [] });
-    }
-    userData.get(userId).cash += earned;
-
-    message.reply(`You have earned **$${earned}** from labor!`);
+    return message.reply(`You have earned **$${earned}** from labor!`);
   }
 
   // --- !inventory Command ---
   else if (content === '!inventory') {
-    if (!userData.has(userId)) {
-      return message.reply('You have nothing in your inventory yet.');
-    }
-
-    const user = userData.get(userId);
+    const user = userData[userId];
     const artefactList = user.artefacts.length > 0 ? user.artefacts.join(', ') : 'None';
 
     const embed = new EmbedBuilder()
@@ -157,7 +188,7 @@ client.on('messageCreate', async message => {
       )
       .setColor(0x00AAFF);
 
-    message.reply({ embeds: [embed] });
+    return message.reply({ embeds: [embed] });
   }
 });
 
