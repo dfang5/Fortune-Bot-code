@@ -33,11 +33,11 @@ function saveCooldowns() { fs.writeFileSync(COOLDOWN_FILE, JSON.stringify(cooldo
 
 // Rarity and artefact config
 const rarities = [
-  { name:'Common', chance:75, color:0xAAAAAA, value:100, sell:150, items:['Quartz','Mica','Olivine'] },
-  { name:'Uncommon', chance:18, color:0x00FF00, value:700, sell:550, items:['Garnet','Talc','Magnetite'] },
-  { name:'Rare', chance:5, color:0x00008B, value:2500, sell:1500, items:['Eye of Monazite','Chest of Xenotime','Euxenite'] },
-  { name:'Legendary', chance:2.9, color:0xFFD700, value:10000, sell:10000, items:['Watch of Scandium','Statue of Bastnasite','Allanite'] },
-  { name:'Unknown', chance:0.1, color:0x000000, value:1000000, sell:1000000, items:['Gem of Diamond','Kyawthuite'] }
+  { name:'Common', chance:65, color:0xAAAAAA, value:100, sell:150, items:['Quartz','Mica','Olivine'] },
+  { name:'Uncommon', chance:20, color:0x00FF00, value:700, sell:550, items:['Garnet','Talc','Magnetite'] },
+  { name:'Rare', chance:10, color:0x00008B, value:2500, sell:1500, items:['Eye of Monazite','Chest of Xenotime','Euxenite'] },
+  { name:'Legendary', chance:4, color:0xFFD700, value:10000, sell:10000, items:['Watch of Scandium','Statue of Bastnasite','Allanite'] },
+  { name:'Unknown', chance:1, color:0x000000, value:1000000, sell:1000000, items:['Gem of Diamond','Kyawthuite'] }
 ];
 function getRarityByArtefact(name) { return rarities.find(r => r.items.includes(name)); }
 
@@ -97,11 +97,11 @@ client.on('interactionCreate', async interaction => {
       {
         name: '🏆 Rarity Levels',
         value: [
-          '⚪ **Common** (75%) - $100-150',
-          '🟢 **Uncommon** (18%) - $550-700', 
-          '🔵 **Rare** (5%) - $1,500-2,500',
-          '🟡 **Legendary** (2.9%) - $10,000',
-          '⚫ **Unknown** (0.1%) - $1,000,000'
+          '⚪ **Common** (65%) - $100-150',
+          '🟢 **Uncommon** (20%) - $550-700', 
+          '🔵 **Rare** (10%) - $1,500-2,500',
+          '🟡 **Legendary** (4%) - $10,000',
+          '⚫ **Unknown** (1%) - $1,000,000'
         ].join('\n'),
         inline: false
       }
@@ -202,14 +202,14 @@ function createTradeInterfaceEmbed(trade, fromUserName, toUserName) {
         inline: true
       },
       {
-        name: '🎯 Quick Actions',
-        value: '🎒 Add artefacts from your inventory\n💵 Add money to sweeten the deal\n✅ Confirm when both sides are ready',
+        name: '🎯 Quick Actions:',
+        value: '🎒 Add artefacts from your inventory\n💵 Add money to sweeten the deal\n✅ Confirm when both sides are ready.',
         inline: false
       }
     )
     .setColor(0xFFD700)
     .setThumbnail('https://cdn.discordapp.com/emojis/741713906411708517.png')
-    .setFooter({ text: '⚠️ Both players must confirm to complete the trade' })
+    .setFooter({ text: '⚠️ Both players must confirm to complete the trade.' })
     .setTimestamp();
 }
 
@@ -263,7 +263,7 @@ client.on('messageCreate', async message => {
     const roll = Math.random() * 100; let cum = 0, res = rarities[0];
     for (const r of rarities) { cum += r.chance; if (roll <= cum) { res = r; break; } }
     const art = res.items[Math.floor(Math.random()*res.items.length)];
-    userData[userId].cash += res.value; userData[userId].artefacts.push(art); saveUserData();
+    userData[userId].artefacts.push(art); saveUserData();
     const embed = new EmbedBuilder().setDescription(`You have found a **${art}**! [${res.name}, ${res.chance}%]`).setColor(res.color);
     return message.reply({ embeds: [embed] });
   }
@@ -361,7 +361,7 @@ client.on('interactionCreate', async interaction => {
 
     if (action === 'trade') {
       let tradeId, userId, subaction;
-      
+
       // Parse different button structures
       if (parts[1] === 'accept' || parts[1] === 'decline') {
         // trade_accept_tradeId or trade_decline_tradeId
@@ -429,16 +429,17 @@ client.on('interactionCreate', async interaction => {
           return interaction.reply({ content: '❌ You have no available artefacts to add.', flags: 64 });
         }
 
-        const options = availableArtefacts.slice(0, 25).map(art => {
+        const options = availableArtefacts.slice(0, 25).map((art, index) => {
           const rarity = getRarityByArtefact(art);
           const rarityEmoji = rarity ? 
             (rarity.name === 'Common' ? '⚪' : 
              rarity.name === 'Uncommon' ? '🟢' : 
              rarity.name === 'Rare' ? '🔵' : 
              rarity.name === 'Legendary' ? '🟡' : '⚫') : '❓';
+
           return {
             label: `${art} (${rarity ? rarity.name : 'Unknown'})`,
-            value: art,
+            value: `${art}_${index}`,  // 👈 Ensure uniqueness
             emoji: rarityEmoji,
             description: `Value: $${rarity ? rarity.value.toLocaleString() : '???'}`
           };
@@ -561,7 +562,7 @@ client.on('interactionCreate', async interaction => {
         if (idx > -1) userData[userId].artefacts.splice(idx, 1);
         userData[userId].cash += price;
         saveUserData();
-        
+
         const successEmbed = new EmbedBuilder()
           .setTitle('✅ Sale Completed!')
           .setDescription(`You successfully sold **${selArt}** for **$${price.toLocaleString()}**!`)
@@ -569,14 +570,14 @@ client.on('interactionCreate', async interaction => {
             { name: '💰 Current Cash', value: `$${userData[userId].cash.toLocaleString()}`, inline: true }
           )
           .setColor(0x00FF00);
-          
+
         await interaction.update({ content: null, embeds: [successEmbed], components: [] });
       } else {
         const cancelEmbed = new EmbedBuilder()
           .setTitle('❌ Sale Cancelled')
           .setDescription('You cancelled the transaction.')
           .setColor(0xFF0000);
-          
+
         await interaction.update({ content: null, embeds: [cancelEmbed], components: [] });
       }
     }
@@ -591,7 +592,7 @@ client.on('interactionCreate', async interaction => {
       const trade = activeTrades[tradeId];
       if (!trade || trade.status !== 'open') return interaction.reply({ content: 'Trade not active.', flags: 64 });
 
-      const selectedArtefact = interaction.values[0];
+      const selectedArtefact = interaction.values[0].split('_')[0];
 
       if (!trade.offers[userId]) trade.offers[userId] = { cash: 0, artefacts: [] };
       trade.offers[userId].artefacts.push(selectedArtefact);
@@ -623,13 +624,13 @@ client.on('interactionCreate', async interaction => {
       const selArt = interaction.values[0];
       const rar = getRarityByArtefact(selArt);
       const price = rar ? rar.sell : 0;
-      
+
       const rarityEmoji = rar ? 
         (rar.name === 'Common' ? '⚪' : 
          rar.name === 'Uncommon' ? '🟢' : 
          rar.name === 'Rare' ? '🔵' : 
          rar.name === 'Legendary' ? '🟡' : '⚫') : '❓';
-      
+
       const confirmEmbed = new EmbedBuilder()
         .setTitle('💰 Confirm Sale')
         .setDescription(`${rarityEmoji} **${selArt}** - ${rar ? rar.name : 'Unknown'} Rarity`)
@@ -640,12 +641,12 @@ client.on('interactionCreate', async interaction => {
         )
         .setColor(rar ? rar.color : 0xAAAAAA)
         .setFooter({ text: 'This action cannot be undone!' });
-      
+
       const confirmRow = new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId(`sell_yes_${userId}_${selArt}`).setLabel('Confirm Sale').setStyle(ButtonStyle.Success).setEmoji('✅'),
         new ButtonBuilder().setCustomId(`sell_no_${userId}_${selArt}`).setLabel('Cancel').setStyle(ButtonStyle.Danger).setEmoji('❌')
       );
-      
+
       await interaction.update({ content: null, embeds: [confirmEmbed], components: [confirmRow] });
     }
   }
