@@ -82,7 +82,8 @@ client.on('interactionCreate', async interaction => {
           '`!labor` - Work to earn money (40min cooldown)',
           '`!inventory` - View your cash and artefacts',
           '`!sell` - Sell your artefacts for cash',
-          '`!trade @user` - Start a trade with another user'
+          '`!trade @user` - Start a trade with another user',
+          '`!leaderboard (or lb) - View the leaderboard and your current rating'
         ].join('\n'),
         inline: false
       },
