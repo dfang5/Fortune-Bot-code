@@ -24,11 +24,48 @@ const DATA_FILE = path.join(__dirname, 'data.json');
 const COOLDOWN_FILE = path.join(__dirname, 'cooldowns.json');
 
 // Load persistent data
-let userData = fs.existsSync(DATA_FILE) ? JSON.parse(fs.readFileSync(DATA_FILE)) : {};
+let userData;
+
+if (fs.existsSync(DATA_FILE)) {
+  const raw = fs.readFileSync(DATA_FILE, 'utf8');
+  try {
+    userData = JSON.parse(raw);
+  } catch (err) {
+    console.error('Corrupt data.json:', err);
+    userData = {};
+  }
+} else {
+  // Try to restore from backup
+  const backupsDir = path.join(__dirname, 'backups');
+  const backups = fs.existsSync(backupsDir)
+    ? fs.readdirSync(backupsDir).filter(name => name.startsWith('data-backup-')).sort().reverse()
+    : [];
+
+  if (backups.length > 0) {
+    const latestBackup = path.join(backupsDir, backups[0]);
+    console.warn(`⚠️ Restoring userData from backup: ${latestBackup}`);
+    userData = JSON.parse(fs.readFileSync(latestBackup));
+    fs.writeFileSync(DATA_FILE, JSON.stringify(userData, null, 2));
+  } else {
+    console.warn('🚨 No backup found. Starting fresh.');
+    userData = {};
+  }
+}
 let cooldowns = fs.existsSync(COOLDOWN_FILE) ? JSON.parse(fs.readFileSync(COOLDOWN_FILE)) : { scavenge: {}, labor: {} };
 
 // Save functions
-function saveUserData() { fs.writeFileSync(DATA_FILE, JSON.stringify(userData, null, 2)); }
+function saveUserData() {
+  if (Object.keys(userData).length === 0) {
+    console.warn('❌ Refusing to save empty userData.');
+    return;
+  }
+
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const backupPath = path.join(__dirname, 'backups', `data-backup-${timestamp}.json`);
+
+  fs.copyFileSync(DATA_FILE, backupPath);
+  fs.writeFileSync(DATA_FILE, JSON.stringify(userData, null, 2));
+}
 function saveCooldowns() { fs.writeFileSync(COOLDOWN_FILE, JSON.stringify(cooldowns, null, 2)); }
 
 // Rarity and artefact config
@@ -82,8 +119,7 @@ client.on('interactionCreate', async interaction => {
           '`!labor` - Work to earn money (40min cooldown)',
           '`!inventory` - View your cash and artefacts',
           '`!sell` - Sell your artefacts for cash',
-          '`!trade @user` - Start a trade with another user',
-          '`!leaderboard (or lb) - View the leaderboard and your current rating'
+          '`!trade @user` - Start a trade with another user'
         ].join('\n'),
         inline: false
       },
@@ -335,14 +371,44 @@ client.on('messageCreate', async message => {
   // !inventory
   if (content === '!inventory') {
     const ud = userData[userId];
-    const artefactList = ud.artefacts.length ? ud.artefacts.join(', ') : 'None';
+    if (!ud) return message.reply('❌ You have no inventory yet. Use !scavenge to start.');
+
+    const artefacts = ud.artefacts || [];
+    const cash = ud.cash || 0;
+
+    const artefactGroups = {};
+
+    for (const artefact of artefacts) {
+      const rarity = getRarityByArtefact(artefact)?.name || 'Unknown';
+      if (!artefactGroups[rarity]) artefactGroups[rarity] = {};
+      artefactGroups[rarity][artefact] = (artefactGroups[rarity][artefact] || 0) + 1;
+    }
+
+    const rarityOrder = ['Unknown', 'Legendary', 'Rare', 'Uncommon', 'Common'];
+    const rarityEmojis = {
+      Common: '⚪', Uncommon: '🟢', Rare: '🔵', Legendary: '🟡', Unknown: '⚫'
+    };
+
+    const artefactFieldValue = rarityOrder.map(rarity => {
+      if (!artefactGroups[rarity]) return null;
+      const emoji = rarityEmojis[rarity] || '❓';
+      const entries = Object.entries(artefactGroups[rarity])
+        .map(([name, count]) => `• **${name}** ×${count}`);
+      return `**${emoji} ${rarity}**\n${entries.join('\n')}`;
+    }).filter(Boolean).join('\n\n');
+
     const embed = new EmbedBuilder()
-      .setTitle(`${message.author.username}'s Inventory`)
+      .setTitle(`🎒 ${message.author.username}'s Inventory`)
+      .setThumbnail('https://cdn.discordapp.com/emojis/741713906411708517.png')
       .addFields(
-        { name:'💰 Cash', value:`$${ud.cash}`, inline:true },
-        { name:'📦 Artefacts', value:artefactList, inline:false }
-      ).setColor(0x00AAFF);
-    return message.reply({ embeds:[embed] });
+        { name: '💰 Cash Balance', value: `$${cash.toLocaleString()}`, inline: true },
+        { name: '📦 Artefacts', value: artefactFieldValue || 'None yet!', inline: false }
+      )
+      .setColor(0x00AAFF)
+      .setFooter({ text: 'Keep scavenging to expand your fortune!' })
+      .setTimestamp();
+
+    return message.reply({ embeds: [embed] });
   }
 
   // !sell
