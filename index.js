@@ -243,14 +243,52 @@ function createTradeControls(tradeId, userId, isReady = false) {
     )
   ];
 }
+//leaderboard helper code (nihaoo read this)
+function showLeaderboardPage(message, page) {
+  const users = Object.entries(userData)
+    .filter(([id, data]) => data.cash !== undefined)
+    .sort((a, b) => b[1].cash - a[1].cash);
 
+  const totalPages = Math.ceil(users.length / 10);
+  const start = page * 10;
+  const current = users.slice(start, start + 10);
+
+  const leaderboardEmbed = new EmbedBuilder()
+    .setTitle('💰 Top Fortune Holders')
+    .setDescription(current.map(([id, data], i) => {
+      const rank = start + i + 1;
+      return `**${rank}.** <@${id}> — $${data.cash.toLocaleString()}`;
+    }).join('\n') || 'No players yet!')
+    .setFooter({ text: `Page ${page + 1} of ${totalPages}` })
+    .setColor(0xFFD700);
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`leaderboard_prev_${page}`)
+      .setLabel('⬅️ Prev')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(page === 0),
+    new ButtonBuilder()
+      .setCustomId(`leaderboard_next_${page}`)
+      .setLabel('➡️ Next')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(page >= totalPages - 1)
+  );
+
+  return message.channel.send({ embeds: [leaderboardEmbed], components: [row] });
+}
 client.on('messageCreate', async message => {
   if (message.author.bot) return;
   const userId = message.author.id;
   const content = message.content.toLowerCase();
 
   if (!userData[userId]) userData[userId] = { cash:0, artefacts:[] };
-
+ 
+  // !leaderboard or !lb
+  if (content === '!leaderboard' || content === '!lb') {
+    return showLeaderboardPage(message, 0);
+  }
+  
   // !scavenge
   if (content === '!scavenge') {
     const now = Date.now(), last = cooldowns.scavenge[userId] || 0;
@@ -292,7 +330,7 @@ client.on('messageCreate', async message => {
 
     return message.reply(`You have earned **$${earned}** from labor! (Previous: $${previousCash}, New: $${userData[userId].cash})`);
   }
-  
+
   // !inventory
   if (content === '!inventory') {
     const ud = userData[userId];
@@ -353,7 +391,16 @@ client.on('messageCreate', async message => {
 // Enhanced Button and Interaction Logic
 client.on('interactionCreate', async interaction => {
   if (!interaction.isButton() && !interaction.isStringSelectMenu() && !interaction.isModalSubmit()) return;
+  // Leaderboard pagination
+  if (interaction.isButton() && interaction.customId.startsWith('leaderboard_')) {
+    const [ , direction, pageStr ] = interaction.customId.split('_');
+    const page = parseInt(pageStr, 10);
+    const newPage = direction === 'next' ? page + 1 : page - 1;
 
+    await interaction.deferUpdate();
+    await interaction.message.delete(); // Remove old page
+    showLeaderboardPage(interaction.message, newPage);
+  }
   // Handle Trade Buttons
   if (interaction.isButton()) {
     const parts = interaction.customId.split('_');
