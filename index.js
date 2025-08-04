@@ -292,7 +292,6 @@ client.on('messageCreate', async message => {
 
     return message.reply(`You have earned **$${earned}** from labor! (Previous: $${previousCash}, New: $${userData[userId].cash})`);
   }
-  //!leaderboard (or !lb):
   
   // !inventory
   if (content === '!inventory') {
