@@ -115,19 +115,19 @@ client.on('interactionCreate', async interaction => {
       {
         name: '🎮 Game Commands',
         value: [
-          '`!scavenge` - Search for rare artefacts (2h cooldown)',
-          '`!labor` - Work to earn money (40min cooldown)',
-          '`!inventory` - View your cash and artefacts',
-          '`!sell` - Sell your artefacts for cash',
-          '`!trade @user` - Start a trade with another user'
+          '`+scavenge` - Search for rare artefacts (2h cooldown)',
+          '`+labor` - Work to earn money (40min cooldown)',
+          '`+inventory` - View your cash and artefacts',
+          '`+sell` - Sell your artefacts for cash',
+          '`+trade @user` - Start a trade with another user'
         ].join('\n'),
         inline: false
       },
       {
         name: '💰 Trading System',
         value: [
-          '`!add artefact` - Add artefacts to active trade',
-          '`!add money <amount>` - Add cash to active trade'
+          '`add artefact (Button in UI)` - Add artefacts to active trade',
+          '`add money <amount> (Button in UI)` - Add cash to active trade'
         ].join('\n'),
         inline: false
       },
@@ -322,12 +322,12 @@ client.on('messageCreate', async message => {
   if (!userData[userId]) userData[userId] = { cash:0, artefacts:[] };
  
   // !leaderboard or !lb
-  if (content === '!leaderboard' || content === '!lb') {
+  if (content === '+leaderboard' || content === '+lb') {
     return showLeaderboardPage(message, 0);
   }
   
   // !scavenge
-  if (content === '!scavenge') {
+  if (content === '+scavenge') {
     const now = Date.now(), last = cooldowns.scavenge[userId] || 0;
     if (now - last < SCAVENGE_COOLDOWN) {
       const rem = SCAVENGE_COOLDOWN - (now - last);
@@ -344,7 +344,7 @@ client.on('messageCreate', async message => {
   }
 
   // !labor - Fixed to ensure exact amount is added
-  if (content === '!labor') {
+  if (content === '+labor') {
     const now = Date.now(), last = cooldowns.labor[userId] || 0;
     if (now - last < LABOR_COOLDOWN) {
       const rem = LABOR_COOLDOWN - (now - last);
@@ -369,7 +369,7 @@ client.on('messageCreate', async message => {
   }
 
   // !inventory
-  if (content === '!inventory') {
+  if (content === '+inventory') {
     const ud = userData[userId];
     if (!ud) return message.reply('❌ You have no inventory yet. Use !scavenge to start.');
 
@@ -412,7 +412,7 @@ client.on('messageCreate', async message => {
   }
 
   // !sell
-  if (content === '!sell') {
+  if (content === '+sell') {
     const arts = userData[userId].artefacts;
     if (!arts.length) return message.reply('You have no artefacts. Use !scavenge to get one!');
     const opts = [...new Set(arts)].map(item=>({ label:item, value:item }));
@@ -422,7 +422,7 @@ client.on('messageCreate', async message => {
   }
 
   // !trade @user - Enhanced with new UI
-  if (content.startsWith('!trade ')) {
+  if (content.startsWith('+trade ')) {
     const mentioned = message.mentions.users.first();
     if (!mentioned || mentioned.id === userId) return message.reply('Mention someone to trade with.');
 
