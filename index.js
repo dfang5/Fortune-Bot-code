@@ -73,8 +73,8 @@ const rarities = [
   { name:'Common', chance:65, color:0xAAAAAA, value:100, sell:150, items:['Quartz','Mica','Olivine'] },
   { name:'Uncommon', chance:20, color:0x00FF00, value:700, sell:550, items:['Garnet','Talc','Magnetite'] },
   { name:'Rare', chance:10, color:0x00008B, value:2500, sell:1500, items:['Eye of Monazite','Chest of Xenotime','Euxenite'] },
-  { name:'Legendary', chance:4, color:0xFFD700, value:10000, sell:10000, items:['Watch of Scandium','Statue of Bastnasite','Allanite'] },
-  { name:'Unknown', chance:1, color:0x000000, value:1000000, sell:1000000, items:['Gem of Diamond','Kyawthuite'] }
+  { name:'Legendary', chance:4, color:0xFFD700, value:5000, sell:5000, items:['Watch of Scandium','Statue of Bastnasite','Allanite'] },
+  { name:'Unknown', chance:1, color:0x000000, value:15000, sell:15000, items:['Gem of Diamond','Kyawthuite'] }
 ];
 function getRarityByArtefact(name) { return rarities.find(r => r.items.includes(name)); }
 
@@ -137,8 +137,8 @@ client.on('interactionCreate', async interaction => {
           '⚪ **Common** (65%) - $100-150',
           '🟢 **Uncommon** (20%) - $550-700', 
           '🔵 **Rare** (10%) - $1,500-2,500',
-          '🟡 **Legendary** (4%) - $10,000',
-          '⚫ **Unknown** (1%) - $1,000,000'
+          '🟡 **Legendary** (4%) - $5000-6000',
+          '⚫ **Unknown** (1%) - $15,000-20,000'
         ].join('\n'),
         inline: false
       }
