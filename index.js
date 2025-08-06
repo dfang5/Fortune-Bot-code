@@ -24,48 +24,11 @@ const DATA_FILE = path.join(__dirname, 'data.json');
 const COOLDOWN_FILE = path.join(__dirname, 'cooldowns.json');
 
 // Load persistent data
-let userData;
-
-if (fs.existsSync(DATA_FILE)) {
-  const raw = fs.readFileSync(DATA_FILE, 'utf8');
-  try {
-    userData = JSON.parse(raw);
-  } catch (err) {
-    console.error('Corrupt data.json:', err);
-    userData = {};
-  }
-} else {
-  // Try to restore from backup
-  const backupsDir = path.join(__dirname, 'backups');
-  const backups = fs.existsSync(backupsDir)
-    ? fs.readdirSync(backupsDir).filter(name => name.startsWith('data-backup-')).sort().reverse()
-    : [];
-
-  if (backups.length > 0) {
-    const latestBackup = path.join(backupsDir, backups[0]);
-    console.warn(`⚠️ Restoring userData from backup: ${latestBackup}`);
-    userData = JSON.parse(fs.readFileSync(latestBackup));
-    fs.writeFileSync(DATA_FILE, JSON.stringify(userData, null, 2));
-  } else {
-    console.warn('🚨 No backup found. Starting fresh.');
-    userData = {};
-  }
-}
+let userData = fs.existsSync(DATA_FILE) ? JSON.parse(fs.readFileSync(DATA_FILE)) : {};
 let cooldowns = fs.existsSync(COOLDOWN_FILE) ? JSON.parse(fs.readFileSync(COOLDOWN_FILE)) : { scavenge: {}, labor: {} };
 
 // Save functions
-function saveUserData() {
-  if (Object.keys(userData).length === 0) {
-    console.warn('❌ Refusing to save empty userData.');
-    return;
-  }
-
-  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const backupPath = path.join(__dirname, 'backups', `data-backup-${timestamp}.json`);
-
-  fs.copyFileSync(DATA_FILE, backupPath);
-  fs.writeFileSync(DATA_FILE, JSON.stringify(userData, null, 2));
-}
+function saveUserData() { fs.writeFileSync(DATA_FILE, JSON.stringify(userData, null, 2)); }
 function saveCooldowns() { fs.writeFileSync(COOLDOWN_FILE, JSON.stringify(cooldowns, null, 2)); }
 
 // Rarity and artefact config
@@ -73,8 +36,8 @@ const rarities = [
   { name:'Common', chance:65, color:0xAAAAAA, value:100, sell:150, items:['Quartz','Mica','Olivine'] },
   { name:'Uncommon', chance:20, color:0x00FF00, value:700, sell:550, items:['Garnet','Talc','Magnetite'] },
   { name:'Rare', chance:10, color:0x00008B, value:2500, sell:1500, items:['Eye of Monazite','Chest of Xenotime','Euxenite'] },
-  { name:'Legendary', chance:4, color:0xFFD700, value:5000, sell:5000, items:['Watch of Scandium','Statue of Bastnasite','Allanite'] },
-  { name:'Unknown', chance:1, color:0x000000, value:15000, sell:15000, items:['Gem of Diamond','Kyawthuite'] }
+  { name:'Legendary', chance:4, color:0xFFD700, value:10000, sell:10000, items:['Watch of Scandium','Statue of Bastnasite','Allanite'] },
+  { name:'Unknown', chance:1, color:0x000000, value:1000000, sell:1000000, items:['Gem of Diamond','Kyawthuite'] }
 ];
 function getRarityByArtefact(name) { return rarities.find(r => r.items.includes(name)); }
 
@@ -119,15 +82,16 @@ client.on('interactionCreate', async interaction => {
           '`!labor` - Work to earn money (40min cooldown)',
           '`!inventory` - View your cash and artefacts',
           '`!sell` - Sell your artefacts for cash',
-          '`!trade @user` - Start a trade with another user'
+          '`!trade @user` - Start a trade with another user',
+          '`!leaderboard (or lb) - View the leaderboard and your current rating'
         ].join('\n'),
         inline: false
       },
       {
         name: '💰 Trading System',
         value: [
-          '`add artefact (Button in UI)` - Add artefacts to active trade',
-          '`add money <amount> (Button in UI)` - Add cash to active trade'
+          '`!add artefact` - Add artefacts to active trade',
+          '`!add money <amount>` - Add cash to active trade'
         ].join('\n'),
         inline: false
       },
@@ -137,8 +101,8 @@ client.on('interactionCreate', async interaction => {
           '⚪ **Common** (65%) - $100-150',
           '🟢 **Uncommon** (20%) - $550-700', 
           '🔵 **Rare** (10%) - $1,500-2,500',
-          '🟡 **Legendary** (4%) - $5000-6000',
-          '⚫ **Unknown** (1%) - $15,000-20,000'
+          '🟡 **Legendary** (4%) - $10,000',
+          '⚫ **Unknown** (1%) - $1,000,000'
         ].join('\n'),
         inline: false
       }
@@ -322,7 +286,7 @@ client.on('messageCreate', async message => {
   if (!userData[userId]) userData[userId] = { cash:0, artefacts:[] };
  
   // !leaderboard or !lb
-  if (content === '+leaderboard' || content === '+lb') {
+  if (content === '!leaderboard' || content === '!lb') {
     return showLeaderboardPage(message, 0);
   }
   
@@ -371,44 +335,14 @@ client.on('messageCreate', async message => {
   // !inventory
   if (content === '!inventory') {
     const ud = userData[userId];
-    if (!ud) return message.reply('❌ You have no inventory yet. Use !scavenge to start.');
-
-    const artefacts = ud.artefacts || [];
-    const cash = ud.cash || 0;
-
-    const artefactGroups = {};
-
-    for (const artefact of artefacts) {
-      const rarity = getRarityByArtefact(artefact)?.name || 'Unknown';
-      if (!artefactGroups[rarity]) artefactGroups[rarity] = {};
-      artefactGroups[rarity][artefact] = (artefactGroups[rarity][artefact] || 0) + 1;
-    }
-
-    const rarityOrder = ['Unknown', 'Legendary', 'Rare', 'Uncommon', 'Common'];
-    const rarityEmojis = {
-      Common: '⚪', Uncommon: '🟢', Rare: '🔵', Legendary: '🟡', Unknown: '⚫'
-    };
-
-    const artefactFieldValue = rarityOrder.map(rarity => {
-      if (!artefactGroups[rarity]) return null;
-      const emoji = rarityEmojis[rarity] || '❓';
-      const entries = Object.entries(artefactGroups[rarity])
-        .map(([name, count]) => `• **${name}** ×${count}`);
-      return `**${emoji} ${rarity}**\n${entries.join('\n')}`;
-    }).filter(Boolean).join('\n\n');
-
+    const artefactList = ud.artefacts.length ? ud.artefacts.join(', ') : 'None';
     const embed = new EmbedBuilder()
-      .setTitle(`🎒 ${message.author.username}'s Inventory`)
-      .setThumbnail('https://cdn.discordapp.com/emojis/741713906411708517.png')
+      .setTitle(`${message.author.username}'s Inventory`)
       .addFields(
-        { name: '💰 Cash Balance', value: `$${cash.toLocaleString()}`, inline: true },
-        { name: '📦 Artefacts', value: artefactFieldValue || 'None yet!', inline: false }
-      )
-      .setColor(0x00AAFF)
-      .setFooter({ text: 'Keep scavenging to expand your fortune!' })
-      .setTimestamp();
-
-    return message.reply({ embeds: [embed] });
+        { name:'💰 Cash', value:`$${ud.cash}`, inline:true },
+        { name:'📦 Artefacts', value:artefactList, inline:false }
+      ).setColor(0x00AAFF);
+    return message.reply({ embeds:[embed] });
   }
 
   // !sell
@@ -422,7 +356,7 @@ client.on('messageCreate', async message => {
   }
 
   // !trade @user - Enhanced with new UI
-  if (content.startsWith('!trade')) {
+  if (content.startsWith('!trade ')) {
     const mentioned = message.mentions.users.first();
     if (!mentioned || mentioned.id === userId) return message.reply('Mention someone to trade with.');
 
