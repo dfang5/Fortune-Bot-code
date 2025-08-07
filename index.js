@@ -327,14 +327,15 @@ client.on('messageCreate', async message => {
     const row2 = new ActionRowBuilder().addComponents(valueInput);
     const row3 = new ActionRowBuilder().addComponents(descInput);
 
-    await message.channel.send({ content: '📝 Check your DM to complete the item creation!' });
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`trigger_modal_add_item_${message.author.id}`)
+        .setLabel('📦 Create Item Now')
+        .setStyle(ButtonStyle.Primary)
+    );
+
     await message.author.send({ content: '👋 Let’s create your custom item...' });
-    await message.author.send({ content: '✍️ Fill out the form below to create your item:' });
-
-    // Optional: Notify in DM that the modal is being prepared
-    await message.author.send({ content: 'Please wait while your item modal is prepared...' });
-
-      message.client.emit('modalTrigger', message, modal);
+    await message.author.send({ content: '✍️ Click the button below to fill out the item form:', components: [row] });
   }
     
   // !view-items
@@ -510,6 +511,46 @@ client.on('messageCreate', async message => {
       await interaction.message.delete(); // Remove old page
       showLeaderboardPage(interaction.message, newPage);
     }
+    // Modal Builder
+    if (interaction.isButton() && interaction.customId.startsWith('trigger_modal_add_item_')) {
+      const userId = interaction.customId.split('_').pop();
+      if (interaction.user.id !== userId) {
+        return interaction.reply({ content: '❌ This button is not for you.', ephemeral: true });
+      }
+
+      const modal = new ModalBuilder()
+        .setCustomId(`modal_add_item_${userId}`)
+        .setTitle('📦 Add New Item')
+        .addComponents(
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder()
+              .setCustomId('item_name')
+              .setLabel('Item Name')
+              .setStyle(TextInputStyle.Short)
+              .setRequired(true)
+              .setPlaceholder('Ex: Sword of Luck')
+          ),
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder()
+              .setCustomId('item_value')
+              .setLabel('Item Value ($)')
+              .setStyle(TextInputStyle.Short)
+              .setRequired(true)
+              .setPlaceholder('Ex: 1000')
+          ),
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder()
+              .setCustomId('item_desc')
+              .setLabel('Description')
+              .setStyle(TextInputStyle.Paragraph)
+              .setRequired(false)
+              .setPlaceholder('Optional: Describe your item.')
+          )
+        );
+
+      await interaction.showModal(modal);
+    }
+    
     // Handle Trade Buttons
     if (interaction.isButton()) {
       const parts = interaction.customId.split('_');
@@ -837,7 +878,7 @@ client.on('messageCreate', async message => {
       }
     }
 
-    // Handle Modal Submissionshttps://replit.com/@spiritlessentit/Fortune-Bot-Code-official#index.js
+    // Handle Modal Submissions
     if (interaction.isModalSubmit()) {
       if (interaction.customId.startsWith('modal_add_item_')) {
         const userId = interaction.user.id;
