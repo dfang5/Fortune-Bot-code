@@ -17,7 +17,7 @@ const {
   ComponentType
 } = require('discord.js');
 require('dotenv').config();
-
+const DEVELOPER_ID = '1299875574894039184'; 
 const token = process.env.DISCORD_BOT_TOKEN;
 const clientId = process.env.DISCORD_CLIENT_ID;
 const DATA_FILE = path.join(__dirname, 'data.json');
@@ -27,6 +27,9 @@ const COOLDOWN_FILE = path.join(__dirname, 'cooldowns.json');
 let userData = fs.existsSync(DATA_FILE) ? JSON.parse(fs.readFileSync(DATA_FILE)) : {};
 let cooldowns = fs.existsSync(COOLDOWN_FILE) ? JSON.parse(fs.readFileSync(COOLDOWN_FILE)) : { scavenge: {}, labor: {} };
 
+if (!userData.guildItems) userData.guildItems = {}; // 🧠 Server-specific custom items
+global.tempItems = {}; // 💾 Store items awaiting confirmation
+
 // Save functions
 function saveUserData() { fs.writeFileSync(DATA_FILE, JSON.stringify(userData, null, 2)); }
 function saveCooldowns() { fs.writeFileSync(COOLDOWN_FILE, JSON.stringify(cooldowns, null, 2)); }
@@ -35,9 +38,9 @@ function saveCooldowns() { fs.writeFileSync(COOLDOWN_FILE, JSON.stringify(cooldo
 const rarities = [
   { name:'Common', chance:65, color:0xAAAAAA, value:100, sell:150, items:['Quartz','Mica','Olivine'] },
   { name:'Uncommon', chance:20, color:0x00FF00, value:700, sell:550, items:['Garnet','Talc','Magnetite'] },
-  { name:'Rare', chance:10, color:0x00008B, value:1500, sell:1500, items:['Eye of Monazite','Chest of Xenotime','Euxenite'] },
-  { name:'Legendary', chance:4, color:0xFFD700, value:5000, sell:5000, items:['Watch of Scandium','Statue of Bastnasite','Allanite'] },
-  { name:'Unknown', chance:1, color:0x000000, value:15000, sell:15000, items:['Gem of Diamond','Kyawthuite'] }
+  { name:'Rare', chance:10, color:0x00008B, value:2500, sell:1500, items:['Eye of Monazite','Chest of Xenotime','Euxenite'] },
+  { name:'Legendary', chance:4, color:0xFFD700, value:10000, sell:10000, items:['Watch of Scandium','Statue of Bastnasite','Allanite'] },
+  { name:'Unknown', chance:1, color:0x000000, value:1000000, sell:1000000, items:['Gem of Diamond','Kyawthuite'] }
 ];
 function getRarityByArtefact(name) { return rarities.find(r => r.items.includes(name)); }
 
@@ -101,8 +104,8 @@ client.on('interactionCreate', async interaction => {
           '⚪ **Common** (65%) - $100-150',
           '🟢 **Uncommon** (20%) - $550-700', 
           '🔵 **Rare** (10%) - $1,500-2,500',
-          '🟡 **Legendary** (4%) - $5,000',
-          '⚫ **Unknown** (1%) - $15,000'
+          '🟡 **Legendary** (4%) - $10,000',
+          '⚫ **Unknown** (1%) - $1,000,000'
         ].join('\n'),
         inline: false
       }
@@ -284,10 +287,110 @@ client.on('messageCreate', async message => {
   const content = message.content.toLowerCase();
 
   if (!userData[userId]) userData[userId] = { cash:0, artefacts:[] };
- 
+
   // !leaderboard or !lb
   if (content === '!leaderboard' || content === '!lb') {
     return showLeaderboardPage(message, 0);
+  }
+  
+  // !add-item (admin only)
+  if (content === '!add-item') {
+    if (!message.member.permissions.has('Administrator') && message.author.id !== DEVELOPER_ID) {
+      return message.reply('❌ You must be a server admin to use this command.');
+    }
+    const modal = new ModalBuilder()
+      .setCustomId(`modal_add_item_${message.author.id}`)
+      .setTitle('📦 Add New Item');
+
+    const nameInput = new TextInputBuilder()
+      .setCustomId('item_name')
+      .setLabel('Item Name')
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true)
+      .setPlaceholder('Ex: Sword of Luck');
+
+    const valueInput = new TextInputBuilder()
+      .setCustomId('item_value')
+      .setLabel('Item Value ($)')
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true)
+      .setPlaceholder('Ex: 1000');
+
+    const descInput = new TextInputBuilder()
+      .setCustomId('item_desc')
+      .setLabel('Description')
+      .setStyle(TextInputStyle.Paragraph)
+      .setRequired(false)
+      .setPlaceholder('Optional: Describe your item.');
+
+    const row1 = new ActionRowBuilder().addComponents(nameInput);
+    const row2 = new ActionRowBuilder().addComponents(valueInput);
+    const row3 = new ActionRowBuilder().addComponents(descInput);
+
+    await message.channel.send({ content: '📝 Check your DM to complete the item creation!' });
+    await message.author.send({ content: '👋 Let’s create your custom item...' });
+    await message.author.send({ content: '✍️ Fill out the form below to create your item:' });
+
+    // Optional: Notify in DM that the modal is being prepared
+    await message.author.send({ content: 'Please wait while your item modal is prepared...' });
+
+      message.client.emit('modalTrigger', message, modal);
+  }
+    
+  // !view-items
+  if (content === '!view-items') {
+    const guildId = message.guild?.id;
+    const items = userData.guildItems?.[guildId];
+
+    if (!items || items.length === 0) {
+      return message.reply('📭 No server items found. Use `!add-item` to create one.');
+    }
+
+    const embed = new EmbedBuilder()
+      .setTitle(`📦 Server Custom Items`)
+      .setColor(0x00AAFF)
+      .setDescription(items.map((item, i) =>
+        `**${i + 1}. ${item.name}**\n💰 $${item.value}\n📝 ${item.desc}`).join('\n\n'))
+      .setFooter({ text: `Total Items: ${items.length}` });
+
+    return message.reply({ embeds: [embed] });
+  }
+
+  // !give-item @user Item Name
+  if (content.startsWith('!give-item')) {
+    if (!message.member.permissions.has('Administrator')) {
+      return message.reply('❌ You must be a server admin to use this command.');
+    }
+
+    const mentioned = message.mentions.users.first();
+    if (!mentioned) return message.reply('Please mention a user to give an item to.');
+
+    const args = message.content.split(' ').slice(2); // Skip '!give-item' and mention
+    const itemName = args.join(' ').trim();
+    if (!itemName) return message.reply('Specify an item name to give.');
+
+    const guildId = message.guild.id;
+    const items = userData.guildItems?.[guildId] || [];
+    const item = items.find(i => i.name.toLowerCase() === itemName.toLowerCase());
+
+    if (!item) return message.reply(`❌ No item named **${itemName}** found.`);
+
+    const targetId = mentioned.id;
+    if (!userData[targetId]) userData[targetId] = { cash: 0, artefacts: [] };
+    userData[targetId].artefacts.push(item.name);
+    saveUserData();
+
+    const embed = new EmbedBuilder()
+      .setTitle('🎁 Item Granted!')
+      .setDescription(`✅ **${item.name}** was given to <@${targetId}>.`)
+      .addFields(
+        { name: '💰 Value', value: `$${item.value}`, inline: true },
+        { name: '📝 Description', value: item.desc, inline: false }
+      )
+      .setColor(0x00FF00)
+      .setTimestamp();
+
+    return message.reply({ embeds: [embed] });
   }
   
   // !scavenge
@@ -335,7 +438,15 @@ client.on('messageCreate', async message => {
   // !inventory
   if (content === '!inventory') {
     const ud = userData[userId];
-    const artefactList = ud.artefacts.length ? ud.artefacts.join(', ') : 'None';
+    const artefactList = ud.artefacts.length 
+    ? ud.artefacts.map(name => {
+        const rarity = getRarityByArtefact(name);
+        const emoji = rarity ? 
+          (rarity.name === 'Common' ? '⚪' : rarity.name === 'Uncommon' ? '🟢' :
+           rarity.name === 'Rare' ? '🔵' : rarity.name === 'Legendary' ? '🟡' : '⚫') : '🧰';
+        return `${emoji} ${name}`;
+      }).join('\n')
+    : 'None';
     const embed = new EmbedBuilder()
       .setTitle(`${message.author.username}'s Inventory`)
       .addFields(
@@ -385,358 +496,414 @@ client.on('messageCreate', async message => {
 
     await message.channel.send({ embeds: [embed], components: [row] });
   }
-
-  // Remove old !add commands since they're now handled by buttons
 });
-
 // Enhanced Button and Interaction Logic
-client.on('interactionCreate', async interaction => {
-  if (!interaction.isButton() && !interaction.isStringSelectMenu() && !interaction.isModalSubmit()) return;
-  // Leaderboard pagination
-  if (interaction.isButton() && interaction.customId.startsWith('leaderboard_')) {
-    const [ , direction, pageStr ] = interaction.customId.split('_');
-    const page = parseInt(pageStr, 10);
-    const newPage = direction === 'next' ? page + 1 : page - 1;
+  client.on('interactionCreate', async interaction => {
+    if (!interaction.isButton() && !interaction.isStringSelectMenu() && !interaction.isModalSubmit()) return;
+    // Leaderboard pagination
+    if (interaction.isButton() && interaction.customId.startsWith('leaderboard_')) {
+      const [ , direction, pageStr ] = interaction.customId.split('_');
+      const page = parseInt(pageStr, 10);
+      const newPage = direction === 'next' ? page + 1 : page - 1;
 
-    await interaction.deferUpdate();
-    await interaction.message.delete(); // Remove old page
-    showLeaderboardPage(interaction.message, newPage);
-  }
-  // Handle Trade Buttons
-  if (interaction.isButton()) {
-    const parts = interaction.customId.split('_');
-    const action = parts[0];
+      await interaction.deferUpdate();
+      await interaction.message.delete(); // Remove old page
+      showLeaderboardPage(interaction.message, newPage);
+    }
+    // Handle Trade Buttons
+    if (interaction.isButton()) {
+      const parts = interaction.customId.split('_');
+      const action = parts[0];
+      if (interaction.customId.startsWith('item_confirm_') || interaction.customId.startsWith('item_cancel_')) {
+        const parts = interaction.customId.split('_');
+        const userId = parts[2];
 
-    if (action === 'trade') {
-      let tradeId, userId, subaction;
+        if (interaction.customId.startsWith('item_confirm_')) {
+          const guildId = parts[1];
+          const itemName = parts.slice(3).join('_'); // Handle names with underscores
+          const item = global.tempItems?.[userId];
+          if (!item) return interaction.reply({ content: '❌ No item found to confirm.', ephemeral: true });
 
-      // Parse different button structures
-      if (parts[1] === 'accept' || parts[1] === 'decline') {
-        // trade_accept_tradeId or trade_decline_tradeId
-        subaction = parts[1];
-        tradeId = parts[2];
-      } else if (parts[1] === 'add') {
-        // trade_add_art_tradeId_userId or trade_add_money_tradeId_userId
-        subaction = parts[1];
-        const subtype = parts[2]; // 'art' or 'money'
-        tradeId = parts[3];
-        userId = parts[4];
-        subaction = `${subaction}_${subtype}`; // becomes 'add_art' or 'add_money'
-      } else if (parts[1] === 'ready') {
-        // trade_ready_tradeId_userId
-        subaction = parts[1];
-        tradeId = parts[2];
-        userId = parts[3];
-      } else if (parts[1] === 'cancel') {
-        // trade_cancel_tradeId
-        subaction = parts[1];
-        tradeId = parts[2];
-      }
-
-      const trade = activeTrades[tradeId];
-      if (!trade) return interaction.reply({ content: 'Trade not found or expired.', flags: 64 });
-
-      if (subaction === 'accept') {
-        if (interaction.user.id !== trade.to) return interaction.reply({ content: 'This trade is not for you.', flags: 64 });
-
-        trade.status = 'open';
-        trade.offers = { [trade.from]: { cash: 0, artefacts: [] }, [trade.to]: { cash: 0, artefacts: [] } };
-        trade.ready = { [trade.from]: false, [trade.to]: false };
-
-        const fromUser = await interaction.client.users.fetch(trade.from);
-        const toUser = await interaction.client.users.fetch(trade.to);
-
-        const embed = createTradeInterfaceEmbed(trade, fromUser.username, toUser.username);
-        const controls = createTradeControls(tradeId, interaction.user.id);
-
-        await interaction.update({ embeds: [embed], components: controls });
-
-      } else if (subaction === 'decline') {
-        if (interaction.user.id !== trade.to) return interaction.reply({ content: 'This trade is not for you.', flags: 64 });
-        delete activeTrades[tradeId];
-
-        const declineEmbed = new EmbedBuilder()
-          .setTitle('❌ Trade Declined')
-          .setDescription(`<@${trade.to}> has declined the trade request.`)
-          .setColor(0xFF0000);
-
-        await interaction.update({ embeds: [declineEmbed], components: [] });
-
-      } else if (subaction === 'add_art') {
-        const trade = activeTrades[tradeId];
-        if (!trade || trade.status !== 'open') return interaction.reply({ content: 'Trade not active.', ephemeral: true });
-        if (trade.from !== interaction.user.id && trade.to !== interaction.user.id) {
-          return interaction.reply({ content: 'You are not part of this trade.', flags: 64 });
-        }
-
-        const userInventory = userData[interaction.user.id]?.artefacts || [];
-        const currentOffer = trade.offers[interaction.user.id]?.artefacts || [];
-        const availableArtefacts = userInventory.filter(art => !currentOffer.includes(art));
-
-        if (availableArtefacts.length === 0) {
-          return interaction.reply({ content: '❌ You have no available artefacts to add.', flags: 64 });
-        }
-
-        const options = availableArtefacts.slice(0, 25).map((art, index) => {
-          const rarity = getRarityByArtefact(art);
-          const rarityEmoji = rarity ? 
-            (rarity.name === 'Common' ? '⚪' : 
-             rarity.name === 'Uncommon' ? '🟢' : 
-             rarity.name === 'Rare' ? '🔵' : 
-             rarity.name === 'Legendary' ? '🟡' : '⚫') : '❓';
-
-          return {
-            label: `${art} (${rarity ? rarity.name : 'Unknown'})`,
-            value: `${art}_${index}`,  // 👈 Ensure uniqueness
-            emoji: rarityEmoji,
-            description: `Value: $${rarity ? rarity.value.toLocaleString() : '???'}`
-          };
-        });
-
-        const selectMenu = new StringSelectMenuBuilder()
-          .setCustomId(`select_trade_art_${tradeId}_${interaction.user.id}`)
-          .setPlaceholder('🎒 Choose an artefact to add')
-          .addOptions(options);
-
-        const row = new ActionRowBuilder().addComponents(selectMenu);
-        await interaction.reply({ content: '✨ Select an artefact from your inventory:', components: [row], flags: 64 });
-
-      } else if (subaction === 'add_money') {
-        const modal = new ModalBuilder()
-          .setCustomId(`trade_money_modal_${tradeId}_${interaction.user.id}`)
-          .setTitle('💰 Add Money to Trade');
-
-        const amountInput = new TextInputBuilder()
-          .setCustomId('money_amount')
-          .setLabel('Amount to add ($)')
-          .setStyle(TextInputStyle.Short)
-          .setPlaceholder('Enter amount (e.g. 1000)')
-          .setRequired(true);
-
-        const firstRow = new ActionRowBuilder().addComponents(amountInput);
-        modal.addComponents(firstRow);
-
-        await interaction.showModal(modal);
-
-      } else if (subaction === 'ready') {
-        const trade = activeTrades[tradeId];
-        if (!trade || trade.status !== 'open') return interaction.reply({ content: 'Trade not active.', flags: 64 });
-        if (trade.from !== interaction.user.id && trade.to !== interaction.user.id) {
-          return interaction.reply({ content: 'You are not part of this trade.', flags: 64 });
-        }
-
-        trade.ready[interaction.user.id] = !trade.ready[interaction.user.id];
-
-        if (trade.ready[trade.from] && trade.ready[trade.to]) {
-          // Execute trade
-          const fromOffer = trade.offers[trade.from] || { cash: 0, artefacts: [] };
-          const toOffer = trade.offers[trade.to] || { cash: 0, artefacts: [] };
-
-          // Transfer artefacts and money
-          fromOffer.artefacts.forEach(art => {
-            const idx = userData[trade.from].artefacts.indexOf(art);
-            if (idx > -1) userData[trade.from].artefacts.splice(idx, 1);
-            userData[trade.to].artefacts.push(art);
-          });
-
-          toOffer.artefacts.forEach(art => {
-            const idx = userData[trade.to].artefacts.indexOf(art);
-            if (idx > -1) userData[trade.to].artefacts.splice(idx, 1);
-            userData[trade.from].artefacts.push(art);
-          });
-
-          userData[trade.from].cash += toOffer.cash;
-          userData[trade.to].cash += fromOffer.cash;
-
+          if (!userData.guildItems[guildId]) userData.guildItems[guildId] = [];
+          userData.guildItems[guildId].push(item);
           saveUserData();
-          delete activeTrades[tradeId];
+          delete global.tempItems[userId];
 
-          const successEmbed = new EmbedBuilder()
-            .setTitle('🎉 Trade Completed Successfully!')
-            .setDescription(`✅ **<@${trade.from}>** and **<@${trade.to}>** have completed their trade!`)
-            .addFields(
-              {
-                name: '📦 Items Exchanged',
-                value: `**Artefacts:** ${[...fromOffer.artefacts, ...toOffer.artefacts].join(', ') || 'None'}\n**Money:** $${(fromOffer.cash + toOffer.cash).toLocaleString()}`,
-                inline: false
-              }
-            )
-            .setColor(0x00FF00)
-            .setThumbnail('https://cdn.discordapp.com/emojis/741713906411708517.png');
+          return interaction.update({
+            content: `🎉 Successfully added **${item.name}** to this server's item list.`,
+            embeds: [],
+            components: []
+          });
+        }
 
-          await interaction.update({ embeds: [successEmbed], components: [] });
-        } else {
-          // Update interface
+        if (interaction.customId.startsWith('item_cancel_')) {
+          delete global.tempItems[userId];
+          return interaction.update({
+            content: '❌ Item creation cancelled.',
+            embeds: [],
+            components: []
+          });
+        }
+      }
+      if (action === 'trade') {
+        let tradeId, userId, subaction;
+
+        // Parse different button structures
+        if (parts[1] === 'accept' || parts[1] === 'decline') {
+          // trade_accept_tradeId or trade_decline_tradeId
+          subaction = parts[1];
+          tradeId = parts[2];
+        } else if (parts[1] === 'add') {
+          // trade_add_art_tradeId_userId or trade_add_money_tradeId_userId
+          subaction = parts[1];
+          const subtype = parts[2]; // 'art' or 'money'
+          tradeId = parts[3];
+          userId = parts[4];
+          subaction = `${subaction}_${subtype}`; // becomes 'add_art' or 'add_money'
+        } else if (parts[1] === 'ready') {
+          // trade_ready_tradeId_userId
+          subaction = parts[1];
+          tradeId = parts[2];
+          userId = parts[3];
+        } else if (parts[1] === 'cancel') {
+          // trade_cancel_tradeId
+          subaction = parts[1];
+          tradeId = parts[2];
+        }
+
+        const trade = activeTrades[tradeId];
+        if (!trade) return interaction.reply({ content: 'Trade not found or expired.', flags: 64 });
+
+        if (subaction === 'accept') {
+          if (interaction.user.id !== trade.to) return interaction.reply({ content: 'This trade is not for you.', flags: 64 });
+
+          trade.status = 'open';
+          trade.offers = { [trade.from]: { cash: 0, artefacts: [] }, [trade.to]: { cash: 0, artefacts: [] } };
+          trade.ready = { [trade.from]: false, [trade.to]: false };
+
           const fromUser = await interaction.client.users.fetch(trade.from);
           const toUser = await interaction.client.users.fetch(trade.to);
+
           const embed = createTradeInterfaceEmbed(trade, fromUser.username, toUser.username);
-          const controls = createTradeControls(tradeId, interaction.user.id, trade.ready[interaction.user.id]);
+          const controls = createTradeControls(tradeId, interaction.user.id);
 
           await interaction.update({ embeds: [embed], components: controls });
+
+        } else if (subaction === 'decline') {
+          if (interaction.user.id !== trade.to) return interaction.reply({ content: 'This trade is not for you.', flags: 64 });
+          delete activeTrades[tradeId];
+
+          const declineEmbed = new EmbedBuilder()
+            .setTitle('❌ Trade Declined')
+            .setDescription(`<@${trade.to}> has declined the trade request.`)
+            .setColor(0xFF0000);
+
+          await interaction.update({ embeds: [declineEmbed], components: [] });
+
+        } else if (subaction === 'add_art') {
+          const trade = activeTrades[tradeId];
+          if (!trade || trade.status !== 'open') return interaction.reply({ content: 'Trade not active.', ephemeral: true });
+          if (trade.from !== interaction.user.id && trade.to !== interaction.user.id) {
+            return interaction.reply({ content: 'You are not part of this trade.', flags: 64 });
+          }
+
+          const userInventory = userData[interaction.user.id]?.artefacts || [];
+          const currentOffer = trade.offers[interaction.user.id]?.artefacts || [];
+          const availableArtefacts = userInventory.filter(art => !currentOffer.includes(art));
+
+          if (availableArtefacts.length === 0) {
+            return interaction.reply({ content: '❌ You have no available artefacts to add.', flags: 64 });
+          }
+
+          const options = availableArtefacts.slice(0, 25).map((art, index) => {
+            const rarity = getRarityByArtefact(art);
+            const rarityEmoji = rarity ? 
+              (rarity.name === 'Common' ? '⚪' : 
+               rarity.name === 'Uncommon' ? '🟢' : 
+               rarity.name === 'Rare' ? '🔵' : 
+               rarity.name === 'Legendary' ? '🟡' : '⚫') : '❓';
+
+            return {
+              label: `${art} (${rarity ? rarity.name : 'Unknown'})`,
+              value: `${art}_${index}`,  // 👈 Ensure uniqueness
+              emoji: rarityEmoji,
+              description: `Value: $${rarity ? rarity.value.toLocaleString() : '???'}`
+            };
+          });
+
+          const selectMenu = new StringSelectMenuBuilder()
+            .setCustomId(`select_trade_art_${tradeId}_${interaction.user.id}`)
+            .setPlaceholder('🎒 Choose an artefact to add')
+            .addOptions(options);
+
+          const row = new ActionRowBuilder().addComponents(selectMenu);
+          await interaction.reply({ content: '✨ Select an artefact from your inventory:', components: [row], flags: 64 });
+
+        } else if (subaction === 'add_money') {
+          const modal = new ModalBuilder()
+            .setCustomId(`trade_money_modal_${tradeId}_${interaction.user.id}`)
+            .setTitle('💰 Add Money to Trade');
+
+          const amountInput = new TextInputBuilder()
+            .setCustomId('money_amount')
+            .setLabel('Amount to add ($)')
+            .setStyle(TextInputStyle.Short)
+            .setPlaceholder('Enter amount (e.g. 1000)')
+            .setRequired(true);
+
+          const firstRow = new ActionRowBuilder().addComponents(amountInput);
+          modal.addComponents(firstRow);
+
+          await interaction.showModal(modal);
+
+        } else if (subaction === 'ready') {
+          const trade = activeTrades[tradeId];
+          if (!trade || trade.status !== 'open') return interaction.reply({ content: 'Trade not active.', flags: 64 });
+          if (trade.from !== interaction.user.id && trade.to !== interaction.user.id) {
+            return interaction.reply({ content: 'You are not part of this trade.', flags: 64 });
+          }
+
+          trade.ready[interaction.user.id] = !trade.ready[interaction.user.id];
+
+          if (trade.ready[trade.from] && trade.ready[trade.to]) {
+            // Execute trade
+            const fromOffer = trade.offers[trade.from] || { cash: 0, artefacts: [] };
+            const toOffer = trade.offers[trade.to] || { cash: 0, artefacts: [] };
+
+            // Transfer artefacts and money
+            fromOffer.artefacts.forEach(art => {
+              const idx = userData[trade.from].artefacts.indexOf(art);
+              if (idx > -1) userData[trade.from].artefacts.splice(idx, 1);
+              userData[trade.to].artefacts.push(art);
+            });
+
+            toOffer.artefacts.forEach(art => {
+              const idx = userData[trade.to].artefacts.indexOf(art);
+              if (idx > -1) userData[trade.to].artefacts.splice(idx, 1);
+              userData[trade.from].artefacts.push(art);
+            });
+
+            userData[trade.from].cash += toOffer.cash;
+            userData[trade.to].cash += fromOffer.cash;
+
+            saveUserData();
+            delete activeTrades[tradeId];
+
+            const successEmbed = new EmbedBuilder()
+              .setTitle('🎉 Trade Completed Successfully!')
+              .setDescription(`✅ **<@${trade.from}>** and **<@${trade.to}>** have completed their trade!`)
+              .addFields(
+                {
+                  name: '📦 Items Exchanged',
+                  value: `**Artefacts:** ${[...fromOffer.artefacts, ...toOffer.artefacts].join(', ') || 'None'}\n**Money:** $${(fromOffer.cash + toOffer.cash).toLocaleString()}`,
+                  inline: false
+                }
+              )
+              .setColor(0x00FF00)
+              .setThumbnail('https://cdn.discordapp.com/emojis/741713906411708517.png');
+
+            await interaction.update({ embeds: [successEmbed], components: [] });
+          } else {
+            // Update interface
+            const fromUser = await interaction.client.users.fetch(trade.from);
+            const toUser = await interaction.client.users.fetch(trade.to);
+            const embed = createTradeInterfaceEmbed(trade, fromUser.username, toUser.username);
+            const controls = createTradeControls(tradeId, interaction.user.id, trade.ready?.[interaction.user.id]);
+
+            await interaction.update({ embeds: [embed], components: controls });
+          }
+
+        } else if (subaction === 'cancel') {
+          const trade = activeTrades[tradeId];
+          if (!trade) return interaction.reply({ content: 'Trade not found.', flags: 64 });
+
+          // Return any offered money
+          if (trade.offers[trade.from]?.cash) userData[trade.from].cash += trade.offers[trade.from].cash;
+          if (trade.offers[trade.to]?.cash) userData[trade.to].cash += trade.offers[trade.to].cash;
+          saveUserData();
+
+          delete activeTrades[tradeId];
+
+          const cancelEmbed = new EmbedBuilder()
+            .setTitle('❌ Trade Cancelled')
+            .setDescription('The trade has been cancelled. Any offered money has been returned.')
+            .setColor(0xFF0000);
+
+          await interaction.update({ embeds: [cancelEmbed], components: [] });
         }
+      }
 
-      } else if (subaction === 'cancel') {
-        const trade = activeTrades[tradeId];
-        if (!trade) return interaction.reply({ content: 'Trade not found.', flags: 64 });
+      // Handle sell buttons
+      if (interaction.customId.startsWith('sell_')) {
+        const parts = interaction.customId.split('_');
+        const userId = parts[2];
+        const selArt = parts[3];
 
-        // Return any offered money
-        if (trade.offers[trade.from]?.cash) userData[trade.from].cash += trade.offers[trade.from].cash;
-        if (trade.offers[trade.to]?.cash) userData[trade.to].cash += trade.offers[trade.to].cash;
-        saveUserData();
+        if (interaction.user.id !== userId) return interaction.reply({ content: 'This is not your transaction.', ephemeral: true });
 
-        delete activeTrades[tradeId];
+        if (parts[1] === 'yes') {
+          const rar = getRarityByArtefact(selArt);
+          const price = rar ? rar.sell : 0;
+          const idx = userData[userId].artefacts.indexOf(selArt);
+          if (idx > -1) userData[userId].artefacts.splice(idx, 1);
+          userData[userId].cash += price;
+          saveUserData();
 
-        const cancelEmbed = new EmbedBuilder()
-          .setTitle('❌ Trade Cancelled')
-          .setDescription('The trade has been cancelled. Any offered money has been returned.')
-          .setColor(0xFF0000);
+          const successEmbed = new EmbedBuilder()
+            .setTitle('✅ Sale Completed!')
+            .setDescription(`You successfully sold **${selArt}** for **$${price.toLocaleString()}**!`)
+            .addFields(
+              { name: '💰 Current Cash', value: `$${userData[userId].cash.toLocaleString()}`, inline: true }
+            )
+            .setColor(0x00FF00);
 
-        await interaction.update({ embeds: [cancelEmbed], components: [] });
+          await interaction.update({ content: null, embeds: [successEmbed], components: [] });
+        } else {
+          const cancelEmbed = new EmbedBuilder()
+            .setTitle('❌ Sale Cancelled')
+            .setDescription('You cancelled the transaction.')
+            .setColor(0xFF0000);
+
+          await interaction.update({ content: null, embeds: [cancelEmbed], components: [] });
+        }
       }
     }
 
-    // Handle sell buttons
-    if (interaction.customId.startsWith('sell_')) {
-      const parts = interaction.customId.split('_');
-      const userId = parts[2];
-      const selArt = parts[3];
+    // Handle Select Menus
+    if (interaction.isStringSelectMenu()) {
+      if (interaction.customId.startsWith('select_trade_art_')) {
+        const [, , , tradeId, userId] = interaction.customId.split('_');
+        if (interaction.user.id !== userId) return interaction.reply({ content: 'Not your selection.', flags: 64 });
 
-      if (interaction.user.id !== userId) return interaction.reply({ content: 'This is not your transaction.', ephemeral: true });
+        const trade = activeTrades[tradeId];
+        if (!trade || trade.status !== 'open') return interaction.reply({ content: 'Trade not active.', flags: 64 });
 
-      if (parts[1] === 'yes') {
+        const selectedArtefact = interaction.values[0].split('_')[0];
+
+        if (!trade.offers[userId]) trade.offers[userId] = { cash: 0, artefacts: [] };
+        trade.offers[userId].artefacts.push(selectedArtefact);
+
+        const rarity = getRarityByArtefact(selectedArtefact);
+        const rarityEmoji = rarity ? 
+          (rarity.name === 'Common' ? '⚪' : 
+           rarity.name === 'Uncommon' ? '🟢' : 
+           rarity.name === 'Rare' ? '🔵' : 
+           rarity.name === 'Legendary' ? '🟡' : '⚫') : '❓';
+
+        await interaction.reply({ content: `✅ Added ${rarityEmoji} **${selectedArtefact}** to your trade offer!`, flags: 64 });
+
+        // Update main trade interface
+        const fromUser = await interaction.client.users.fetch(trade.from);
+        const toUser = await interaction.client.users.fetch(trade.to);
+        const embed = createTradeInterfaceEmbed(trade, fromUser.username, toUser.username);
+        const controls = createTradeControls(tradeId, userId, trade.ready?.[userId]);
+
+        const originalMessage = await interaction.channel.messages.fetch(interaction.message.reference?.messageId || interaction.message.id);
+        await originalMessage.edit({ embeds: [embed], components: controls });
+      }
+
+      // Handle sell menu
+      if (interaction.customId.startsWith('sell_sel_')) {
+        const userId = interaction.customId.split('_')[2];
+        if (interaction.user.id !== userId) return interaction.reply({ content: 'This is not your selection.', ephemeral: true });
+
+        const selArt = interaction.values[0];
         const rar = getRarityByArtefact(selArt);
         const price = rar ? rar.sell : 0;
-        const idx = userData[userId].artefacts.indexOf(selArt);
-        if (idx > -1) userData[userId].artefacts.splice(idx, 1);
-        userData[userId].cash += price;
+
+        const rarityEmoji = rar ? 
+          (rar.name === 'Common' ? '⚪' : 
+           rarity.name === 'Uncommon' ? '🟢' : 
+           rarity.name === 'Rare' ? '🔵' : 
+           rarity.name === 'Legendary' ? '🟡' : '⚫') : '❓';
+
+        const confirmEmbed = new EmbedBuilder()
+          .setTitle('💰 Confirm Sale')
+          .setDescription(`${rarityEmoji} **${selArt}** - ${rar ? rar.name : 'Unknown'} Rarity`)
+          .addFields(
+            { name: '💵 Sale Price', value: `$${price.toLocaleString()}`, inline: true },
+            { name: '💼 Current Cash', value: `$${userData[userId].cash.toLocaleString()}`, inline: true },
+            { name: '📈 New Total', value: `$${(userData[userId].cash + price).toLocaleString()}`, inline: true }
+          )
+          .setColor(rar ? rar.color : 0xAAAAAA)
+          .setFooter({ text: 'This action cannot be undone!' });
+
+        const confirmRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId(`sell_yes_${userId}_${selArt}`).setLabel('Confirm Sale').setStyle(ButtonStyle.Success).setEmoji('✅'),
+          new ButtonBuilder().setCustomId(`sell_no_${userId}_${selArt}`).setLabel('Cancel').setStyle(ButtonStyle.Danger).setEmoji('❌')
+        );
+
+        await interaction.update({ content: null, embeds: [confirmEmbed], components: [confirmRow] });
+      }
+    }
+
+    // Handle Modal Submissionshttps://replit.com/@spiritlessentit/Fortune-Bot-Code-official#index.js
+    if (interaction.isModalSubmit()) {
+      if (interaction.customId.startsWith('modal_add_item_')) {
+        const userId = interaction.user.id;
+        const guildId = interaction.guildId;
+        const itemName = interaction.fields.getTextInputValue('item_name').trim();
+        const itemValue = parseInt(interaction.fields.getTextInputValue('item_value'), 10);
+        const itemDesc = interaction.fields.getTextInputValue('item_desc') || 'No description.';
+
+        if (!itemName || isNaN(itemValue)) {
+          return interaction.reply({ content: '❌ Invalid input. Name must be text and value must be a number.', ephemeral: true });
+        }
+
+        const itemPreview = new EmbedBuilder()
+          .setTitle('📦 Confirm New Item')
+          .addFields(
+            { name: '🧾 Name', value: itemName },
+            { name: '💰 Value', value: `$${itemValue}` },
+            { name: '🖊 Description', value: itemDesc }
+          )
+          .setColor(0x00AAFF)
+          .setFooter({ text: 'Confirm or cancel below' });
+
+        const confirmRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId(`item_confirm_${guildId}_${userId}_${itemName}`).setLabel('✅ Confirm').setStyle(ButtonStyle.Success),
+          new ButtonBuilder().setCustomId(`item_cancel_${userId}`).setLabel('❌ Cancel').setStyle(ButtonStyle.Danger)
+        );
+
+        await interaction.reply({ embeds: [itemPreview], components: [confirmRow], ephemeral: true });
+
+        global.tempItems[userId] = { name: itemName, value: itemValue, desc: itemDesc };
+      }
+      if (interaction.customId.startsWith('trade_money_modal_')) {
+        const [, , , tradeId, userId] = interaction.customId.split('_');
+        if (interaction.user.id !== userId) return interaction.reply({ content: 'Not your modal.', flags: 64 });
+
+        const trade = activeTrades[tradeId];
+        if (!trade || trade.status !== 'open') return interaction.reply({ content: 'Trade not active.', flags: 64 });
+
+        const amount = parseInt(interaction.fields.getTextInputValue('money_amount'), 10);
+        if (isNaN(amount) || amount <= 0) return interaction.reply({ content: '❌ Please enter a valid amount.', flags: 64 });
+        if (userData[userId].cash < amount) return interaction.reply({ content: '❌ You do not have enough money.', flags: 64 });
+
+        if (!trade.offers[userId]) trade.offers[userId] = { cash: 0, artefacts: [] };
+        trade.offers[userId].cash += amount;
+        userData[userId].cash -= amount;
         saveUserData();
 
-        const successEmbed = new EmbedBuilder()
-          .setTitle('✅ Sale Completed!')
-          .setDescription(`You successfully sold **${selArt}** for **$${price.toLocaleString()}**!`)
-          .addFields(
-            { name: '💰 Current Cash', value: `$${userData[userId].cash.toLocaleString()}`, inline: true }
-          )
-          .setColor(0x00FF00);
+        await interaction.reply({ content: `✅ Added 💰 **$${amount.toLocaleString()}** to your trade offer!`, flags: 64 });
 
-        await interaction.update({ content: null, embeds: [successEmbed], components: [] });
-      } else {
-        const cancelEmbed = new EmbedBuilder()
-          .setTitle('❌ Sale Cancelled')
-          .setDescription('You cancelled the transaction.')
-          .setColor(0xFF0000);
+        // Update main trade interface
+        const fromUser = await interaction.client.users.fetch(trade.from);
+        const toUser = await interaction.client.users.fetch(trade.to);
+        const embed = createTradeInterfaceEmbed(trade, fromUser.username, toUser.username);
+        const controls = createTradeControls(tradeId, userId, trade.ready?.[userId]);
 
-        await interaction.update({ content: null, embeds: [cancelEmbed], components: [] });
+        const channel = interaction.channel;
+        const messages = await channel.messages.fetch({ limit: 50 });
+        const tradeMessage = messages.find(msg => 
+          msg.embeds.length > 0 && 
+          msg.embeds[0].title === '🏪 Interactive Trading Interface'
+        );
+
+        if (tradeMessage) {
+          await tradeMessage.edit({ embeds: [embed], components: controls });
+        }
       }
     }
-  }
-
-  // Handle Select Menus
-  if (interaction.isStringSelectMenu()) {
-    if (interaction.customId.startsWith('select_trade_art_')) {
-      const [, , , tradeId, userId] = interaction.customId.split('_');
-      if (interaction.user.id !== userId) return interaction.reply({ content: 'Not your selection.', flags: 64 });
-
-      const trade = activeTrades[tradeId];
-      if (!trade || trade.status !== 'open') return interaction.reply({ content: 'Trade not active.', flags: 64 });
-
-      const selectedArtefact = interaction.values[0].split('_')[0];
-
-      if (!trade.offers[userId]) trade.offers[userId] = { cash: 0, artefacts: [] };
-      trade.offers[userId].artefacts.push(selectedArtefact);
-
-      const rarity = getRarityByArtefact(selectedArtefact);
-      const rarityEmoji = rarity ? 
-        (rarity.name === 'Common' ? '⚪' : 
-         rarity.name === 'Uncommon' ? '🟢' : 
-         rarity.name === 'Rare' ? '🔵' : 
-         rarity.name === 'Legendary' ? '🟡' : '⚫') : '❓';
-
-      await interaction.reply({ content: `✅ Added ${rarityEmoji} **${selectedArtefact}** to your trade offer!`, flags: 64 });
-
-      // Update main trade interface
-      const fromUser = await interaction.client.users.fetch(trade.from);
-      const toUser = await interaction.client.users.fetch(trade.to);
-      const embed = createTradeInterfaceEmbed(trade, fromUser.username, toUser.username);
-      const controls = createTradeControls(tradeId, userId, trade.ready?.[userId]);
-
-      const originalMessage = await interaction.channel.messages.fetch(interaction.message.reference?.messageId || interaction.message.id);
-      await originalMessage.edit({ embeds: [embed], components: controls });
-    }
-
-    // Handle sell menu
-    if (interaction.customId.startsWith('sell_sel_')) {
-      const userId = interaction.customId.split('_')[2];
-      if (interaction.user.id !== userId) return interaction.reply({ content: 'This is not your selection.', ephemeral: true });
-
-      const selArt = interaction.values[0];
-      const rar = getRarityByArtefact(selArt);
-      const price = rar ? rar.sell : 0;
-
-      const rarityEmoji = rar ? 
-        (rar.name === 'Common' ? '⚪' : 
-         rar.name === 'Uncommon' ? '🟢' : 
-         rar.name === 'Rare' ? '🔵' : 
-         rar.name === 'Legendary' ? '🟡' : '⚫') : '❓';
-
-      const confirmEmbed = new EmbedBuilder()
-        .setTitle('💰 Confirm Sale')
-        .setDescription(`${rarityEmoji} **${selArt}** - ${rar ? rar.name : 'Unknown'} Rarity`)
-        .addFields(
-          { name: '💵 Sale Price', value: `$${price.toLocaleString()}`, inline: true },
-          { name: '💼 Current Cash', value: `$${userData[userId].cash.toLocaleString()}`, inline: true },
-          { name: '📈 New Total', value: `$${(userData[userId].cash + price).toLocaleString()}`, inline: true }
-        )
-        .setColor(rar ? rar.color : 0xAAAAAA)
-        .setFooter({ text: 'This action cannot be undone!' });
-
-      const confirmRow = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId(`sell_yes_${userId}_${selArt}`).setLabel('Confirm Sale').setStyle(ButtonStyle.Success).setEmoji('✅'),
-        new ButtonBuilder().setCustomId(`sell_no_${userId}_${selArt}`).setLabel('Cancel').setStyle(ButtonStyle.Danger).setEmoji('❌')
-      );
-
-      await interaction.update({ content: null, embeds: [confirmEmbed], components: [confirmRow] });
-    }
-  }
-
-  // Handle Modal Submissions
-  if (interaction.isModalSubmit()) {
-    if (interaction.customId.startsWith('trade_money_modal_')) {
-      const [, , , tradeId, userId] = interaction.customId.split('_');
-      if (interaction.user.id !== userId) return interaction.reply({ content: 'Not your modal.', flags: 64 });
-
-      const trade = activeTrades[tradeId];
-      if (!trade || trade.status !== 'open') return interaction.reply({ content: 'Trade not active.', flags: 64 });
-
-      const amount = parseInt(interaction.fields.getTextInputValue('money_amount'), 10);
-      if (isNaN(amount) || amount <= 0) return interaction.reply({ content: '❌ Please enter a valid amount.', flags: 64 });
-      if (userData[userId].cash < amount) return interaction.reply({ content: '❌ You do not have enough money.', flags: 64 });
-
-      if (!trade.offers[userId]) trade.offers[userId] = { cash: 0, artefacts: [] };
-      trade.offers[userId].cash += amount;
-      userData[userId].cash -= amount;
-      saveUserData();
-
-      await interaction.reply({ content: `✅ Added 💰 **$${amount.toLocaleString()}** to your trade offer!`, flags: 64 });
-
-      // Update main trade interface
-      const fromUser = await interaction.client.users.fetch(trade.from);
-      const toUser = await interaction.client.users.fetch(trade.to);
-      const embed = createTradeInterfaceEmbed(trade, fromUser.username, toUser.username);
-      const controls = createTradeControls(tradeId, userId, trade.ready?.[userId]);
-
-      const channel = interaction.channel;
-      const messages = await channel.messages.fetch({ limit: 50 });
-      const tradeMessage = messages.find(msg => 
-        msg.embeds.length > 0 && 
-        msg.embeds[0].title === '🏪 Interactive Trading Interface'
-      );
-
-      if (tradeMessage) {
-        await tradeMessage.edit({ embeds: [embed], components: controls });
-      }
-    }
-  }
-});
-
-client.login(token);
+  });
+  client.login(token);
