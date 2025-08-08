@@ -104,8 +104,8 @@ client.on('interactionCreate', async interaction => {
           '⚪ **Common** (65%) - $100-150',
           '🟢 **Uncommon** (20%) - $550-700', 
           '🔵 **Rare** (10%) - $1,500-2,500',
-          '🟡 **Legendary** (4%) - $10,000',
-          '⚫ **Unknown** (1%) - $1,000,000'
+          '🟡 **Legendary** (4%) - $5,000',
+          '⚫ **Unknown** (1%) - $15,000'
         ].join('\n'),
         inline: false
       }
@@ -292,7 +292,7 @@ client.on('messageCreate', async message => {
   if (content === '!leaderboard' || content === '!lb') {
     return showLeaderboardPage(message, 0);
   }
-  
+
   // !add-item (admin only)
   if (content === '!add-item') {
     if (!message.member.permissions.has('Administrator') && message.author.id !== DEVELOPER_ID) {
@@ -337,7 +337,7 @@ client.on('messageCreate', async message => {
     await message.author.send({ content: '👋 Let’s create your custom item...' });
     await message.author.send({ content: '✍️ Click the button below to fill out the item form:', components: [row] });
   }
-    
+
   // !view-items
   if (content === '!view-items') {
     const guildId = message.guild?.id;
@@ -393,7 +393,7 @@ client.on('messageCreate', async message => {
 
     return message.reply({ embeds: [embed] });
   }
-  
+
   // !scavenge
   if (content === '!scavenge') {
     const now = Date.now(), last = cooldowns.scavenge[userId] || 0;
@@ -550,7 +550,7 @@ client.on('messageCreate', async message => {
 
       await interaction.showModal(modal);
     }
-    
+
     // Handle Trade Buttons
     if (interaction.isButton()) {
       const parts = interaction.customId.split('_');
