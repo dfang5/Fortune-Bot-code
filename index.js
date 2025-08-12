@@ -122,6 +122,79 @@ client.on('interactionCreate', async interaction => {
 // Trade storage
 const activeTrades = {}; // tradeId → trade object
 function newTradeId() { return Math.random().toString(36).substr(2, 8); }
+client.on('interactionCreate', async interaction => {
+  const { ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder, EmbedBuilder } = require('discord.js');
+
+  // Button → Open modal
+  if (interaction.isButton() && interaction.customId === 'start_add_item') {
+    const modal = new ModalBuilder()
+      .setCustomId('modal_add_item')
+      .setTitle('🌟 Create a Custom Item');
+
+    const nameInput = new TextInputBuilder()
+      .setCustomId('item_name')
+      .setLabel('📛 Item Name')
+      .setStyle(TextInputStyle.Short)
+      .setPlaceholder('Ex: Your Item Name Here')
+      .setRequired(true);
+
+    const descInput = new TextInputBuilder()
+      .setCustomId('item_desc')
+      .setLabel('📝 Item Description')
+      .setStyle(TextInputStyle.Paragraph)
+      .setPlaceholder('What makes this item special?')
+      .setRequired(true);
+
+    const valueInput = new TextInputBuilder()
+      .setCustomId('item_value')
+      .setLabel('💰 Item Value')
+      .setStyle(TextInputStyle.Short)
+      .setPlaceholder('Enter value in dollars')
+      .setRequired(true);
+
+    const firstRow = new ActionRowBuilder().addComponents(nameInput);
+    const secondRow = new ActionRowBuilder().addComponents(descInput);
+    const thirdRow = new ActionRowBuilder().addComponents(valueInput);
+
+    modal.addComponents(firstRow, secondRow, thirdRow);
+
+    return interaction.showModal(modal);
+  }
+
+  // Modal submit → Save item
+  if (interaction.isModalSubmit() && interaction.customId === 'modal_add_item') {
+    const name = interaction.fields.getTextInputValue('item_name');
+    const desc = interaction.fields.getTextInputValue('item_desc');
+    const value = parseFloat(interaction.fields.getTextInputValue('item_value'));
+
+    if (isNaN(value) || value < 0) {
+      return interaction.reply({ content: '⚠️ Invalid value. Please try again.', ephemeral: true });
+    }
+
+    const guildId = interaction.guild?.id;
+    if (!userData.guildItems) userData.guildItems = {};
+    if (!userData.guildItems[guildId]) userData.guildItems[guildId] = [];
+
+    userData.guildItems[guildId].push({ name, desc, value });
+
+    // Save to file
+    const fs = require('fs');
+    fs.writeFileSync('./userData.json', JSON.stringify(userData, null, 2));
+
+    const embed = new EmbedBuilder()
+      .setTitle('✅ New Item Created!')
+      .setColor(0x00ff99)
+      .addFields(
+        { name: '📛 Name', value: name, inline: true },
+        { name: '💰 Value', value: `$${value}`, inline: true },
+        { name: '📝 Description', value: desc }
+      )
+      .setFooter({ text: `Added by ${interaction.user.tag}` })
+      .setTimestamp();
+
+    return interaction.reply({ embeds: [embed] });
+  }
+});
 
 // Cooldowns
 const SCAVENGE_COOLDOWN = 2 * 60 * 60 * 1000;
@@ -293,51 +366,30 @@ client.on('messageCreate', async message => {
     return showLeaderboardPage(message, 0);
   }
 
-  // !add-item (admin only)
+  // !add-item
   if (content === '!add-item') {
-    if (!message.member.permissions.has('Administrator') && message.author.id !== DEVELOPER_ID) {
-      return message.reply('❌ You must be a server admin to use this command.');
+    const guildId = message.guild?.id;
+
+    // Only allow admins or you
+    if (!message.member.permissions.has('Administrator') && message.author.id !== '1299875574894039184') {
+      return message.reply('🚫 You do not have permission to create server items.');
     }
-    const modal = new ModalBuilder()
-      .setCustomId(`modal_add_item_${message.author.id}`)
-      .setTitle('📦 Add New Item');
 
-    const nameInput = new TextInputBuilder()
-      .setCustomId('item_name')
-      .setLabel('Item Name')
-      .setStyle(TextInputStyle.Short)
-      .setRequired(true)
-      .setPlaceholder('Ex: Sword of Luck');
+    // Send button
+    const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+    const addItemButton = new ButtonBuilder()
+      .setCustomId('start_add_item')
+      .setLabel('➕ Create New Item')
+      .setStyle(ButtonStyle.Primary);
 
-    const valueInput = new TextInputBuilder()
-      .setCustomId('item_value')
-      .setLabel('Item Value ($)')
-      .setStyle(TextInputStyle.Short)
-      .setRequired(true)
-      .setPlaceholder('Ex: 1000');
+    const row = new ActionRowBuilder().addComponents(addItemButton);
 
-    const descInput = new TextInputBuilder()
-      .setCustomId('item_desc')
-      .setLabel('Description')
-      .setStyle(TextInputStyle.Paragraph)
-      .setRequired(false)
-      .setPlaceholder('Optional: Describe your item.');
-
-    const row1 = new ActionRowBuilder().addComponents(nameInput);
-    const row2 = new ActionRowBuilder().addComponents(valueInput);
-    const row3 = new ActionRowBuilder().addComponents(descInput);
-
-    const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId(`trigger_modal_add_item_${message.author.id}`)
-        .setLabel('📦 Create Item Now')
-        .setStyle(ButtonStyle.Primary)
-    );
-
-    await message.author.send({ content: '👋 Let’s create your custom item...' });
-    await message.author.send({ content: '✍️ Click the button below to fill out the item form:', components: [row] });
+    return message.reply({
+      content: '✨ Ready to create a new custom item? Click below to get started!',
+      components: [row]
+    });
   }
-
+  
   // !view-items
   if (content === '!view-items') {
     const guildId = message.guild?.id;
