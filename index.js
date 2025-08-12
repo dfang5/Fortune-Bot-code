@@ -389,6 +389,43 @@ client.on('messageCreate', async message => {
       components: [row]
     });
   }
+
+  // !remove-item
+  if (content.startsWith('!remove-item')) {
+    if (!message.member.permissions.has('Administrator') && message.author.id !== '1299875574894039184') {
+      return message.reply('❌ You don’t have permission to remove items.');
+    }
+
+    const args = content.split(' ').slice(1);
+    const index = parseInt(args[0], 10) - 1; // user enters item number from !view-items
+
+    const guildId = message.guild?.id;
+    const items = userData.guildItems?.[guildId];
+
+    if (!items || items.length === 0) {
+      return message.reply('📭 No server items found.');
+    }
+
+    if (isNaN(index) || index < 0 || index >= items.length) {
+      return message.reply(`⚠ Please specify a valid item number. Use \`!view-items\` to see the list.`);
+    }
+
+    const removedItem = items.splice(index, 1)[0];
+
+    // Save changes
+    userData.guildItems[guildId] = items;
+    fs.writeFileSync('./data.json', JSON.stringify(userData, null, 2));
+
+    const { EmbedBuilder } = require('discord.js');
+    const embed = new EmbedBuilder()
+      .setTitle('🗑 Item Removed')
+      .setColor(0xFF0000) // Red
+      .setDescription(`**${removedItem.name}** has been removed from the server’s custom items.`)
+      .setFooter({ text: `Removed by ${message.author.tag}`, iconURL: message.author.displayAvatarURL({ dynamic: true }) })
+      .setTimestamp();
+
+    return message.reply({ embeds: [embed] });
+  }
   
   // !view-items
   if (content === '!view-items') {
@@ -399,16 +436,25 @@ client.on('messageCreate', async message => {
       return message.reply('📭 No server items found. Use `!add-item` to create one.');
     }
 
+    const { EmbedBuilder } = require('discord.js');
+
     const embed = new EmbedBuilder()
-      .setTitle(`📦 Server Custom Items`)
-      .setColor(0x00AAFF)
-      .setDescription(items.map((item, i) =>
-        `**${i + 1}. ${item.name}**\n💰 $${item.value}\n📝 ${item.desc}`).join('\n\n'))
-      .setFooter({ text: `Total Items: ${items.length}` });
+      .setTitle(`📦 ${message.guild.name} — Custom Items`)
+      .setColor(0xFFD700) // Gold
+      .setThumbnail(message.guild.iconURL({ dynamic: true }))
+      .setDescription(
+        items
+          .map((item, i) => 
+            `**${i + 1}. ${item.name}**\n💰 **$${item.value.toLocaleString()}**\n📝 ${item.desc}`
+          )
+          .join('\n\n')
+      )
+      .setFooter({ text: `Total Items: ${items.length} | Requested by ${message.author.tag}`, iconURL: message.author.displayAvatarURL({ dynamic: true }) })
+      .setTimestamp();
 
     return message.reply({ embeds: [embed] });
   }
-
+  
   // !give-item @user Item Name
   if (content.startsWith('!give-item')) {
     if (!message.member.permissions.has('Administrator')) {
