@@ -644,7 +644,7 @@ client.on('messageCreate', async message => {
           .setTitle(`${message.author.username}'s Inventory`)
           .addFields(
               { name: '💰 Cash', value: `$${ud.cash}`, inline: true },
-              { name: '📦 Artefacts', value: artefactList, inline: false },
+              { name: '📦 Artefacts/🧰 Items', value: artefactList, inline: false },
           )
           .setColor(0x00AAFF);
 
