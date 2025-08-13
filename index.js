@@ -595,109 +595,40 @@ client.on('messageCreate', async message => {
           sentMessage.edit({ components: [] });
       });
   }
-  
-  // !inventory
-if (content === '!inventory') {
-  const ud = userData[userId] || (userData[userId] = { cash: 0, artefacts: [], items: [] });
+// !inventory
+  if (content === '!inventory') {
+      const ud = userData[userId];
 
-  // Ensure arrays exist
-  ud.artefacts = Array.isArray(ud.artefacts) ? ud.artefacts : [];
-  ud.items = Array.isArray(ud.items) ? ud.items : [];
+      // Artefacts with rarity emojis
+      const artefactList = ud.artefacts.length
+          ? ud.artefacts.map(name => {
+              const rarity = getRarityByArtefact(name);
+              const emoji = rarity
+                  ? (rarity.name === 'Common' ? '⚪'
+                      : rarity.name === 'Uncommon' ? '🟢'
+                      : rarity.name === 'Rare' ? '🔵'
+                      : rarity.name === 'Legendary' ? '🟡'
+                      : '⚫')
+                  : '🧰';
+              return `${emoji} ${name}`;
+          }).join('\n')
+          : 'None';
 
-  // ---- Artefacts (with rarity emoji) ----
-  const artefactList = ud.artefacts.length
-    ? ud.artefacts.map(name => {
-        const rarity = getRarityByArtefact(name);
-        const emoji = rarity
-          ? (rarity.name === 'Common' ? '⚪'
-            : rarity.name === 'Uncommon' ? '🟢'
-            : rarity.name === 'Rare' ? '🔵'
-            : rarity.name === 'Legendary' ? '🟡'
-            : '⚫')
-          : '🧰';
-        return `${emoji} ${name}`;
-      }).join('\n')
-    : 'None';
+      // Items with quantities and descriptions
+      let itemsField = '';
+      if (ud.items && ud.items.length > 0) {
+          const itemCounts = {};
+          ud.items.forEach(item => {
+              if (!itemCounts[item.name]) {
+                  itemCounts[item.name] = { qty: 0, desc: item.desc || 'No description' };
+              }
+              itemCounts[item.name].qty++;
+          });
 
-  // ---- Items grouped by server of origin ----
-  // Expect each item as { name, desc, value, originGuildId, qty? }
-  // Backward-compat: strings or missing originGuildId go into 'unknown'
-  const itemsByGuild = new Map();
-  for (const it of ud.items) {
-    let obj = it;
-    if (typeof it === 'string') {
-      obj = { name: it, desc: 'No description', value: undefined, originGuildId: 'unknown', qty: 1 };
-    } else {
-      if (!obj.originGuildId) obj.originGuildId = 'unknown';
-      if (!('qty' in obj)) obj.qty = 1;
-    }
-    if (!itemsByGuild.has(obj.originGuildId)) itemsByGuild.set(obj.originGuildId, []);
-    itemsByGuild.get(obj.originGuildId).push(obj);
-  }
-
-  // Build per-guild item fields
-  const itemFields = [];
-  if (itemsByGuild.size === 0) {
-    itemFields.push({
-      name: '🧺 Items',
-      value: 'You have no items.',
-      inline: false
-    });
-  } else {
-    for (const [gid, arr] of itemsByGuild.entries()) {
-      // aggregate by name+desc so duplicates show as xN
-      const counts = {};
-      for (const o of arr) {
-        const key = `${o.name}||${o.desc || 'No description'}`;
-        if (!counts[key]) {
-          counts[key] = { name: o.name, desc: o.desc || 'No description', qty: 0, value: o.value };
-        }
-        counts[key].qty += Number.isFinite(o.qty) ? o.qty : 1;
+          itemsField = Object.entries(itemCounts)
+              .map(([name, data]) => `**${name}** — x${data.qty}\n📝 ${data.desc}`)
+              .join('\n\n');
       }
-
-      const lines = Object.values(counts).map(entry => {
-        const priceText = (entry.value != null && !isNaN(entry.value))
-          ? ` — $${Number(entry.value).toLocaleString()}`
-          : '';
-        return `**${entry.name}** — x${entry.qty}${priceText}\n📝 ${entry.desc}`;
-      });
-
-      // Resolve guild name (works if the bot is/was in that guild)
-      let serverName;
-      if (gid === 'unknown') {
-        serverName = 'Unknown / Legacy';
-      } else {
-        const g = message.client.guilds.cache.get(gid);
-        serverName = g?.name ? g.name : `Server ${gid}`;
-      }
-
-      // Respect Discord field length limits
-      const fieldValue = lines.length ? lines.join('\n\n').slice(0, 1024) : 'You have no items from this server.';
-      itemFields.push({
-        name: `🛒 Items from: ${serverName}`,
-        value: fieldValue,
-        inline: false
-      });
-    }
-  }
-
-  const embed = new EmbedBuilder()
-    .setTitle(`${message.author.username}'s Inventory`)
-    .setColor(0x00AAFF)
-    .addFields(
-      { name: '💰 Cash', value: `$${(ud.cash || 0).toLocaleString()}`, inline: true },
-      { name: '📦 Artefacts', value: artefactList, inline: false },
-      ...itemFields
-    )
-    .setFooter({
-      text: `Requested by ${message.author.tag}`,
-      iconURL: message.author.displayAvatarURL({ dynamic: true })
-    })
-    .setTimestamp();
-
-  return message.reply({ embeds: [embed] });
-}
-
   // !sell
   if (content === '!sell') {
     const arts = userData[userId].artefacts;
