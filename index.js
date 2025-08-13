@@ -86,15 +86,11 @@ client.on('interactionCreate', async interaction => {
           '`!inventory` - View your cash and artefacts',
           '`!sell` - Sell your artefacts for cash',
           '`!trade @user` - Start a trade with another user',
-          '`!leaderboard (or lb) - View the leaderboard and your current rating'
-        ].join('\n'),
-        inline: false
-      },
-      {
-        name: '💰 Trading System',
-        value: [
-          '`!add artefact` - Add artefacts to active trade',
-          '`!add money <amount>` - Add cash to active trade'
+          '`!leaderboard (or lb) - View the leaderboard and your current rating',
+          '`!add-item (Admin-Only) - Add an item through a form',
+          '`!remove-item (Admin-Only) - Remove an item',
+          '`!store - view and buy items',
+          '`!view-items (Admin-Only) - Access a masterboard of all the items in the guild/server'
         ].join('\n'),
         inline: false
       },
