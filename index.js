@@ -534,25 +534,117 @@ client.on('messageCreate', async message => {
     return message.reply(`You have earned **$${earned}** from labor! (Previous: $${previousCash}, New: $${userData[userId].cash})`);
   }
 
+  // !store
+  if (content === '!store') {
+      const guildId = message.guild?.id;
+      const items = userData.guildItems?.[guildId] || [];
+
+      if (!items.length) {
+          return message.reply('📭 No items available in the store. Use `!add-item` to add some.');
+      }
+
+      const storeEmbed = new EmbedBuilder()
+          .setTitle(`🏪 ${message.guild.name} Store`)
+          .setColor(0xFFD700)
+          .setDescription('Click the buttons below to purchase an item!')
+          .addFields(items.map(item => ({
+              name: `🛒 ${item.name} — 💰 $${item.value}`,
+              value: item.desc,
+              inline: false
+          })))
+          .setFooter({ text: `Total Items: ${items.length} | Your Balance: $${userData[message.author.id]?.cash || 0}` });
+
+      const row = new ActionRowBuilder()
+          .addComponents(items.map((item, i) =>
+              new ButtonBuilder()
+                  .setCustomId(`buy_${i}`)
+                  .setLabel(`Buy ${item.name}`)
+                  .setStyle(ButtonStyle.Success)
+          ));
+
+      const sentMessage = await message.reply({ embeds: [storeEmbed], components: [row] });
+
+      const filter = i => i.user.id === message.author.id;
+      const collector = sentMessage.createMessageComponentCollector({ filter, time: 300000 }); // 5 min
+
+      collector.on('collect', async interaction => {
+          const index = parseInt(interaction.customId.split('_')[1]);
+          const item = items[index];
+          const userId = interaction.user.id;
+
+          const ud = userData[userId] || { cash: 0, artefacts: [] };
+
+          if (ud.artefacts.includes(item.name)) {
+              return interaction.reply({ content: `❌ You already own **${item.name}**!`, ephemeral: true });
+          }
+
+          if (ud.cash < item.value) {
+              return interaction.reply({ content: `💸 You need $${item.value - ud.cash} more to buy **${item.name}**.`, ephemeral: true });
+          }
+
+          ud.cash -= item.value;
+          ud.artefacts.push(item.name);
+          userData[userId] = ud;
+          saveUserData();
+
+          await interaction.reply({ content: `✅ You bought **${item.name}** for 💰 $${item.value}!`, ephemeral: true });
+
+          // Refresh store for all viewers
+          const updatedEmbed = EmbedBuilder.from(storeEmbed)
+              .setFooter({ text: `Total Items: ${items.length} | Your Balance: $${ud.cash}` });
+          await sentMessage.edit({ embeds: [updatedEmbed] });
+      });
+
+      collector.on('end', () => {
+          sentMessage.edit({ components: [] });
+      });
+  }
+  
   // !inventory
   if (content === '!inventory') {
-    const ud = userData[userId];
-    const artefactList = ud.artefacts.length 
-    ? ud.artefacts.map(name => {
-        const rarity = getRarityByArtefact(name);
-        const emoji = rarity ? 
-          (rarity.name === 'Common' ? '⚪' : rarity.name === 'Uncommon' ? '🟢' :
-           rarity.name === 'Rare' ? '🔵' : rarity.name === 'Legendary' ? '🟡' : '⚫') : '🧰';
-        return `${emoji} ${name}`;
-      }).join('\n')
-    : 'None';
-    const embed = new EmbedBuilder()
-      .setTitle(`${message.author.username}'s Inventory`)
-      .addFields(
-        { name:'💰 Cash', value:`$${ud.cash}`, inline:true },
-        { name:'📦 Artefacts', value:artefactList, inline:false }
-      ).setColor(0x00AAFF);
-    return message.reply({ embeds:[embed] });
+      const ud = userData[userId];
+
+      // Artefacts with rarity emojis
+      const artefactList = ud.artefacts.length
+          ? ud.artefacts.map(name => {
+              const rarity = getRarityByArtefact(name);
+              const emoji = rarity
+                  ? (rarity.name === 'Common' ? '⚪'
+                      : rarity.name === 'Uncommon' ? '🟢'
+                      : rarity.name === 'Rare' ? '🔵'
+                      : rarity.name === 'Legendary' ? '🟡'
+                      : '⚫')
+                  : '🧰';
+              return `${emoji} ${name}`;
+          }).join('\n')
+          : 'None';
+
+      // Items with quantities and descriptions
+      let itemsField = '';
+      if (ud.items && ud.items.length > 0) {
+          const itemCounts = {};
+          ud.items.forEach(item => {
+              if (!itemCounts[item.name]) {
+                  itemCounts[item.name] = { qty: 0, desc: item.desc || 'No description' };
+              }
+              itemCounts[item.name].qty++;
+          });
+
+          itemsField = Object.entries(itemCounts)
+              .map(([name, data]) => `**${name}** — x${data.qty}\n📝 ${data.desc}`)
+              .join('\n\n');
+      }
+
+      // Embed
+      const embed = new EmbedBuilder()
+          .setTitle(`${message.author.username}'s Inventory`)
+          .addFields(
+              { name: '💰 Cash', value: `$${ud.cash}`, inline: true },
+              { name: '📦 Artefacts', value: artefactList, inline: false },
+          )
+          .setColor(0x00AAFF);
+
+      return message.reply({ embeds: [embed] });
   }
 
   // !sell
