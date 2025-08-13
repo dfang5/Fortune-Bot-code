@@ -86,11 +86,15 @@ client.on('interactionCreate', async interaction => {
           '`!inventory` - View your cash and artefacts',
           '`!sell` - Sell your artefacts for cash',
           '`!trade @user` - Start a trade with another user',
-          '`!leaderboard (or lb) - View the leaderboard and your current rating',
-          '`!add-item (Admin-Only) - Add an item through a form',
-          '`!remove-item (Admin-Only) - Remove an item',
-          '`!store - view and buy items',
-          '`!view-items (Admin-Only) - Access a masterboard of all the items in the guild/server'
+          '`!leaderboard (or lb) - View the leaderboard and your current rating'
+        ].join('\n'),
+        inline: false
+      },
+      {
+        name: '💰 Trading System',
+        value: [
+          '`!add artefact` - Add artefacts to active trade',
+          '`!add money <amount>` - Add cash to active trade'
         ].join('\n'),
         inline: false
       },
@@ -595,7 +599,8 @@ client.on('messageCreate', async message => {
           sentMessage.edit({ components: [] });
       });
   }
-// !inventory
+  
+  // !inventory
   if (content === '!inventory') {
       const ud = userData[userId];
 
@@ -629,6 +634,19 @@ client.on('messageCreate', async message => {
               .map(([name, data]) => `**${name}** — x${data.qty}\n📝 ${data.desc}`)
               .join('\n\n');
       }
+
+      // Embed
+      const embed = new EmbedBuilder()
+          .setTitle(`${message.author.username}'s Inventory`)
+          .addFields(
+              { name: '💰 Cash', value: `$${ud.cash}`, inline: true },
+              { name: '📦 Artefacts', value: artefactList, inline: false },
+          )
+          .setColor(0x00AAFF);
+
+      return message.reply({ embeds: [embed] });
+  }
+
   // !sell
   if (content === '!sell') {
     const arts = userData[userId].artefacts;
