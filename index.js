@@ -82,24 +82,24 @@ client.on('interactionCreate', async interaction => {
       {
         name: '🎮 Game Commands',
         value: [
-         '`!scavenge` - Search for rare artefacts (2h cooldown)',
-          '`!labor` - Work to earn money (40min cooldown)',
-          '`!inventory` - View your cash and artefacts',
-          '`!sell` - Sell your artefacts for cash',
-          '`!trade @user` - Start a trade with another user',
-          '`!leaderboard (or !lb) - View the leaderboard and your current rating',
-          '`!store - View all the items that admins have added',
-          '`!add-item (Admin-Only) - add an item into a guild/server',
-          '`!view-items (Admin-Only) - Access the masterboard to configure items',
-          '`!remove-item (Admin-Only) - Removes a specific item from a server (you must specify the number)',
-          '`!give-item (Admin-Only) - Gives an item to any player'
-        ].join('\n'),
-        inline: false
-      },
-      {
-        name: '💰 Trading System',
-        value: [
-          '`You can interact with buttons to either add or remove artefacts/items/cash.'
+          '`!scavenge` - Search for rare artefacts (2h cooldown)',
+            '`!labor` - Work to earn money (40min cooldown)',
+            '`!inventory` - View your cash and artefacts',
+            '`!sell` - Sell your artefacts for cash',
+            '`!trade @user` - Start a trade with another user',
+            '`!leaderboard (or !lb) - View the leaderboard and your current rating',
+            '`!store - View all the items that admins have added',
+            '`!add-item (Admin-Only) - add an item into a guild/server',
+            '`!view-items (Admin-Only) - Access the masterboard to configure items',
+            '`!remove-item (Admin-Only) - Removes a specific item from a server (you must specify the number)',
+            '`!give-item (Admin-Only) - Gives an item to any player'
+          ].join('\n'),
+          inline: false
+          },
+          {
+          name: '💰 Trading System',
+          value: [
+            '`You can interact with buttons to either add or remove artefacts/items/cash.'
         ].join('\n'),
         inline: false
       },
@@ -173,7 +173,7 @@ client.on('interactionCreate', async interaction => {
     const value = parseFloat(interaction.fields.getTextInputValue('item_value'));
 
     if (isNaN(value) || value < 0) {
-      return interaction.reply({ content: '⚠️ Invalid value. Please try again.', ephemeral: true });
+      return interaction.reply({ content: '⚠️ Invalid value. Please try again.', flags: [64] });
     }
 
     const guildId = interaction.guild?.id;
@@ -580,11 +580,11 @@ client.on('messageCreate', async message => {
           const ud = userData[userId] || { cash: 0, artefacts: [] };
 
           if (ud.artefacts.includes(item.name)) {
-              return interaction.reply({ content: `❌ You already own **${item.name}**!`, ephemeral: true });
+              return interaction.reply({ content: `❌ You already own **${item.name}**!`, flags: [64] });
           }
 
           if (ud.cash < item.value) {
-              return interaction.reply({ content: `💸 You need $${item.value - ud.cash} more to buy **${item.name}**.`, ephemeral: true });
+              return interaction.reply({ content: `💸 You need $${item.value - ud.cash} more to buy **${item.name}**.`, flags: [64] });
           }
 
           ud.cash -= item.value;
@@ -592,7 +592,7 @@ client.on('messageCreate', async message => {
           userData[userId] = ud;
           saveUserData();
 
-          await interaction.reply({ content: `✅ You bought **${item.name}** for 💰 $${item.value}!`, ephemeral: true });
+          await interaction.reply({ content: `✅ You bought **${item.name}** for 💰 $${item.value}!`, flags: [64] });
 
           // Refresh store for all viewers
           const updatedEmbed = EmbedBuilder.from(storeEmbed)
@@ -704,7 +704,7 @@ client.on('messageCreate', async message => {
     const usernames = [message.author.username, ...mentions.map(u => u.username)];
     
     // Check if any player is already in a marble game
-    const existingGame = Object.values(activeMarbleGames).find(game => 
+    const existingGame = Object.values(global.activeMarbleGames).find(game => 
       game.status !== 'finished' && players.some(p => game.players.includes(p))
     );
     if (existingGame) {
@@ -712,7 +712,7 @@ client.on('messageCreate', async message => {
     }
 
     const gameId = `marble_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    activeMarbleGames[gameId] = {
+    global.activeMarbleGames[gameId] = {
       id: gameId,
       initiator: userId,
       players: players,
@@ -767,7 +767,7 @@ client.on('messageCreate', async message => {
     if (interaction.isButton() && interaction.customId.startsWith('trigger_modal_add_item_')) {
       const userId = interaction.customId.split('_').pop();
       if (interaction.user.id !== userId) {
-        return interaction.reply({ content: '❌ This button is not for you.', ephemeral: true });
+        return interaction.reply({ content: '❌ This button is not for you.', flags: [64] });
       }
 
       const modal = new ModalBuilder()
@@ -806,15 +806,15 @@ client.on('messageCreate', async message => {
     // Handle Marble Game Buttons
     if (interaction.isButton() && (interaction.customId.startsWith('marble_accept_') || interaction.customId.startsWith('marble_decline_'))) {
       const gameId = interaction.customId.split('_')[2];
-      const game = activeMarbleGames[gameId];
+      const game = global.activeMarbleGames[gameId];
       
       if (!game) {
-        return interaction.reply({ content: '❌ Game not found or already finished.', ephemeral: true });
+        return interaction.reply({ content: '❌ Game not found or already finished.', flags: [64] });
       }
       
       const userId = interaction.user.id;
       if (!game.players.includes(userId)) {
-        return interaction.reply({ content: '❌ You are not part of this game.', ephemeral: true });
+        return interaction.reply({ content: '❌ You are not part of this game.', flags: [64] });
       }
 
       if (interaction.customId.startsWith('marble_decline_')) {
@@ -824,7 +824,7 @@ client.on('messageCreate', async message => {
           .setColor(0xFF0000);
         
         await interaction.update({ embeds: [embed], components: [] });
-        delete activeMarbleGames[gameId];
+        delete global.activeMarbleGames[gameId];
         return;
       }
 
@@ -880,21 +880,21 @@ client.on('messageCreate', async message => {
     // Handle Partner Selection for Marble Game
     if (interaction.isButton() && interaction.customId.startsWith('marble_choose_partner_')) {
       const gameId = interaction.customId.split('_')[3];
-      const game = activeMarbleGames[gameId];
+      const game = global.activeMarbleGames[gameId];
       
       if (!game || game.status !== 'team_formation') {
-        return interaction.reply({ content: '❌ Game not found or not in team formation phase.', ephemeral: true });
+        return interaction.reply({ content: '❌ Game not found or not in team formation phase.', flags: [64] });
       }
 
       const userId = interaction.user.id;
       if (!game.players.includes(userId)) {
-        return interaction.reply({ content: '❌ You are not part of this game.', ephemeral: true });
+        return interaction.reply({ content: '❌ You are not part of this game.', flags: [64] });
       }
 
       // Check if user already has a partner
       const existingPartnership = game.partnerships.find(p => p.includes(userId));
       if (existingPartnership) {
-        return interaction.reply({ content: '❌ You already have a partner!', ephemeral: true });
+        return interaction.reply({ content: '❌ You already have a partner!', flags: [64] });
       }
 
       // Show partner selection menu
@@ -903,7 +903,7 @@ client.on('messageCreate', async message => {
       );
 
       if (availablePlayers.length === 0) {
-        return interaction.reply({ content: '❌ No available players to partner with.', ephemeral: true });
+        return interaction.reply({ content: '❌ No available players to partner with.', flags: [64] });
       }
 
       const options = availablePlayers.map(pid => {
@@ -921,16 +921,16 @@ client.on('messageCreate', async message => {
         .addOptions(options);
 
       const row = new ActionRowBuilder().addComponents(selectMenu);
-      await interaction.reply({ content: 'Choose your partner:', components: [row], ephemeral: true });
+      await interaction.reply({ content: 'Choose your partner:', components: [row], flags: [64] });
     }
 
     // Handle Partner Selection Menu
     if (interaction.isStringSelectMenu() && interaction.customId.startsWith('marble_select_partner_')) {
       const gameId = interaction.customId.split('_')[3];
-      const game = activeMarbleGames[gameId];
+      const game = global.activeMarbleGames[gameId];
       
       if (!game) {
-        return interaction.reply({ content: '❌ Game not found.', ephemeral: true });
+        return interaction.reply({ content: '❌ Game not found.', flags: [64] });
       }
 
       const [requesterId, partnerId] = interaction.values[0].split('_');
@@ -970,15 +970,15 @@ client.on('messageCreate', async message => {
       const gameId = parts[3];
       const requesterId = parts[4];
       const partnerId = parts[5];
-      const game = activeMarbleGames[gameId];
+      const game = global.activeMarbleGames[gameId];
       
       if (!game) {
-        return interaction.reply({ content: '❌ Game not found.', ephemeral: true });
+        return interaction.reply({ content: '❌ Game not found.', flags: [64] });
       }
 
       const userId = interaction.user.id;
       if (userId !== partnerId) {
-        return interaction.reply({ content: '❌ This partnership request is not for you.', ephemeral: true });
+        return interaction.reply({ content: '❌ This partnership request is not for you.', flags: [64] });
       }
 
       if (interaction.customId.startsWith('marble_decline_partnership_')) {
@@ -1057,15 +1057,15 @@ client.on('messageCreate', async message => {
     // Handle Bet Setting for Marble Game
     if (interaction.isButton() && interaction.customId.startsWith('marble_set_bet_')) {
       const gameId = interaction.customId.split('_')[3];
-      const game = activeMarbleGames[gameId];
+      const game = global.activeMarbleGames[gameId];
       
       if (!game || game.status !== 'betting') {
-        return interaction.reply({ content: '❌ Game not found or not in betting phase.', ephemeral: true });
+        return interaction.reply({ content: '❌ Game not found or not in betting phase.', flags: [64] });
       }
 
       const userId = interaction.user.id;
       if (!game.players.includes(userId)) {
-        return interaction.reply({ content: '❌ You are not part of this game.', ephemeral: true });
+        return interaction.reply({ content: '❌ You are not part of this game.', flags: [64] });
       }
 
       // Show bet amount modal
@@ -1089,10 +1089,10 @@ client.on('messageCreate', async message => {
     // Handle Bet Amount Modal
     if (interaction.isModalSubmit() && interaction.customId.startsWith('marble_bet_modal_')) {
       const gameId = interaction.customId.split('_')[3];
-      const game = activeMarbleGames[gameId];
+      const game = global.activeMarbleGames[gameId];
       
       if (!game) {
-        return interaction.reply({ content: '❌ Game not found.', ephemeral: true });
+        return interaction.reply({ content: '❌ Game not found.', flags: [64] });
       }
 
       const betAmount = parseInt(interaction.fields.getTextInputValue('bet_amount'));
@@ -1238,7 +1238,7 @@ client.on('messageCreate', async message => {
     // Handle Marble Game Guessing
     if (interaction.isButton() && interaction.customId.startsWith('marble_guess_')) {
       const gameId = interaction.customId.split('_')[2];
-      const game = activeMarbleGames[gameId];
+      const game = global.activeMarbleGames[gameId];
       
       if (!game || game.status !== 'playing') {
         return interaction.reply({ content: '❌ Game not found or not in playing phase.', ephemeral: true });
@@ -1272,7 +1272,7 @@ client.on('messageCreate', async message => {
     // Handle Marble Game Guess Modal
     if (interaction.isModalSubmit() && interaction.customId.startsWith('marble_guess_modal_')) {
       const gameId = interaction.customId.split('_')[3];
-      const game = activeMarbleGames[gameId];
+      const game = global.activeMarbleGames[gameId];
       
       if (!game || game.status !== 'playing') {
         return interaction.reply({ content: '❌ Game not found or not in playing phase.', ephemeral: true });
@@ -1850,7 +1850,7 @@ async function processMarbleRound(interaction, game, gameId) {
         });
         
         // Clean up the game
-        delete activeMarbleGames[gameId];
+        delete global.activeMarbleGames[gameId];
         return;
       }
       
