@@ -29,6 +29,7 @@ let cooldowns = fs.existsSync(COOLDOWN_FILE) ? JSON.parse(fs.readFileSync(COOLDO
 
 if (!userData.guildItems) userData.guildItems = {}; // 🧠 Server-specific custom items
 global.tempItems = {}; // 💾 Store items awaiting confirmation
+global.activeMarbleGames = {}; // 🎲 Active marble games storage
 
 // Save functions
 function saveUserData() { fs.writeFileSync(DATA_FILE, JSON.stringify(userData, null, 2)); }
@@ -86,19 +87,15 @@ client.on('interactionCreate', async interaction => {
           '`!inventory` - View your cash and artefacts',
           '`!sell` - Sell your artefacts for cash',
           '`!trade @user` - Start a trade with another user',
-          '`!leaderboard (or !lb) - View the leaderboard and your current rating',
-          '`!store - View all the items that admins have added',
-          '`!add-item (Admin-Only) - add an item into a guild/server',
-          '`!view-items (Admin-Only) - Access the masterboard to configure items',
-          '`!remove-item (Admin-Only) - Removes a specific item from a server (you must specify the number)',
-          '`!give-item (Admin-Only) - Gives an item to any player'
+          '`!leaderboard (or lb) - View the leaderboard and your current rating'
         ].join('\n'),
         inline: false
       },
       {
         name: '💰 Trading System',
         value: [
-          '`You can interact with buttons to either add or remove artefacts/items/cash.'
+          '`!add artefact` - Add artefacts to active trade',
+          '`!add money <amount>` - Add cash to active trade'
         ].join('\n'),
         inline: false
       },
@@ -430,7 +427,7 @@ client.on('messageCreate', async message => {
 
     return message.reply({ embeds: [embed] });
   }
-  
+
   // !view-items
   if (content === '!view-items') {
     const guildId = message.guild?.id;
@@ -458,7 +455,7 @@ client.on('messageCreate', async message => {
 
     return message.reply({ embeds: [embed] });
   }
-  
+
   // !give-item @user Item Name
   if (content.startsWith('!give-item')) {
     if (!message.member.permissions.has('Administrator')) {
@@ -603,7 +600,7 @@ client.on('messageCreate', async message => {
           sentMessage.edit({ components: [] });
       });
   }
-  
+
   // !inventory
   if (content === '!inventory') {
       const ud = userData[userId];
@@ -644,7 +641,7 @@ client.on('messageCreate', async message => {
           .setTitle(`${message.author.username}'s Inventory`)
           .addFields(
               { name: '💰 Cash', value: `$${ud.cash}`, inline: true },
-              { name: '📦 Artefacts/🧰 Items', value: artefactList, inline: false },
+              { name: '📦 Artefacts', value: artefactList, inline: false },
           )
           .setColor(0x00AAFF);
 
@@ -690,6 +687,63 @@ client.on('messageCreate', async message => {
     );
 
     await message.channel.send({ embeds: [embed], components: [row] });
+  }
+
+  // !gamble-marbles @user1 @user2 @user3 - Squid Game Marble Game
+  if (content.startsWith('!gamble-marbles ')) {
+    const mentions = message.mentions.users;
+    if (mentions.size !== 3) {
+      return message.reply('🎯 You must mention exactly 3 other players to start a marble game!\n**Usage:** `!gamble-marbles @user1 @user2 @user3`');
+    }
+
+    const players = [userId, ...mentions.keys()];
+    const usernames = [message.author.username, ...mentions.map(u => u.username)];
+    
+    // Check if any player is already in a marble game
+    const existingGame = Object.values(activeMarbleGames).find(game => 
+      game.status !== 'finished' && players.some(p => game.players.includes(p))
+    );
+    if (existingGame) {
+      return message.reply('🚫 One or more players are already in an active marble game!');
+    }
+
+    const gameId = `marble_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    activeMarbleGames[gameId] = {
+      id: gameId,
+      initiator: userId,
+      players: players,
+      usernames: usernames,
+      status: 'awaiting_consent',
+      consents: { [userId]: true }, // Initiator auto-consents
+      channel: message.channel.id,
+      createdAt: Date.now()
+    };
+
+    const embed = new EmbedBuilder()
+      .setTitle('🎲 Marble Gambling Game Invitation')
+      .setDescription(`**${message.author.username}** has invited you to play the Squid Game marble challenge!\n\n**Players:**\n${usernames.map(name => `• ${name}`).join('\n')}\n\n**Rules:**\n• 2 teams of 2 players each\n• Each team starts with 10 marbles\n• Guess numbers 1-20 to win marbles\n• First team to reach 20 marbles wins the bet!`)
+      .setColor(0xFF6B6B)
+      .setFooter({ text: 'All invited players must accept to proceed' });
+
+    const acceptButton = new ButtonBuilder()
+      .setCustomId(`marble_accept_${gameId}`)
+      .setLabel('Accept Challenge')
+      .setEmoji('✅')
+      .setStyle(ButtonStyle.Success);
+
+    const declineButton = new ButtonBuilder()
+      .setCustomId(`marble_decline_${gameId}`)
+      .setLabel('Decline')
+      .setEmoji('❌')
+      .setStyle(ButtonStyle.Danger);
+
+    const row = new ActionRowBuilder().addComponents(acceptButton, declineButton);
+    
+    await message.channel.send({ 
+      content: `${mentions.map(u => `<@${u.id}>`).join(' ')} - You've been challenged to a marble game!`,
+      embeds: [embed], 
+      components: [row] 
+    });
   }
 });
 // Enhanced Button and Interaction Logic
@@ -743,6 +797,588 @@ client.on('messageCreate', async message => {
         );
 
       await interaction.showModal(modal);
+    }
+
+    // Handle Marble Game Buttons
+    if (interaction.isButton() && (interaction.customId.startsWith('marble_accept_') || interaction.customId.startsWith('marble_decline_'))) {
+      const gameId = interaction.customId.split('_')[2];
+      const game = activeMarbleGames[gameId];
+      
+      if (!game) {
+        return interaction.reply({ content: '❌ Game not found or already finished.', ephemeral: true });
+      }
+      
+      const userId = interaction.user.id;
+      if (!game.players.includes(userId)) {
+        return interaction.reply({ content: '❌ You are not part of this game.', ephemeral: true });
+      }
+
+      if (interaction.customId.startsWith('marble_decline_')) {
+        const embed = new EmbedBuilder()
+          .setTitle('🚫 Marble Game Declined')
+          .setDescription(`**${interaction.user.username}** has declined the marble game invitation.`)
+          .setColor(0xFF0000);
+        
+        await interaction.update({ embeds: [embed], components: [] });
+        delete activeMarbleGames[gameId];
+        return;
+      }
+
+      // Handle accept
+      game.consents[userId] = true;
+      const totalConsents = Object.keys(game.consents).length;
+      
+      if (totalConsents === 4) {
+        // All players accepted, move to team formation
+        game.status = 'team_formation';
+        game.teams = { team1: [], team2: [] };
+        game.partnerships = [];
+        
+        const embed = new EmbedBuilder()
+          .setTitle('✅ All Players Accepted!')
+          .setDescription('Now it\'s time to form teams! Each player must choose a partner.\n\n**How it works:**\n• Click "Choose Partner" to select someone\n• That person must accept your partnership\n• Once 2 partnerships are formed, teams are set!')
+          .setColor(0x00FF00)
+          .addFields({
+            name: '👥 Players',
+            value: game.usernames.map(name => `• ${name}`).join('\n'),
+            inline: true
+          });
+
+        const choosePartnerButton = new ButtonBuilder()
+          .setCustomId(`marble_choose_partner_${gameId}`)
+          .setLabel('Choose Partner')
+          .setEmoji('🤝')
+          .setStyle(ButtonStyle.Primary);
+
+        const row = new ActionRowBuilder().addComponents(choosePartnerButton);
+        await interaction.update({ embeds: [embed], components: [row] });
+        
+      } else {
+        // Still waiting for more consents
+        const embed = new EmbedBuilder()
+          .setTitle('⏳ Waiting for Players...')
+          .setDescription(`**${interaction.user.username}** has accepted the challenge!\n\n**Status:** ${totalConsents}/4 players ready`)
+          .setColor(0xFFD700)
+          .addFields({
+            name: '✅ Ready Players',
+            value: Object.keys(game.consents).map(pid => game.usernames[game.players.indexOf(pid)]).join('\n'),
+            inline: true
+          }, {
+            name: '⏰ Waiting For',
+            value: game.players.filter(pid => !game.consents[pid]).map(pid => game.usernames[game.players.indexOf(pid)]).join('\n'),
+            inline: true
+          });
+
+        await interaction.update({ embeds: [embed], components: interaction.message.components });
+      }
+    }
+
+    // Handle Partner Selection for Marble Game
+    if (interaction.isButton() && interaction.customId.startsWith('marble_choose_partner_')) {
+      const gameId = interaction.customId.split('_')[3];
+      const game = activeMarbleGames[gameId];
+      
+      if (!game || game.status !== 'team_formation') {
+        return interaction.reply({ content: '❌ Game not found or not in team formation phase.', ephemeral: true });
+      }
+
+      const userId = interaction.user.id;
+      if (!game.players.includes(userId)) {
+        return interaction.reply({ content: '❌ You are not part of this game.', ephemeral: true });
+      }
+
+      // Check if user already has a partner
+      const existingPartnership = game.partnerships.find(p => p.includes(userId));
+      if (existingPartnership) {
+        return interaction.reply({ content: '❌ You already have a partner!', ephemeral: true });
+      }
+
+      // Show partner selection menu
+      const availablePlayers = game.players.filter(pid => 
+        pid !== userId && !game.partnerships.some(p => p.includes(pid))
+      );
+
+      if (availablePlayers.length === 0) {
+        return interaction.reply({ content: '❌ No available players to partner with.', ephemeral: true });
+      }
+
+      const options = availablePlayers.map(pid => {
+        const username = game.usernames[game.players.indexOf(pid)];
+        return {
+          label: username,
+          value: `${userId}_${pid}`,
+          description: `Partner with ${username}`
+        };
+      });
+
+      const selectMenu = new StringSelectMenuBuilder()
+        .setCustomId(`marble_select_partner_${gameId}`)
+        .setPlaceholder('Choose your partner')
+        .addOptions(options);
+
+      const row = new ActionRowBuilder().addComponents(selectMenu);
+      await interaction.reply({ content: 'Choose your partner:', components: [row], ephemeral: true });
+    }
+
+    // Handle Partner Selection Menu
+    if (interaction.isStringSelectMenu() && interaction.customId.startsWith('marble_select_partner_')) {
+      const gameId = interaction.customId.split('_')[3];
+      const game = activeMarbleGames[gameId];
+      
+      if (!game) {
+        return interaction.reply({ content: '❌ Game not found.', ephemeral: true });
+      }
+
+      const [requesterId, partnerId] = interaction.values[0].split('_');
+      const requesterName = game.usernames[game.players.indexOf(requesterId)];
+      const partnerName = game.usernames[game.players.indexOf(partnerId)];
+
+      // Create partnership request
+      const embed = new EmbedBuilder()
+        .setTitle('🤝 Partnership Request')
+        .setDescription(`**${requesterName}** wants to partner with **${partnerName}** for the marble game!`)
+        .setColor(0x4169E1);
+
+      const acceptButton = new ButtonBuilder()
+        .setCustomId(`marble_accept_partnership_${gameId}_${requesterId}_${partnerId}`)
+        .setLabel('Accept Partnership')
+        .setEmoji('✅')
+        .setStyle(ButtonStyle.Success);
+
+      const declineButton = new ButtonBuilder()
+        .setCustomId(`marble_decline_partnership_${gameId}_${requesterId}_${partnerId}`)
+        .setLabel('Decline')
+        .setEmoji('❌')
+        .setStyle(ButtonStyle.Danger);
+
+      const row = new ActionRowBuilder().addComponents(acceptButton, declineButton);
+      
+      await interaction.update({
+        content: `<@${partnerId}> - Partnership request from ${requesterName}!`,
+        embeds: [embed],
+        components: [row]
+      });
+    }
+
+    // Handle Partnership Response
+    if (interaction.isButton() && (interaction.customId.startsWith('marble_accept_partnership_') || interaction.customId.startsWith('marble_decline_partnership_'))) {
+      const parts = interaction.customId.split('_');
+      const gameId = parts[3];
+      const requesterId = parts[4];
+      const partnerId = parts[5];
+      const game = activeMarbleGames[gameId];
+      
+      if (!game) {
+        return interaction.reply({ content: '❌ Game not found.', ephemeral: true });
+      }
+
+      const userId = interaction.user.id;
+      if (userId !== partnerId) {
+        return interaction.reply({ content: '❌ This partnership request is not for you.', ephemeral: true });
+      }
+
+      if (interaction.customId.startsWith('marble_decline_partnership_')) {
+        const embed = new EmbedBuilder()
+          .setTitle('❌ Partnership Declined')
+          .setDescription(`**${game.usernames[game.players.indexOf(partnerId)]}** declined the partnership.`)
+          .setColor(0xFF0000);
+
+        await interaction.update({ embeds: [embed], components: [] });
+        return;
+      }
+
+      // Accept partnership
+      game.partnerships.push([requesterId, partnerId]);
+      
+      if (game.partnerships.length === 2) {
+        // Teams formed, move to betting phase
+        game.teams.team1 = game.partnerships[0];
+        game.teams.team2 = game.partnerships[1];
+        game.status = 'betting';
+        
+        const team1Names = game.teams.team1.map(pid => game.usernames[game.players.indexOf(pid)]);
+        const team2Names = game.teams.team2.map(pid => game.usernames[game.players.indexOf(pid)]);
+        
+        const embed = new EmbedBuilder()
+          .setTitle('✅ Teams Formed!')
+          .setDescription('Teams have been successfully formed! Now it\'s time to place your bets.\n\n**How betting works:**\n• Both teams must agree on the same bet amount\n• The winning team splits the total pot\n• The losing team loses their bet')
+          .setColor(0x00FF00)
+          .addFields(
+            {
+              name: '🔴 Team 1',
+              value: team1Names.join(' & '),
+              inline: true
+            },
+            {
+              name: '🔵 Team 2', 
+              value: team2Names.join(' & '),
+              inline: true
+            }
+          );
+
+        const setBetButton = new ButtonBuilder()
+          .setCustomId(`marble_set_bet_${gameId}`)
+          .setLabel('Set Bet Amount')
+          .setEmoji('💰')
+          .setStyle(ButtonStyle.Primary);
+
+        const row = new ActionRowBuilder().addComponents(setBetButton);
+        await interaction.update({ embeds: [embed], components: [row] });
+        
+      } else {
+        // One partnership formed, waiting for second
+        const partnership1Names = game.partnerships[0].map(pid => game.usernames[game.players.indexOf(pid)]);
+        
+        const embed = new EmbedBuilder()
+          .setTitle('🤝 Partnership Accepted!')
+          .setDescription('First partnership formed! Waiting for the remaining players to partner up.')
+          .setColor(0x00AA00)
+          .addFields({
+            name: '✅ Partnership 1',
+            value: partnership1Names.join(' & '),
+            inline: false
+          });
+
+        const choosePartnerButton = new ButtonBuilder()
+          .setCustomId(`marble_choose_partner_${gameId}`)
+          .setLabel('Choose Partner')
+          .setEmoji('🤝')
+          .setStyle(ButtonStyle.Primary);
+
+        const row = new ActionRowBuilder().addComponents(choosePartnerButton);
+        await interaction.update({ embeds: [embed], components: [row] });
+      }
+    }
+
+    // Handle Bet Setting for Marble Game
+    if (interaction.isButton() && interaction.customId.startsWith('marble_set_bet_')) {
+      const gameId = interaction.customId.split('_')[3];
+      const game = activeMarbleGames[gameId];
+      
+      if (!game || game.status !== 'betting') {
+        return interaction.reply({ content: '❌ Game not found or not in betting phase.', ephemeral: true });
+      }
+
+      const userId = interaction.user.id;
+      if (!game.players.includes(userId)) {
+        return interaction.reply({ content: '❌ You are not part of this game.', ephemeral: true });
+      }
+
+      // Show bet amount modal
+      const modal = new ModalBuilder()
+        .setCustomId(`marble_bet_modal_${gameId}`)
+        .setTitle('💰 Set Bet Amount');
+
+      const betInput = new TextInputBuilder()
+        .setCustomId('bet_amount')
+        .setLabel('Bet Amount ($)')
+        .setStyle(TextInputStyle.Short)
+        .setPlaceholder('Enter amount to bet (e.g., 1000)')
+        .setRequired(true);
+
+      const row = new ActionRowBuilder().addComponents(betInput);
+      modal.addComponents(row);
+
+      await interaction.showModal(modal);
+    }
+
+    // Handle Bet Amount Modal
+    if (interaction.isModalSubmit() && interaction.customId.startsWith('marble_bet_modal_')) {
+      const gameId = interaction.customId.split('_')[3];
+      const game = activeMarbleGames[gameId];
+      
+      if (!game) {
+        return interaction.reply({ content: '❌ Game not found.', ephemeral: true });
+      }
+
+      const betAmount = parseInt(interaction.fields.getTextInputValue('bet_amount'));
+      const userId = interaction.user.id;
+      
+      if (isNaN(betAmount) || betAmount <= 0) {
+        return interaction.reply({ content: '❌ Please enter a valid positive number.', ephemeral: true });
+      }
+
+      // Check if user has enough money
+      if (!userData[userId] || userData[userId].cash < betAmount) {
+        return interaction.reply({ 
+          content: `❌ You don't have enough money! You have $${userData[userId]?.cash || 0} but tried to bet $${betAmount}.`, 
+          ephemeral: true 
+        });
+      }
+
+      // Initialize game betting if not exists
+      if (!game.bets) game.bets = {};
+      
+      game.bets[userId] = betAmount;
+
+      // Check if everyone has placed their bet
+      const allBetsPlaced = game.players.every(pid => game.bets[pid] !== undefined);
+      
+      if (allBetsPlaced) {
+        // Check if all bets are the same
+        const betAmounts = Object.values(game.bets);
+        const allSame = betAmounts.every(amount => amount === betAmounts[0]);
+        
+        if (allSame) {
+          // Start the game!
+          game.status = 'playing';
+          game.currentRound = 1;
+          game.marbles = { team1: 10, team2: 10 };
+          game.roundGuesses = {};
+          
+          // Deduct bet amounts from all players
+          game.players.forEach(pid => {
+            userData[pid].cash -= game.bets[pid];
+          });
+          saveUserData();
+
+          // Determine first team randomly
+          const firstTeam = Math.random() < 0.5 ? 'team1' : 'team2';
+          game.currentTeam = firstTeam;
+          game.currentPlayer = game.teams[firstTeam][0]; // First player of the chosen team
+          
+          const embed = new EmbedBuilder()
+            .setTitle('🎲 Marble Game Started!')
+            .setDescription(`**Bet Amount:** $${betAmounts[0]} per player\n**Total Pot:** $${betAmounts[0] * 4}\n\nThe coin toss determined that **${firstTeam === 'team1' ? 'Team 1 🔴' : 'Team 2 🔵'}** goes first!`)
+            .setColor(0x00FF00)
+            .addFields(
+              {
+                name: '🔴 Team 1',
+                value: `${game.teams.team1.map(pid => game.usernames[game.players.indexOf(pid)]).join(' & ')}\n🟣 Marbles: ${game.marbles.team1}`,
+                inline: true
+              },
+              {
+                name: '🔵 Team 2',
+                value: `${game.teams.team2.map(pid => game.usernames[game.players.indexOf(pid)]).join(' & ')}\n🟣 Marbles: ${game.marbles.team2}`,
+                inline: true
+              }
+            )
+            .setFooter({ 
+              text: `Round ${game.currentRound} • ${game.usernames[game.players.indexOf(game.currentPlayer)]}'s turn` 
+            });
+
+          const guessButton = new ButtonBuilder()
+            .setCustomId(`marble_guess_${gameId}`)
+            .setLabel('Make Guess (1-20)')
+            .setEmoji('🎯')
+            .setStyle(ButtonStyle.Primary);
+
+          const row = new ActionRowBuilder().addComponents(guessButton);
+          
+          await interaction.update({ 
+            content: `<@${game.currentPlayer}> - Your turn to guess!`,
+            embeds: [embed], 
+            components: [row] 
+          });
+          
+        } else {
+          // Bets don't match
+          const embed = new EmbedBuilder()
+            .setTitle('❌ Bet Mismatch!')
+            .setDescription('All players must bet the same amount. Please try again.')
+            .setColor(0xFF0000)
+            .addFields(
+              game.players.map(pid => ({
+                name: game.usernames[game.players.indexOf(pid)],
+                value: `$${game.bets[pid]}`,
+                inline: true
+              }))
+            );
+
+          // Reset bets
+          game.bets = {};
+          
+          const setBetButton = new ButtonBuilder()
+            .setCustomId(`marble_set_bet_${gameId}`)
+            .setLabel('Set Bet Amount')
+            .setEmoji('💰')
+            .setStyle(ButtonStyle.Primary);
+
+          const row = new ActionRowBuilder().addComponents(setBetButton);
+          await interaction.update({ embeds: [embed], components: [row] });
+        }
+      } else {
+        // Still waiting for more bets
+        const pendingPlayers = game.players.filter(pid => game.bets[pid] === undefined);
+        
+        const embed = new EmbedBuilder()
+          .setTitle('⏳ Waiting for Bets...')
+          .setDescription(`**${interaction.user.username}** has bet $${betAmount}!`)
+          .setColor(0xFFD700)
+          .addFields(
+            {
+              name: '✅ Bets Placed',
+              value: Object.keys(game.bets).map(pid => 
+                `${game.usernames[game.players.indexOf(pid)]}: $${game.bets[pid]}`
+              ).join('\n'),
+              inline: true
+            },
+            {
+              name: '⏰ Waiting For',
+              value: pendingPlayers.map(pid => game.usernames[game.players.indexOf(pid)]).join('\n'),
+              inline: true
+            }
+          );
+
+        const setBetButton = new ButtonBuilder()
+          .setCustomId(`marble_set_bet_${gameId}`)
+          .setLabel('Set Bet Amount')
+          .setEmoji('💰')
+          .setStyle(ButtonStyle.Primary);
+
+        const row = new ActionRowBuilder().addComponents(setBetButton);
+        await interaction.update({ embeds: [embed], components: [row] });
+      }
+    }
+
+    // Handle Marble Game Guessing
+    if (interaction.isButton() && interaction.customId.startsWith('marble_guess_')) {
+      const gameId = interaction.customId.split('_')[2];
+      const game = activeMarbleGames[gameId];
+      
+      if (!game || game.status !== 'playing') {
+        return interaction.reply({ content: '❌ Game not found or not in playing phase.', ephemeral: true });
+      }
+
+      const userId = interaction.user.id;
+      if (userId !== game.currentPlayer) {
+        return interaction.reply({ content: '❌ It\'s not your turn to guess!', ephemeral: true });
+      }
+
+      // Show guess modal
+      const modal = new ModalBuilder()
+        .setCustomId(`marble_guess_modal_${gameId}`)
+        .setTitle('🎯 Make Your Guess');
+
+      const guessInput = new TextInputBuilder()
+        .setCustomId('guess_number')
+        .setLabel('Guess a number (1-20)')
+        .setStyle(TextInputStyle.Short)
+        .setPlaceholder('Enter a number between 1 and 20')
+        .setMinLength(1)
+        .setMaxLength(2)
+        .setRequired(true);
+
+      const row = new ActionRowBuilder().addComponents(guessInput);
+      modal.addComponents(row);
+
+      await interaction.showModal(modal);
+    }
+
+    // Handle Marble Game Guess Modal
+    if (interaction.isModalSubmit() && interaction.customId.startsWith('marble_guess_modal_')) {
+      const gameId = interaction.customId.split('_')[3];
+      const game = activeMarbleGames[gameId];
+      
+      if (!game || game.status !== 'playing') {
+        return interaction.reply({ content: '❌ Game not found or not in playing phase.', ephemeral: true });
+      }
+
+      const userId = interaction.user.id;
+      const guess = parseInt(interaction.fields.getTextInputValue('guess_number'));
+      
+      if (isNaN(guess) || guess < 1 || guess > 20) {
+        return interaction.reply({ content: '❌ Please enter a number between 1 and 20.', ephemeral: true });
+      }
+
+      // Record the guess
+      if (!game.roundGuesses) game.roundGuesses = {};
+      game.roundGuesses[userId] = guess;
+
+      // Move to next player or check if round is complete
+      const currentTeamKey = game.currentTeam;
+      const currentTeamPlayers = game.teams[currentTeamKey];
+      const currentPlayerIndex = currentTeamPlayers.indexOf(game.currentPlayer);
+      
+      if (currentPlayerIndex === 0) {
+        // First player of team guessed, move to second player
+        game.currentPlayer = currentTeamPlayers[1];
+        
+        const embed = new EmbedBuilder()
+          .setTitle('🎯 Guess Recorded!')
+          .setDescription(`**${game.usernames[game.players.indexOf(userId)]}** has made their guess!`)
+          .setColor(0x4169E1)
+          .addFields(
+            {
+              name: '🔴 Team 1',
+              value: `${game.teams.team1.map(pid => game.usernames[game.players.indexOf(pid)]).join(' & ')}\n🟣 Marbles: ${game.marbles.team1}`,
+              inline: true
+            },
+            {
+              name: '🔵 Team 2',
+              value: `${game.teams.team2.map(pid => game.usernames[game.players.indexOf(pid)]).join(' & ')}\n🟣 Marbles: ${game.marbles.team2}`,
+              inline: true
+            }
+          )
+          .setFooter({ 
+            text: `Round ${game.currentRound} • ${game.usernames[game.players.indexOf(game.currentPlayer)]}'s turn` 
+          });
+
+        const guessButton = new ButtonBuilder()
+          .setCustomId(`marble_guess_${gameId}`)
+          .setLabel('Make Guess (1-20)')
+          .setEmoji('🎯')
+          .setStyle(ButtonStyle.Primary);
+
+        const row = new ActionRowBuilder().addComponents(guessButton);
+        
+        await interaction.update({ 
+          content: `<@${game.currentPlayer}> - Your turn to guess!`,
+          embeds: [embed], 
+          components: [row] 
+        });
+        
+      } else {
+        // Second player of team guessed, switch to other team or process round
+        const otherTeam = currentTeamKey === 'team1' ? 'team2' : 'team1';
+        const otherTeamPlayers = game.teams[otherTeam];
+        
+        // Check if other team has also completed their guesses
+        const otherTeamGuessed = otherTeamPlayers.every(pid => game.roundGuesses[pid] !== undefined);
+        
+        if (otherTeamGuessed) {
+          // Both teams have guessed, process the round
+          await processMarbleRound(interaction, game, gameId);
+        } else {
+          // Switch to other team
+          game.currentTeam = otherTeam;
+          game.currentPlayer = otherTeamPlayers[0];
+          
+          const embed = new EmbedBuilder()
+            .setTitle('🎯 Guess Recorded!')
+            .setDescription(`**${game.usernames[game.players.indexOf(userId)]}** has made their guess!\n\nNow it's the other team's turn!`)
+            .setColor(0x4169E1)
+            .addFields(
+              {
+                name: '🔴 Team 1',
+                value: `${game.teams.team1.map(pid => game.usernames[game.players.indexOf(pid)]).join(' & ')}\n🟣 Marbles: ${game.marbles.team1}`,
+                inline: true
+              },
+              {
+                name: '🔵 Team 2',
+                value: `${game.teams.team2.map(pid => game.usernames[game.players.indexOf(pid)]).join(' & ')}\n🟣 Marbles: ${game.marbles.team2}`,
+                inline: true
+              }
+            )
+            .setFooter({ 
+              text: `Round ${game.currentRound} • ${game.usernames[game.players.indexOf(game.currentPlayer)]}'s turn` 
+            });
+
+          const guessButton = new ButtonBuilder()
+            .setCustomId(`marble_guess_${gameId}`)
+            .setLabel('Make Guess (1-20)')
+            .setEmoji('🎯')
+            .setStyle(ButtonStyle.Primary);
+
+          const row = new ActionRowBuilder().addComponents(guessButton);
+          
+          await interaction.update({ 
+            content: `<@${game.currentPlayer}> - Your turn to guess!`,
+            embeds: [embed], 
+            components: [row] 
+          });
+        }
+      }
     }
 
     // Handle Trade Buttons
@@ -1141,4 +1777,162 @@ client.on('messageCreate', async message => {
       }
     }
   });
-  client.login(token);
+
+// Process Marble Game Round Function
+async function processMarbleRound(interaction, game, gameId) {
+  // Roll the dice
+  let rolledNumber;
+  let attempts = 0;
+  const maxAttempts = 10; // Safety limit to prevent infinite loops
+  
+  do {
+    rolledNumber = Math.floor(Math.random() * 20) + 1;
+    attempts++;
+    
+    // Check if anyone guessed this number
+    const winners = game.players.filter(pid => game.roundGuesses[pid] === rolledNumber);
+    
+    if (winners.length > 0) {
+      // Someone won this round!
+      const winnerTeam = game.teams.team1.includes(winners[0]) ? 'team1' : 'team2';
+      const loserTeam = winnerTeam === 'team1' ? 'team2' : 'team1';
+      
+      // Transfer marble
+      game.marbles[winnerTeam] += 1;
+      game.marbles[loserTeam] -= 1;
+      
+      const winnerNames = winners.map(pid => game.usernames[game.players.indexOf(pid)]);
+      
+      // Check for game end
+      if (game.marbles[winnerTeam] >= 20) {
+        // Game over! This team wins
+        game.status = 'finished';
+        const totalPot = Object.values(game.bets).reduce((sum, bet) => sum + bet, 0);
+        const winningsPerPlayer = totalPot / 2; // Split between 2 winners
+        
+        // Award winnings to winning team
+        game.teams[winnerTeam].forEach(pid => {
+          userData[pid].cash += winningsPerPlayer;
+        });
+        saveUserData();
+        
+        const finalEmbed = new EmbedBuilder()
+          .setTitle('🎉 GAME OVER!')
+          .setDescription(`**${winnerTeam === 'team1' ? 'Team 1 🔴' : 'Team 2 🔵'}** has won the marble game!\n\n**Final Roll:** ${rolledNumber}\n**Winning Guess:** ${winners.map(pid => `${game.usernames[game.players.indexOf(pid)]} (${game.roundGuesses[pid]})`).join(', ')}`)
+          .setColor(0xFFD700)
+          .addFields(
+            {
+              name: '🏆 Winners',
+              value: game.teams[winnerTeam].map(pid => game.usernames[game.players.indexOf(pid)]).join(' & '),
+              inline: true
+            },
+            {
+              name: '💰 Winnings',
+              value: `$${winningsPerPlayer.toLocaleString()} each`,
+              inline: true
+            },
+            {
+              name: '📊 Final Score',
+              value: `🔴 Team 1: ${game.marbles.team1} marbles\n🔵 Team 2: ${game.marbles.team2} marbles`,
+              inline: false
+            }
+          )
+          .setFooter({ text: `Game completed after ${game.currentRound} rounds` });
+
+        await interaction.update({ 
+          content: '🎊 Congratulations to the winners!', 
+          embeds: [finalEmbed], 
+          components: [] 
+        });
+        
+        // Clean up the game
+        delete activeMarbleGames[gameId];
+        return;
+      }
+      
+      // Continue game - prepare next round
+      game.currentRound++;
+      game.roundGuesses = {};
+      
+      // Switch starting team for next round
+      const nextStartingTeam = winnerTeam === 'team1' ? 'team2' : 'team1';
+      game.currentTeam = nextStartingTeam;
+      game.currentPlayer = game.teams[nextStartingTeam][0];
+      
+      const roundEmbed = new EmbedBuilder()
+        .setTitle(`🎯 Round ${game.currentRound - 1} Results`)
+        .setDescription(`**Rolled Number:** ${rolledNumber}\n**Winner:** ${winnerNames.join(' & ')} guessed correctly!\n\n${winnerTeam === 'team1' ? 'Team 1 🔴' : 'Team 2 🔵'} gains 1 marble!`)
+        .setColor(winnerTeam === 'team1' ? 0xFF0000 : 0x0000FF)
+        .addFields(
+          {
+            name: '🔴 Team 1',
+            value: `${game.teams.team1.map(pid => game.usernames[game.players.indexOf(pid)]).join(' & ')}\n🟣 Marbles: ${game.marbles.team1}`,
+            inline: true
+          },
+          {
+            name: '🔵 Team 2',
+            value: `${game.teams.team2.map(pid => game.usernames[game.players.indexOf(pid)]).join(' & ')}\n🟣 Marbles: ${game.marbles.team2}`,
+            inline: true
+          }
+        )
+        .setFooter({ 
+          text: `Round ${game.currentRound} starting • ${game.usernames[game.players.indexOf(game.currentPlayer)]}'s turn`
+        });
+
+      const guessButton = new ButtonBuilder()
+        .setCustomId(`marble_guess_${gameId}`)
+        .setLabel('Make Guess (1-20)')
+        .setEmoji('🎯')
+        .setStyle(ButtonStyle.Primary);
+
+      const row = new ActionRowBuilder().addComponents(guessButton);
+      
+      // Add 3 second delay before next round
+      await interaction.update({ 
+        content: 'Processing next round in 3 seconds...', 
+        embeds: [roundEmbed], 
+        components: [] 
+      });
+      
+      setTimeout(async () => {
+        await interaction.editReply({ 
+          content: `<@${game.currentPlayer}> - Your turn to guess!`,
+          embeds: [roundEmbed], 
+          components: [row] 
+        });
+      }, 3000);
+      
+      return; // Exit the function as we found winners
+    }
+  } while (attempts < maxAttempts);
+  
+  // If we get here, no one guessed the number after max attempts
+  // This is a backup - in practice, this should rarely happen
+  const noWinnerEmbed = new EmbedBuilder()
+    .setTitle('🔄 No Winners This Round')
+    .setDescription(`After ${maxAttempts} attempts, no winning numbers were rolled. Starting next round...`)
+    .setColor(0xFFFF00);
+
+  await interaction.update({ embeds: [noWinnerEmbed], components: [] });
+  
+  // Reset round and continue
+  game.roundGuesses = {};
+  game.currentPlayer = game.teams[game.currentTeam][0];
+  
+  setTimeout(async () => {
+    const guessButton = new ButtonBuilder()
+      .setCustomId(`marble_guess_${gameId}`)
+      .setLabel('Make Guess (1-20)')
+      .setEmoji('🎯')
+      .setStyle(ButtonStyle.Primary);
+
+    const row = new ActionRowBuilder().addComponents(guessButton);
+    
+    await interaction.editReply({ 
+      content: `<@${game.currentPlayer}> - Your turn to guess!`,
+      components: [row] 
+    });
+  }, 2000);
+}
+
+client.login(token);
