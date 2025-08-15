@@ -1751,9 +1751,9 @@ client.on('messageCreate', async message => {
 
         const rarityEmoji = rar ? 
           (rar.name === 'Common' ? '⚪' : 
-           rarity.name === 'Uncommon' ? '🟢' : 
-           rarity.name === 'Rare' ? '🔵' : 
-           rarity.name === 'Legendary' ? '🟡' : '⚫') : '❓';
+           rar.name === 'Uncommon' ? '🟢' : 
+           rar.name === 'Rare' ? '🔵' : 
+           rar.name === 'Legendary' ? '🟡' : '⚫') : '❓';
 
         const confirmEmbed = new EmbedBuilder()
           .setTitle('💰 Confirm Sale')
