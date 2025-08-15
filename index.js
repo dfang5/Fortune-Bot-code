@@ -92,7 +92,8 @@ client.on('interactionCreate', async interaction => {
             '`!add-item (Admin-Only) - add an item into a guild/server',
             '`!view-items (Admin-Only) - Access the masterboard to configure items',
             '`!remove-item (Admin-Only) - Removes a specific item from a server (you must specify the number)',
-            '`!give-item (Admin-Only) - Gives an item to any player'
+            '`!give-item (Admin-Only) - Gives an item to any player',
+            '`!gamble-marbles @<user> @<user> @<user> start a four player gambling match with custom cash amounts'
           ].join('\n'),
           inline: false
           },
