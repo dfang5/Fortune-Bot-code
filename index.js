@@ -727,7 +727,7 @@ client.on('messageCreate', async message => {
 
     const embed = new EmbedBuilder()
       .setTitle('🎲 Marble Gambling Game Invitation')
-      .setDescription(`**${message.author.username}** has invited you to play the marble arena!\n\n**Players:**\n${usernames.map(name => `• ${name}`).join('\n')}\n\n**Rules:**\n• 2 teams of 2 players each\n• Each team starts with 10 marbles\n• Guess numbers 1-20 to win marbles\n• First team to reach 20 marbles wins the bet!`)
+      .setDescription(`**${message.author.username}** has invited you to play the marble challenge!\n\n**Players:**\n${usernames.map(name => `• ${name}`).join('\n')}\n\n**Rules:**\n• 2 teams of 2 players each\n• Each team starts with 10 marbles\n• Guess numbers 1-20 to win marbles\n• First team to reach 20 marbles wins the bet!`)
       .setColor(0xFF6B6B)
       .setFooter({ text: 'All invited players must accept to proceed' });
 
@@ -1001,10 +1001,18 @@ client.on('messageCreate', async message => {
 
     // Handle Partnership Response
     if (interaction.isButton() && (interaction.customId.startsWith('marble_accept_partnership_') || interaction.customId.startsWith('marble_decline_partnership_'))) {
-      const parts = interaction.customId.split('_');
-      const gameId = parts[3];
-      const requesterId = parts[4];
-      const partnerId = parts[5];
+      const isAccept = interaction.customId.startsWith('marble_accept_partnership_');
+      const prefix = isAccept ? 'marble_accept_partnership_' : 'marble_decline_partnership_';
+      const remaining = interaction.customId.substring(prefix.length);
+      
+      // Split only on the last two underscores to get requesterId and partnerId
+      const lastUnderscoreIndex = remaining.lastIndexOf('_');
+      const secondLastUnderscoreIndex = remaining.lastIndexOf('_', lastUnderscoreIndex - 1);
+      
+      const gameId = remaining.substring(0, secondLastUnderscoreIndex);
+      const requesterId = remaining.substring(secondLastUnderscoreIndex + 1, lastUnderscoreIndex);
+      const partnerId = remaining.substring(lastUnderscoreIndex + 1);
+      
       const game = activeMarbleGames[gameId];
       
       if (!game) {
