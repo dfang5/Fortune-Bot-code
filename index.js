@@ -1169,7 +1169,7 @@ client.on('messageCreate', async message => {
       if (!userData[userId] || userData[userId].cash < betAmount) {
         return interaction.reply({ 
           content: `❌ You don't have enough money! You have $${userData[userId]?.cash || 0} but tried to bet $${betAmount}.`, 
-          ephemeral: true 
+          ephemeral: false 
         });
       }
 
@@ -1309,7 +1309,7 @@ client.on('messageCreate', async message => {
 
       const userId = interaction.user.id;
       if (userId !== game.currentPlayer) {
-        return interaction.reply({ content: '❌ It\'s not your turn to guess!', ephemeral: true });
+        return interaction.reply({ content: '❌ It\'s not your turn to guess!', ephemeral: false });
       }
 
       // Show guess modal
@@ -1345,7 +1345,7 @@ client.on('messageCreate', async message => {
       const guess = parseInt(interaction.fields.getTextInputValue('guess_number'));
       
       if (isNaN(guess) || guess < 1 || guess > 20) {
-        return interaction.reply({ content: '❌ Please enter a number between 1 and 20.', ephemeral: true });
+        return interaction.reply({ content: '❌ Please enter a number between 1 and 20.', ephemeral: false });
       }
 
       // Record the guess
@@ -1460,7 +1460,7 @@ client.on('messageCreate', async message => {
           const guildId = parts[1];
           const itemName = parts.slice(3).join('_'); // Handle names with underscores
           const item = global.tempItems?.[userId];
-          if (!item) return interaction.reply({ content: '❌ No item found to confirm.', ephemeral: true });
+          if (!item) return interaction.reply({ content: '❌ No item found to confirm.', ephemeral: false });
 
           if (!userData.guildItems[guildId]) userData.guildItems[guildId] = [];
           userData.guildItems[guildId].push(item);
@@ -1540,7 +1540,7 @@ client.on('messageCreate', async message => {
 
         } else if (subaction === 'add_art') {
           const trade = activeTrades[tradeId];
-          if (!trade || trade.status !== 'open') return interaction.reply({ content: 'Trade not active.', ephemeral: true });
+          if (!trade || trade.status !== 'open') return interaction.reply({ content: 'Trade not active.', ephemeral: false });
           if (trade.from !== interaction.user.id && trade.to !== interaction.user.id) {
             return interaction.reply({ content: 'You are not part of this trade.', flags: 64 });
           }
