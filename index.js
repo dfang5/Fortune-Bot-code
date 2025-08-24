@@ -1338,7 +1338,7 @@ client.on('messageCreate', async message => {
       const game = activeMarbleGames[gameId];
       
       if (!game || game.status !== 'playing') {
-        return interaction.reply({ content: '❌ Game not found or not in playing phase.', ephemeral: true });
+        return interaction.reply({ content: '❌ Game not found or not in playing phase.', ephemeral: false });
       }
 
       const userId = interaction.user.id;
