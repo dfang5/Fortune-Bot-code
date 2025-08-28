@@ -219,6 +219,11 @@ client.on('interactionCreate', async interaction => {
     }
   }
   
+  // Handle component interactions (buttons, select menus)
+  if (interaction.isStringSelectMenu() || interaction.isButton()) {
+    return await handleComponentInteraction(interaction);
+  }
+
   if (!interaction.isChatInputCommand()) return;
 
   const userId = interaction.user.id;
@@ -307,8 +312,10 @@ async function handleInfoCommand(interaction) {
           '/scavenge - Search for rare artefacts (2h cooldown)',
           '/labor - Work to earn money (40min cooldown)',
           '/inventory - View your cash, bank balance and artefacts',
-          '/sell - Sell your artefacts for cash',
-          '/trade - Start a trade with another user'
+          '/sell [artefact] - Sell a specific artefact for cash',
+          '/mass-sell - Sell all artefacts at once',
+          '/trade [user] - Interactive trading with other players',
+          '/marble [bet] - Gambling game with 4x payout'
         ].join('\n'),
         inline: false
       },
@@ -323,10 +330,13 @@ async function handleInfoCommand(interaction) {
         inline: false
       },
       {
-        name: 'Social Features',
+        name: 'Social & Admin Features',
         value: [
-          '/leaderboard - View the leaderboard and your current rating',
-          '/store - View all the items that admins have added'
+          '/leaderboard - View wealth rankings',
+          '/store - View custom server items',
+          '/add-item [name] [price] - Add custom server item (Admin)',
+          '/remove-item [name] - Remove server item (Admin)',
+          '/view-items - Manage server items (Admin)'
         ].join('\n'),
         inline: false
       },
@@ -748,16 +758,81 @@ async function handleTradeCommand(interaction, userId) {
     return await interaction.reply({ embeds: [selfEmbed] });
   }
   
+  if (targetUser.bot) {
+    const botEmbed = new EmbedBuilder()
+      .setTitle('Invalid Trade Target')
+      .setDescription('You cannot trade with bots.')
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+      
+    return await interaction.reply({ embeds: [botEmbed] });
+  }
+  
+  // Initialize target user data if needed
+  if (!userData[targetUser.id]) userData[targetUser.id] = { cash: 0, artefacts: [], bankBalance: 0 };
+  
+  const userArtefacts = userData[userId].artefacts || [];
+  const userCash = userData[userId].cash || 0;
+  
+  if (userArtefacts.length === 0 && userCash === 0) {
+    const nothingEmbed = new EmbedBuilder()
+      .setTitle('Nothing to Trade')
+      .setDescription('You need cash or artefacts to start a trade.')
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+      
+    return await interaction.reply({ embeds: [nothingEmbed] });
+  }
+  
+  // Create trade selection menu
+  const tradeOptions = [];
+  
+  if (userCash > 0) {
+    tradeOptions.push({
+      label: `Cash: $${userCash.toLocaleString()}`,
+      description: 'Trade some of your cash',
+      value: 'cash'
+    });
+  }
+  
+  userArtefacts.forEach((artefact, index) => {
+    const rarity = getRarityByArtefact(artefact);
+    tradeOptions.push({
+      label: artefact,
+      description: `${rarity ? rarity.name : 'Unknown'} - $${rarity ? rarity.value.toLocaleString() : '100'}`,
+      value: `artefact_${index}`
+    });
+  });
+  
+  if (tradeOptions.length === 0) {
+    const emptyEmbed = new EmbedBuilder()
+      .setTitle('Nothing to Trade')
+      .setDescription('You have no cash or artefacts to trade.')
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+      
+    return await interaction.reply({ embeds: [emptyEmbed] });
+  }
+  
+  const selectMenu = new StringSelectMenuBuilder()
+    .setCustomId(`trade_select_${targetUser.id}`)
+    .setPlaceholder('Select what you want to trade')
+    .addOptions(tradeOptions.slice(0, 25)); // Discord limit
+  
+  const row = new ActionRowBuilder().addComponents(selectMenu);
+  
   const tradeEmbed = new EmbedBuilder()
-    .setTitle('Trade System')
-    .setDescription('Trading functionality is currently being developed.')
+    .setTitle('Initialize Trade')
+    .setDescription(`Starting trade with ${targetUser.displayName}`)
     .addFields(
-      { name: 'Coming Soon', value: 'Advanced trading features will be available in a future update', inline: false }
+      { name: 'Your Cash', value: `$${userCash.toLocaleString()}`, inline: true },
+      { name: 'Your Artefacts', value: userArtefacts.length.toString(), inline: true },
+      { name: 'Instructions', value: 'Select what you want to offer in this trade', inline: false }
     )
     .setColor(0x339AF0)
     .setTimestamp();
     
-  await interaction.reply({ embeds: [tradeEmbed] });
+  await interaction.reply({ embeds: [tradeEmbed], components: [row] });
 }
 
 async function handleLeaderboardCommand(interaction) {
@@ -962,6 +1037,303 @@ async function handleViewItemsCommand(interaction) {
     .setTimestamp();
     
   await interaction.reply({ embeds: [viewEmbed] });
+}
+
+// Component interaction handler
+async function handleComponentInteraction(interaction) {
+  const { customId } = interaction;
+  
+  if (customId.startsWith('trade_select_')) {
+    const targetUserId = customId.split('_')[2];
+    const selectedValue = interaction.values[0];
+    const userId = interaction.user.id;
+    
+    if (selectedValue === 'cash') {
+      // Show cash amount modal
+      const modal = new ModalBuilder()
+        .setCustomId(`trade_cash_${targetUserId}`)
+        .setTitle('Trade Cash Amount');
+        
+      const cashInput = new TextInputBuilder()
+        .setCustomId('cash_amount')
+        .setLabel('How much cash do you want to trade?')
+        .setStyle(TextInputStyle.Short)
+        .setPlaceholder('Enter amount in dollars')
+        .setRequired(true)
+        .setMaxLength(10);
+        
+      const firstActionRow = new ActionRowBuilder().addComponents(cashInput);
+      modal.addComponents(firstActionRow);
+      
+      await interaction.showModal(modal);
+    } else if (selectedValue.startsWith('artefact_')) {
+      const artefactIndex = parseInt(selectedValue.split('_')[1]);
+      const userArtefacts = userData[userId].artefacts;
+      const artefact = userArtefacts[artefactIndex];
+      
+      // Create confirmation for artefact trade
+      const confirmButton = new ButtonBuilder()
+        .setCustomId(`confirm_artefact_trade_${targetUserId}_${artefactIndex}`)
+        .setLabel('Confirm Trade')
+        .setStyle(ButtonStyle.Success);
+        
+      const cancelButton = new ButtonBuilder()
+        .setCustomId('cancel_trade')
+        .setLabel('Cancel')
+        .setStyle(ButtonStyle.Secondary);
+        
+      const row = new ActionRowBuilder().addComponents(confirmButton, cancelButton);
+      
+      const rarity = getRarityByArtefact(artefact);
+      const confirmEmbed = new EmbedBuilder()
+        .setTitle('Confirm Artefact Trade')
+        .setDescription(`Do you want to trade your ${artefact}?`)
+        .addFields(
+          { name: 'Artefact', value: artefact, inline: true },
+          { name: 'Rarity', value: rarity ? rarity.name : 'Unknown', inline: true },
+          { name: 'Value', value: `$${rarity ? rarity.value.toLocaleString() : '100'}`, inline: true },
+          { name: 'Trading With', value: `<@${targetUserId}>`, inline: false }
+        )
+        .setColor(0x339AF0)
+        .setTimestamp();
+        
+      await interaction.update({ embeds: [confirmEmbed], components: [row] });
+    }
+  } else if (customId.startsWith('trade_cash_')) {
+    const targetUserId = customId.split('_')[2];
+    const cashAmount = parseInt(interaction.fields.getTextInputValue('cash_amount'));
+    const userId = interaction.user.id;
+    
+    if (isNaN(cashAmount) || cashAmount <= 0) {
+      const errorEmbed = new EmbedBuilder()
+        .setTitle('Invalid Amount')
+        .setDescription('Please enter a valid cash amount.')
+        .setColor(0xFF6B6B)
+        .setTimestamp();
+        
+      return await interaction.reply({ embeds: [errorEmbed], flags: 64 });
+    }
+    
+    if (cashAmount > userData[userId].cash) {
+      const insufficientEmbed = new EmbedBuilder()
+        .setTitle('Insufficient Funds')
+        .setDescription(`You only have $${userData[userId].cash.toLocaleString()} available.`)
+        .setColor(0xFF6B6B)
+        .setTimestamp();
+        
+      return await interaction.reply({ embeds: [insufficientEmbed], flags: 64 });
+    }
+    
+    // Create confirmation for cash trade
+    const confirmButton = new ButtonBuilder()
+      .setCustomId(`confirm_cash_trade_${targetUserId}_${cashAmount}`)
+      .setLabel('Confirm Trade')
+      .setStyle(ButtonStyle.Success);
+      
+    const cancelButton = new ButtonBuilder()
+      .setCustomId('cancel_trade')
+      .setLabel('Cancel')
+      .setStyle(ButtonStyle.Secondary);
+      
+    const row = new ActionRowBuilder().addComponents(confirmButton, cancelButton);
+    
+    const confirmEmbed = new EmbedBuilder()
+      .setTitle('Confirm Cash Trade')
+      .setDescription(`Do you want to trade $${cashAmount.toLocaleString()}?`)
+      .addFields(
+        { name: 'Amount', value: `$${cashAmount.toLocaleString()}`, inline: true },
+        { name: 'Trading With', value: `<@${targetUserId}>`, inline: true },
+        { name: 'Remaining Cash', value: `$${(userData[userId].cash - cashAmount).toLocaleString()}`, inline: true }
+      )
+      .setColor(0x339AF0)
+      .setTimestamp();
+      
+    await interaction.reply({ embeds: [confirmEmbed], components: [row] });
+  } else if (customId.startsWith('confirm_cash_trade_')) {
+    const parts = customId.split('_');
+    const targetUserId = parts[3];
+    const cashAmount = parseInt(parts[4]);
+    const userId = interaction.user.id;
+    
+    // Execute trade
+    userData[userId].cash -= cashAmount;
+    userData[targetUserId].cash += cashAmount;
+    saveUserData();
+    
+    const successEmbed = new EmbedBuilder()
+      .setTitle('Trade Completed')
+      .setDescription(`Successfully traded $${cashAmount.toLocaleString()} to <@${targetUserId}>`)
+      .addFields(
+        { name: 'Your New Balance', value: `$${userData[userId].cash.toLocaleString()}`, inline: true },
+        { name: 'Trade Recipient', value: `<@${targetUserId}>`, inline: true }
+      )
+      .setColor(0x51CF66)
+      .setTimestamp();
+      
+    await interaction.update({ embeds: [successEmbed], components: [] });
+    
+    // Notify target user
+    try {
+      const targetUser = await client.users.fetch(targetUserId);
+      const notifyEmbed = new EmbedBuilder()
+        .setTitle('Trade Received')
+        .setDescription(`<@${userId}> traded you $${cashAmount.toLocaleString()}!`)
+        .setColor(0x51CF66)
+        .setTimestamp();
+        
+      await targetUser.send({ embeds: [notifyEmbed] });
+    } catch (error) {
+      console.log('Could not DM target user about trade');
+    }
+  } else if (customId.startsWith('confirm_artefact_trade_')) {
+    const parts = customId.split('_');
+    const targetUserId = parts[3];
+    const artefactIndex = parseInt(parts[4]);
+    const userId = interaction.user.id;
+    
+    const artefact = userData[userId].artefacts[artefactIndex];
+    
+    // Execute trade
+    userData[userId].artefacts.splice(artefactIndex, 1);
+    userData[targetUserId].artefacts.push(artefact);
+    saveUserData();
+    
+    const rarity = getRarityByArtefact(artefact);
+    const successEmbed = new EmbedBuilder()
+      .setTitle('Trade Completed')
+      .setDescription(`Successfully traded ${artefact} to <@${targetUserId}>`)
+      .addFields(
+        { name: 'Artefact', value: artefact, inline: true },
+        { name: 'Rarity', value: rarity ? rarity.name : 'Unknown', inline: true },
+        { name: 'Trade Recipient', value: `<@${targetUserId}>`, inline: true }
+      )
+      .setColor(0x51CF66)
+      .setTimestamp();
+      
+    await interaction.update({ embeds: [successEmbed], components: [] });
+    
+    // Notify target user
+    try {
+      const targetUser = await client.users.fetch(targetUserId);
+      const notifyEmbed = new EmbedBuilder()
+        .setTitle('Artefact Received')
+        .setDescription(`<@${userId}> traded you: ${artefact}!`)
+        .addFields(
+          { name: 'Artefact', value: artefact, inline: true },
+          { name: 'Rarity', value: rarity ? rarity.name : 'Unknown', inline: true }
+        )
+        .setColor(0x51CF66)
+        .setTimestamp();
+        
+      await targetUser.send({ embeds: [notifyEmbed] });
+    } catch (error) {
+      console.log('Could not DM target user about trade');
+    }
+  } else if (customId === 'cancel_trade') {
+    const cancelEmbed = new EmbedBuilder()
+      .setTitle('Trade Cancelled')
+      .setDescription('The trade has been cancelled.')
+      .setColor(0xFF9F43)
+      .setTimestamp();
+      
+    await interaction.update({ embeds: [cancelEmbed], components: [] });
+  } else if (customId.startsWith('marble_')) {
+    const choice = customId.split('_')[1];
+    const userId = interaction.user.id;
+    const betAmount = parseInt(customId.split('_')[2]);
+    
+    // Process marble game result
+    const marbleColors = ['red', 'blue', 'green', 'yellow', 'purple'];
+    const actualMarble = marbleColors[Math.floor(Math.random() * marbleColors.length)];
+    
+    let winnings = 0;
+    let result = 'lose';
+    
+    if (choice === actualMarble) {
+      winnings = betAmount * 4; // 4x multiplier for exact match
+      result = 'win';
+    } else {
+      winnings = -betAmount;
+    }
+    
+    userData[userId].cash += winnings;
+    saveUserData();
+    
+    const resultEmbed = new EmbedBuilder()
+      .setTitle(result === 'win' ? 'Marble Game - You Won!' : 'Marble Game - You Lost!')
+      .setDescription(`The marble was ${actualMarble}!`)
+      .addFields(
+        { name: 'Your Guess', value: choice, inline: true },
+        { name: 'Actual Marble', value: actualMarble, inline: true },
+        { name: 'Result', value: result === 'win' ? `+$${winnings.toLocaleString()}` : `${winnings.toLocaleString()}`, inline: true },
+        { name: 'New Balance', value: `$${userData[userId].cash.toLocaleString()}`, inline: false }
+      )
+      .setColor(result === 'win' ? 0x51CF66 : 0xFF6B6B)
+      .setTimestamp();
+      
+    await interaction.update({ embeds: [resultEmbed], components: [] });
+  }
+}
+
+// Marble gambling game
+async function handleMarbleCommand(interaction, userId) {
+  const betAmount = interaction.options.getInteger('bet');
+  
+  if (userData[userId].cash < betAmount) {
+    const insufficientEmbed = new EmbedBuilder()
+      .setTitle('Insufficient Funds')
+      .setDescription(`You need $${betAmount.toLocaleString()} to play but only have $${userData[userId].cash.toLocaleString()}.`)
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+      
+    return await interaction.reply({ embeds: [insufficientEmbed] });
+  }
+  
+  // Deduct bet amount immediately
+  userData[userId].cash -= betAmount;
+  saveUserData();
+  
+  // Create marble selection buttons
+  const redButton = new ButtonBuilder()
+    .setCustomId(`marble_red_${betAmount}`)
+    .setLabel('Red Marble')
+    .setStyle(ButtonStyle.Danger);
+    
+  const blueButton = new ButtonBuilder()
+    .setCustomId(`marble_blue_${betAmount}`)
+    .setLabel('Blue Marble')
+    .setStyle(ButtonStyle.Primary);
+    
+  const greenButton = new ButtonBuilder()
+    .setCustomId(`marble_green_${betAmount}`)
+    .setLabel('Green Marble')
+    .setStyle(ButtonStyle.Success);
+    
+  const yellowButton = new ButtonBuilder()
+    .setCustomId(`marble_yellow_${betAmount}`)
+    .setLabel('Yellow Marble')
+    .setStyle(ButtonStyle.Secondary);
+    
+  const purpleButton = new ButtonBuilder()
+    .setCustomId(`marble_purple_${betAmount}`)
+    .setLabel('Purple Marble')
+    .setStyle(ButtonStyle.Secondary);
+  
+  const row1 = new ActionRowBuilder().addComponents(redButton, blueButton, greenButton);
+  const row2 = new ActionRowBuilder().addComponents(yellowButton, purpleButton);
+  
+  const marbleEmbed = new EmbedBuilder()
+    .setTitle('Marble Gambling Game')
+    .setDescription('Choose a marble colour! If you guess correctly, you win 4x your bet!')
+    .addFields(
+      { name: 'Bet Amount', value: `$${betAmount.toLocaleString()}`, inline: true },
+      { name: 'Potential Winnings', value: `$${(betAmount * 4).toLocaleString()}`, inline: true },
+      { name: 'Instructions', value: 'Click a button to select your marble colour', inline: false }
+    )
+    .setColor(0x9C88FF)
+    .setTimestamp();
+    
+  await interaction.reply({ embeds: [marbleEmbed], components: [row1, row2] });
 }
 
 client.login(token);
