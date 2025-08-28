@@ -20,6 +20,17 @@ require('dotenv').config();
 const DEVELOPER_ID = '1299875574894039184';
 const token = process.env.DISCORD_BOT_TOKEN;
 const clientId = process.env.DISCORD_CLIENT_ID;
+
+// Validate required environment variables
+if (!token) {
+  console.error('ERROR: DISCORD_BOT_TOKEN is not set in environment variables');
+  process.exit(1);
+}
+
+if (!clientId) {
+  console.error('ERROR: DISCORD_CLIENT_ID is not set in environment variables');
+  process.exit(1);
+}
 const DATA_FILE = path.join(__dirname, 'data.json');
 const COOLDOWN_FILE = path.join(__dirname, 'cooldowns.json');
 
@@ -52,17 +63,20 @@ const client = new Client({
   ]
 });
 
-// Register slash command /info
-const infoCommand = new SlashCommandBuilder().setName('info').setDescription('Shows information about the bot.');
-const rest = new REST({ version:'10' }).setToken(token);
-(async () => {
-  try {
-    await rest.put(Routes.applicationCommands(clientId), { body: [infoCommand.toJSON()] });
-  } catch (err) { console.error(err); }
-})();
-
-client.once('ready', () => {
+client.once('ready', async () => {
   console.log(`Fortune Bot online as ${client.user.tag}`);
+  
+  // Register slash command /info after bot is ready
+  const infoCommand = new SlashCommandBuilder().setName('info').setDescription('Shows information about the bot.');
+  const rest = new REST({ version:'10' }).setToken(token);
+  
+  try {
+    console.log('Started refreshing application (/) commands.');
+    await rest.put(Routes.applicationCommands(clientId), { body: [infoCommand.toJSON()] });
+    console.log('Successfully reloaded application (/) commands.');
+  } catch (err) { 
+    console.error('Error registering commands:', err); 
+  }
 });
 
 // Handle slash /info
