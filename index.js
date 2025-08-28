@@ -17,20 +17,9 @@ const {
   ComponentType
 } = require('discord.js');
 require('dotenv').config();
-const DEVELOPER_ID = '1299875574894039184';
+const DEVELOPER_ID = '1299875574894039184'; 
 const token = process.env.DISCORD_BOT_TOKEN;
 const clientId = process.env.DISCORD_CLIENT_ID;
-
-// Validate required environment variables
-if (!token) {
-  console.error('ERROR: DISCORD_BOT_TOKEN is not set in environment variables');
-  process.exit(1);
-}
-
-if (!clientId) {
-  console.error('ERROR: DISCORD_CLIENT_ID is not set in environment variables');
-  process.exit(1);
-}
 const DATA_FILE = path.join(__dirname, 'data.json');
 const COOLDOWN_FILE = path.join(__dirname, 'cooldowns.json');
 
@@ -63,21 +52,16 @@ const client = new Client({
   ]
 });
 
-client.once('ready', async () => {
-  console.log(`Fortune Bot online as ${client.user.tag}`);
-  
-  // Register slash command /info after bot is ready
-  const infoCommand = new SlashCommandBuilder().setName('info').setDescription('Shows information about the bot.');
-  const rest = new REST({ version:'10' }).setToken(token);
-  
+// Register slash command /info
+const infoCommand = new SlashCommandBuilder().setName('info').setDescription('Shows information about the bot.');
+const rest = new REST({ version:'10' }).setToken(token);
+(async () => {
   try {
-    console.log('Started refreshing application (/) commands.');
     await rest.put(Routes.applicationCommands(clientId), { body: [infoCommand.toJSON()] });
-    console.log('Successfully reloaded application (/) commands.');
-  } catch (err) { 
-    console.error('Error registering commands:', err); 
-  }
-});
+  } catch (err) { console.error(err); }
+})();
+
+client.once('ready', () => console.log(`Fortune Bot online as ${client.user.tag}`));
 
 // Handle slash /info
 client.on('interactionCreate', async interaction => {
@@ -99,7 +83,7 @@ client.on('interactionCreate', async interaction => {
         value: [
           '`!scavenge` - Search for rare artefacts (2h cooldown)',
             '`!labor` - Work to earn money (40min cooldown)',
-            '`!inventory` - View your cash, bank balance and artefacts',
+            '`!inventory` - View your cash and artefacts',
             '`!sell` - Sell your artefacts for cash',
             '`!trade @user` - Start a trade with another user',
             '`!leaderboard (or !lb) - View the leaderboard and your current rating',
@@ -119,20 +103,10 @@ client.on('interactionCreate', async interaction => {
         inline: false
       },
       {
-        name: '🏦 Banking System',
-        value: [
-          '`!bank {amount}` - Deposit money (max $50,000 total)',
-          '`!withdraw {amount}` - Withdraw money from bank',
-          '`!steal @user {amount}` - Steal cash from other players',
-          '**Note:** Only cash on hand can be stolen, bank money is protected!'
-        ].join('\n'),
-        inline: false
-      },
-      {
         name: '🏆 Rarity Levels',
         value: [
           '⚪ **Common** (65%) - $100-150',
-          '🟢 **Uncommon** (20%) - $550-700',
+          '🟢 **Uncommon** (20%) - $550-700', 
           '🔵 **Rare** (10%) - $1,500-2,500',
           '🟡 **Legendary** (4%) - $5,000',
           '⚫ **Unknown** (1%) - $15,000'
@@ -140,7 +114,7 @@ client.on('interactionCreate', async interaction => {
         inline: false
       }
     )
-    .setFooter({
+    .setFooter({ 
       text: '💡 Tip: Start with !scavenge to find your first artefact!',
       iconURL: 'https://cdn.discordapp.com/emojis/692428747226898492.png'
     })
@@ -155,179 +129,79 @@ function newTradeId() { return Math.random().toString(36).substr(2, 8); }
 
 // Marble game storage
 const activeMarbleGames = {}; // gameId → game object
-client.on('messageCreate', async message => {
-  if (message.author.bot) return;
-  const userId = message.author.id;
-  const content = message.content.toLowerCase();
+client.on('interactionCreate', async interaction => {
+  const { ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder, EmbedBuilder } = require('discord.js');
 
-  if (!userData[userId]) userData[userId] = { cash: 0, artefacts: [], bankBalance: 0 };
+  // Button → Open modal
+  if (interaction.isButton() && interaction.customId === 'start_add_item') {
+    const modal = new ModalBuilder()
+      .setCustomId('modal_add_item')
+      .setTitle('🌟 Create a Custom Item');
 
-  // Banking System Commands (here we go again...)
+    const nameInput = new TextInputBuilder()
+      .setCustomId('item_name')
+      .setLabel('📛 Item Name')
+      .setStyle(TextInputStyle.Short)
+      .setPlaceholder('Ex: Your Item Name Here')
+      .setRequired(true);
 
-  // !bank {amount} - Deposit money
-  if (content.startsWith('!bank ')) {
-    const args = content.split(' ').slice(1);
-    const amount = parseInt(args[0], 10);
+    const descInput = new TextInputBuilder()
+      .setCustomId('item_desc')
+      .setLabel('📝 Item Description')
+      .setStyle(TextInputStyle.Paragraph)
+      .setPlaceholder('What makes this item special?')
+      .setRequired(true);
 
-    if (isNaN(amount) || amount <= 0) {
-      return message.reply('❌ Please enter a valid amount to deposit. Example: `!bank 1000`');
+    const valueInput = new TextInputBuilder()
+      .setCustomId('item_value')
+      .setLabel('💰 Item Value')
+      .setStyle(TextInputStyle.Short)
+      .setPlaceholder('Enter value in dollars')
+      .setRequired(true);
+
+    const firstRow = new ActionRowBuilder().addComponents(nameInput);
+    const secondRow = new ActionRowBuilder().addComponents(descInput);
+    const thirdRow = new ActionRowBuilder().addComponents(valueInput);
+
+    modal.addComponents(firstRow, secondRow, thirdRow);
+
+    return interaction.showModal(modal);
+  }
+
+  // Modal submit → Save item
+  if (interaction.isModalSubmit() && interaction.customId === 'modal_add_item') {
+    const name = interaction.fields.getTextInputValue('item_name');
+    const desc = interaction.fields.getTextInputValue('item_desc');
+    const value = parseFloat(interaction.fields.getTextInputValue('item_value'));
+
+    if (isNaN(value) || value < 0) {
+      return interaction.reply({ content: '⚠️ Invalid value. Please try again.', flags: [64] });
     }
 
-    const currentBank = userData[userId].bankBalance || 0;
-    const maxDeposit = 50000 - currentBank;
+    const guildId = interaction.guild?.id;
+    if (!userData.guildItems) userData.guildItems = {};
+    if (!userData.guildItems[guildId]) userData.guildItems[guildId] = [];
 
-    if (amount > maxDeposit) {
-      return message.reply(`❌ You can only deposit $${maxDeposit.toLocaleString()} more. Your bank limit is $50,000 and you currently have $${currentBank.toLocaleString()} stored.`);
-    }
+    userData.guildItems[guildId].push({ name, desc, value });
 
-    if (userData[userId].cash < amount) {
-      return message.reply(`❌ You don't have enough cash! You have $${userData[userId].cash.toLocaleString()} but tried to deposit $${amount.toLocaleString()}.`);
-    }
-
-    userData[userId].cash -= amount;
-    userData[userId].bankBalance = currentBank + amount;
-    saveUserData();
+    // Save to file
+    const fs = require('fs');
+    fs.writeFileSync('./userData.json', JSON.stringify(userData, null, 2));
 
     const embed = new EmbedBuilder()
-      .setTitle('Deposit Successful!')
-      .setDescription(`You deposited $${amount.toLocaleString()} into your bank account.`)
+      .setTitle('✅ New Item Created!')
+      .setColor(0x00ff99)
       .addFields(
-        { name: 'Cash on Hand', value: `$${userData[userId].cash.toLocaleString()}`, inline: true },
-        { name: 'Bank Balance', value: `$${userData[userId].bankBalance.toLocaleString()}`, inline: true },
-        { name: 'Bank Capacity', value: `${((userData[userId].bankBalance / 50000) * 100).toFixed(1)}%`, inline: true }
+        { name: '📛 Name', value: name, inline: true },
+        { name: '💰 Value', value: `$${value}`, inline: true },
+        { name: '📝 Description', value: desc }
       )
-      .setColor(0x00AA00)
+      .setFooter({ text: `Added by ${interaction.user.tag}` })
       .setTimestamp();
 
-    return message.reply({ embeds: [embed] });
+    return interaction.reply({ embeds: [embed] });
   }
-
-  // !withdraw {amount} - Withdraw money from bank
-  if (content.startsWith('!withdraw ')) {
-    const args = content.split(' ').slice(1);
-    const amount = parseInt(args[0], 10);
-
-    if (isNaN(amount) || amount <= 0) {
-      return message.reply('❌ Please enter a valid amount to withdraw. Example: `!withdraw 1000`');
-    }
-
-    const currentBank = userData[userId].bankBalance || 0;
-
-    if (amount > currentBank) {
-      return message.reply(`❌ You don't have enough in your bank! You have $${currentBank.toLocaleString()} but tried to withdraw $${amount.toLocaleString()}.`);
-    }
-
-    userData[userId].bankBalance = currentBank - amount;
-    userData[userId].cash += amount;
-    saveUserData();
-
-    const embed = new EmbedBuilder()
-      .setTitle('Withdrawal Successful!')
-      .setDescription(`You withdrew $${amount.toLocaleString()} from your bank account.`)
-      .addFields(
-        { name: 'Cash on Hand', value: `$${userData[userId].cash.toLocaleString()}`, inline: true },
-        { name: 'Bank Balance', value: `$${userData[userId].bankBalance.toLocaleString()}`, inline: true },
-        { name: 'Bank Capacity', value: `${((userData[userId].bankBalance / 50000) * 100).toFixed(1)}%`, inline: true }
-      )
-      .setColor(0x0099FF)
-      .setTimestamp();
-
-    return message.reply({ embeds: [embed] });
-  }
-
-  // !steal @user {amount} - Steal money from another user
-  if (content.startsWith('!steal ')) {
-    const mentioned = message.mentions.users.first();
-    if (!mentioned) {
-      return message.reply('❌ You must mention a user to steal from! Example: `!steal @user 500`');
-    }
-
-    if (mentioned.id === userId) {
-      return message.reply('❌ You cannot steal from yourself!');
-    }
-
-    const args = content.split(' ').slice(2);
-    const amount = parseInt(args[0], 10);
-
-    if (isNaN(amount) || amount <= 0) {
-      return message.reply('❌ Please enter a valid amount to steal. Example: `!steal @user 500`');
-    }
-
-    const targetId = mentioned.id;
-    if (!userData[targetId]) userData[targetId] = { cash: 0, artefacts: [], bankBalance: 0 };
-
-    // Only cash on hand can be stolen (not bank money)
-    const availableCash = userData[targetId].cash;
-
-    if (amount > availableCash) {
-      return message.reply(`❌ ${mentioned.username} only has $${availableCash.toLocaleString()} available to steal! (Bank money is protected)`);
-    }
-
-    // Calculate success rate based on amount
-    // Formula: Base 80% success, decreases as amount increases
-    // $100 = ~75%, $400 = ~50%, $1000 = ~25%, $2000+ = ~10%
-    // Minimum success rate is 10% to prevent impossible steals
-    // Maximum success rate is 80% to prevent guaranteed steals
-    // This really took a lot of time to make :3 
-    let successRate = Math.max(10, 80 - (amount / 20));
-    successRate = Math.min(80, successRate); // Cap at 80%
-
-    const randomRoll = Math.random() * 100;
-    const isSuccess = randomRoll <= successRate;
-
-    if (isSuccess) {
-      // Successful steal
-      userData[targetId].cash -= amount;
-      userData[userId].cash += amount;
-      saveUserData();
-
-      const embed = new EmbedBuilder()
-        .setTitle('💰 Theft Successful!')
-        .setDescription(`You successfully stole $${amount.toLocaleString()} from ${mentioned.username}!`)
-        .addFields(
-          { name: 'Success Rate', value: `${successRate.toFixed(1)}%`, inline: true },
-          { name: 'Your Roll', value: `${randomRoll.toFixed(1)}%`, inline: true },
-          { name: 'Your Cash', value: `$${userData[userId].cash.toLocaleString()}`, inline: true }
-        )
-        .setColor(0x00AA00)
-        .setTimestamp();
-
-      await message.reply({ embeds: [embed] });
-
-      // Notify the victim
-      const victimEmbed = new EmbedBuilder()
-        .setTitle('You Were Robbed!')
-        .setDescription(`${message.author.username} stole $${amount.toLocaleString()} from you!`)
-        .addFields(
-          { name: '💰 Remaining Cash', value: `$${userData[targetId].cash.toLocaleString()}`, inline: true },
-          { name: '🏦 Bank Balance', value: `$${userData[targetId].bankBalance || 0}`, inline: true },
-          { name: '💡 Tip', value: 'Keep your money in the bank to protect it!', inline: false }
-        )
-        .setColor(0xFF0000)
-        .setTimestamp();
-
-      try {
-        await mentioned.send({ embeds: [victimEmbed] });
-      } catch (error) {
-        // User has DMs disabled, ignore
-      }
-
-    } else {
-      // Failed steal
-      const embed = new EmbedBuilder()
-        .setTitle('❌ Theft Failed!')
-        .setDescription(`You failed to steal from ${mentioned.username}! Try stealing a smaller number, they increase your chances of success.`)
-        .addFields(
-          { name: 'Success Rate', value: `${successRate.toFixed(1)}%`, inline: true },
-          { name: 'Your Roll', value: `${randomRoll.toFixed(1)}%`, inline: true },
-          { name: 'Result', value: 'Mission Failed!', inline: true }
-        )
-        .setColor(0xFF0000)
-        .setTimestamp();
-
-      return message.reply({ embeds: [embed] });
-    }
-  }
+});
 
 // Cooldowns
 const SCAVENGE_COOLDOWN = 2 * 60 * 60 * 1000;
@@ -336,16 +210,16 @@ const LABOR_COOLDOWN = 40 * 60 * 1000;
 // Enhanced Trade UI Functions
 function createTradeRequestEmbed(fromUser, toUser) {
   return new EmbedBuilder()
-    .setTitle('Trade Request')
+    .setTitle('🤝 Trade Request')
     .setDescription(`✨ **<@${fromUser}>** wants to start a trading session with **<@${toUser}>**!\n\n🎯 Ready to exchange valuable artefacts and fortune?`)
     .addFields(
       {
-        name: 'What happens next?',
+        name: '🎮 What happens next?',
         value: '• Accept to enter the interactive trading interface\n• Decline to politely refuse this trade',
         inline: false
       },
       {
-        name: 'Trading Tips',
+        name: '💡 Trading Tips',
         value: '• Both parties can add artefacts and money\n• Review everything before confirming\n• Trades are secure and instant',
         inline: false
       }
@@ -356,28 +230,28 @@ function createTradeRequestEmbed(fromUser, toUser) {
     .setTimestamp();
 }
 
-function createTradeInterfaceEmbed(trade, fromUser, toUser) {
-  const fromUserInt = trade.from;
-  const toUserInt = trade.to;
-  const fromOffer = trade.offers[fromUserInt] || { cash: 0, artefacts: [] };
-  const toOffer = trade.offers[toUserInt] || { cash: 0, artefacts: [] };
+function createTradeInterfaceEmbed(trade, fromUserName, toUserName) {
+  const fromUser = trade.from;
+  const toUser = trade.to;
+  const fromOffer = trade.offers[fromUser] || { cash: 0, artefacts: [] };
+  const toOffer = trade.offers[toUser] || { cash: 0, artefacts: [] };
 
   const fromArtefacts = fromOffer.artefacts?.length ? fromOffer.artefacts.map(art => {
     const rarity = getRarityByArtefact(art);
-    const rarityEmoji = rarity ?
-      (rarity.name === 'Common' ? '⚪' :
-       rarity.name === 'Uncommon' ? '🟢' :
-       rarity.name === 'Rare' ? '🔵' :
+    const rarityEmoji = rarity ? 
+      (rarity.name === 'Common' ? '⚪' : 
+       rarity.name === 'Uncommon' ? '🟢' : 
+       rarity.name === 'Rare' ? '🔵' : 
        rarity.name === 'Legendary' ? '🟡' : '⚫') : '❓';
     return `${rarityEmoji} ${art}`;
   }).join('\n') : '🚫 No artefacts offered';
 
   const toArtefacts = toOffer.artefacts?.length ? toOffer.artefacts.map(art => {
     const rarity = getRarityByArtefact(art);
-    const rarityEmoji = rarity ?
-      (rarity.name === 'Common' ? '⚪' :
-       rarity.name === 'Uncommon' ? '🟢' :
-       rarity.name === 'Rare' ? '🔵' :
+    const rarityEmoji = rarity ? 
+      (rarity.name === 'Common' ? '⚪' : 
+       rarity.name === 'Uncommon' ? '🟢' : 
+       rarity.name === 'Rare' ? '🔵' : 
        rarity.name === 'Legendary' ? '🟡' : '⚫') : '❓';
     return `${rarityEmoji} ${art}`;
   }).join('\n') : '🚫 No artefacts offered';
@@ -393,11 +267,11 @@ function createTradeInterfaceEmbed(trade, fromUser, toUser) {
   }, 0) || 0);
 
   return new EmbedBuilder()
-    .setTitle('Interactive Trading Interface')
-    .setDescription(`**Live Trade Session Active**\n\n Use the buttons below to manage your offers!`)
+    .setTitle('🏪 Interactive Trading Interface')
+    .setDescription(`💫 **Live Trade Session Active**\n\n🔄 Use the buttons below to manage your offers!`)
     .addFields(
       {
-        name: `${fromUser}'s Offer`,
+        name: `👤 ${fromUserName}'s Offer`,
         value: `**Artefacts:**\n${fromArtefacts}\n\n💰 **Cash:** $${(fromOffer.cash || 0).toLocaleString()}\n📊 **Total Value:** ~$${totalFromValue.toLocaleString()}`,
         inline: true
       },
@@ -407,7 +281,7 @@ function createTradeInterfaceEmbed(trade, fromUser, toUser) {
         inline: true
       },
       {
-        name: `👤 ${toUser}'s Offer`,
+        name: `👤 ${toUserName}'s Offer`,
         value: `**Artefacts:**\n${toArtefacts}\n\n💰 **Cash:** $${(toOffer.cash || 0).toLocaleString()}\n📊 **Total Value:** ~$${totalToValue.toLocaleString()}`,
         inline: true
       },
@@ -487,9 +361,6 @@ function showLeaderboardPage(message, page) {
 
   return message.channel.send({ embeds: [leaderboardEmbed], components: [row] });
 }
-
-});
-
 client.on('messageCreate', async message => {
   if (message.author.bot) return;
   const userId = message.author.id;
@@ -580,7 +451,7 @@ client.on('messageCreate', async message => {
       .setThumbnail(message.guild.iconURL({ dynamic: true }))
       .setDescription(
         items
-          .map((item, i) =>
+          .map((item, i) => 
             `**${i + 1}. ${item.name}**\n💰 **$${item.value.toLocaleString()}**\n📝 ${item.desc}`
           )
           .join('\n\n')
@@ -653,7 +524,7 @@ client.on('messageCreate', async message => {
       const m = Math.floor(rem/60000), s = Math.floor((rem%60000)/1000);
       return message.reply(`You must wait **${m}m ${s}s** before laboring again.`);
     }
-    cooldowns.labor[userId] = now;
+    cooldowns.labor[userId] = now; 
     saveCooldowns();
 
     // Generate random amount between 50-400
@@ -771,19 +642,14 @@ client.on('messageCreate', async message => {
               .join('\n\n');
       }
 
-      const totalWealth = ud.cash + (ud.bankBalance || 0);
-
       // Embed
       const embed = new EmbedBuilder()
           .setTitle(`${message.author.username}'s Inventory`)
           .addFields(
-              { name: 'Cash on Hand', value: `$${ud.cash.toLocaleString()}`, inline: true },
-              { name: 'Bank Balance', value: `$${(ud.bankBalance || 0).toLocaleString()}`, inline: true },
-              { name: 'Total Wealth', value: `$${totalWealth.toLocaleString()}`, inline: true },
-              { name: 'Artefacts', value: artefactList, inline: false },
+              { name: '💰 Cash', value: `$${ud.cash}`, inline: true },
+              { name: '📦 Artefacts', value: artefactList, inline: false },
           )
-          .setColor(0x00AAFF)
-          .setFooter({ text: '💡 Tip: Consider putting money in your bank in case of theft.' });
+          .setColor(0x00AAFF);
 
       return message.reply({ embeds: [embed] });
   }
@@ -838,9 +704,9 @@ client.on('messageCreate', async message => {
 
     const players = [userId, ...mentions.keys()];
     const usernames = [message.author.username, ...mentions.map(u => u.username)];
-
+    
     // Check if any player is already in a marble game
-    const existingGame = Object.values(activeMarbleGames).find(game =>
+    const existingGame = Object.values(activeMarbleGames).find(game => 
       game.status !== 'finished' && players.some(p => game.players.includes(p))
     );
     if (existingGame) {
@@ -878,11 +744,11 @@ client.on('messageCreate', async message => {
       .setStyle(ButtonStyle.Danger);
 
     const row = new ActionRowBuilder().addComponents(acceptButton, declineButton);
-
-    await message.channel.send({
+    
+    await message.channel.send({ 
       content: `${mentions.map(u => `<@${u.id}>`).join(' ')} - You've been challenged to a marble game!`,
-      embeds: [embed],
-      components: [row]
+      embeds: [embed], 
+      components: [row] 
     });
   }
 });
@@ -943,7 +809,7 @@ client.on('messageCreate', async message => {
     if (interaction.isButton() && (interaction.customId.startsWith('marble_accept_') || interaction.customId.startsWith('marble_decline_'))) {
       const gameId = interaction.customId.substring(interaction.customId.startsWith('marble_accept_') ? 14 : 15); // Extract everything after 'marble_accept_' or 'marble_decline_'
       const game = activeMarbleGames[gameId];
-
+      
       if (!game) {
         const errorEmbed = new EmbedBuilder()
           .setTitle('❌ Game Not Found')
@@ -951,7 +817,7 @@ client.on('messageCreate', async message => {
           .setColor(0xFF0000);
         return interaction.reply({ embeds: [errorEmbed], flags: [64] });
       }
-
+      
       const userId = interaction.user.id;
       if (!game.players.includes(userId)) {
         const errorEmbed = new EmbedBuilder()
@@ -966,7 +832,7 @@ client.on('messageCreate', async message => {
           .setTitle('🚫 Marble Game Declined')
           .setDescription(`**${interaction.user.username}** has declined the marble game invitation.`)
           .setColor(0xFF0000);
-
+        
         await interaction.update({ embeds: [embed], components: [] });
         delete activeMarbleGames[gameId];
         return;
@@ -975,13 +841,13 @@ client.on('messageCreate', async message => {
       // Handle accept
       game.consents[userId] = true;
       const totalConsents = Object.keys(game.consents).length;
-
+      
       if (totalConsents === 4) {
         // All players accepted, move to team formation
         game.status = 'team_formation';
         game.teams = { team1: [], team2: [] };
         game.partnerships = [];
-
+        
         const embed = new EmbedBuilder()
           .setTitle('✅ All Players Accepted!')
           .setDescription('Now it\'s time to form teams! Each player must choose a partner.\n\n**How it works:**\n• Click "Choose Partner" to select someone\n• That person must accept your partnership\n• Once 2 partnerships are formed, teams are set!')
@@ -1000,7 +866,7 @@ client.on('messageCreate', async message => {
 
         const row = new ActionRowBuilder().addComponents(choosePartnerButton);
         await interaction.update({ embeds: [embed], components: [row] });
-
+        
       } else {
         // Still waiting for more consents
         const embed = new EmbedBuilder()
@@ -1021,13 +887,11 @@ client.on('messageCreate', async message => {
       }
     }
 
-    // Handle Partner Selection for Marble Game - SIMPLIFIED VERSION
+    // Handle Partner Selection for Marble Game
     if (interaction.isButton() && interaction.customId.startsWith('marble_choose_partner_')) {
-      const gameId = interaction.customId.replace('marble_choose_partner_', '');
+      const gameId = interaction.customId.substring(22); // Extract everything after 'marble_choose_partner_'
       const game = activeMarbleGames[gameId];
-
-      console.log(`Choose partner clicked: gameId=${gameId}, game exists=${!!game}`);
-
+      
       if (!game || game.status !== 'team_formation') {
         const errorEmbed = new EmbedBuilder()
           .setTitle('❌ Game Not Available')
@@ -1045,9 +909,6 @@ client.on('messageCreate', async message => {
         return interaction.reply({ embeds: [errorEmbed], flags: [64] });
       }
 
-      // Initialize partnerships array if not exists
-      if (!game.partnerships) game.partnerships = [];
-
       // Check if user already has a partner
       const existingPartnership = game.partnerships.find(p => p.includes(userId));
       if (existingPartnership) {
@@ -1058,8 +919,8 @@ client.on('messageCreate', async message => {
         return interaction.reply({ embeds: [errorEmbed], flags: [64] });
       }
 
-      // Show partner selection menu with SIMPLE ID format
-      const availablePlayers = game.players.filter(pid =>
+      // Show partner selection menu
+      const availablePlayers = game.players.filter(pid => 
         pid !== userId && !game.partnerships.some(p => p.includes(pid))
       );
 
@@ -1071,22 +932,17 @@ client.on('messageCreate', async message => {
         return interaction.reply({ embeds: [errorEmbed], flags: [64] });
       }
 
-      const options = availablePlayers.map((pid, index) => {
+      const options = availablePlayers.map(pid => {
         const username = game.usernames[game.players.indexOf(pid)];
         return {
           label: username,
-          value: `PARTNER_${gameId}_${userId}_${pid}`, // Standardized format: PARTNER_gameId_requesterId_partnerId
-          description: `Partner with ${username}`,
-          emoji: '🤝'
+          value: `${userId}_${pid}`,
+          description: `Partner with ${username}`
         };
       });
 
-      // Store available players in game temporarily for easy lookup
-      game.tempAvailablePlayers = availablePlayers;
-      game.tempRequesterId = userId;
-
       const selectMenu = new StringSelectMenuBuilder()
-        .setCustomId(`partner_select_${gameId}`)
+        .setCustomId(`marble_select_partner_${gameId}`)
         .setPlaceholder('Choose your partner')
         .addOptions(options);
 
@@ -1094,16 +950,71 @@ client.on('messageCreate', async message => {
         .setTitle('🤝 Choose Your Partner')
         .setDescription('Select a player to partner with for the marble game.')
         .setColor(0x4169E1);
-
+      
       const row = new ActionRowBuilder().addComponents(selectMenu);
-      await interaction.reply({ embeds: [selectEmbed], components: [row], flags: 64 });
+      await interaction.reply({ embeds: [selectEmbed], components: [row], flags: [64] });
     }
 
-    // Handle Partner Selection Menu - Standardized
-    if (interaction.isStringSelectMenu() && interaction.customId.startsWith('partner_select_')) {
-      const gameId = interaction.customId.replace('partner_select_', '');
+    // Handle Partner Selection Menu
+    if (interaction.isStringSelectMenu() && interaction.customId.startsWith('marble_select_partner_')) {
+      const gameId = interaction.customId.substring(22); // Extract everything after 'marble_select_partner_'
       const game = activeMarbleGames[gameId];
+      
+      if (!game) {
+        const errorEmbed = new EmbedBuilder()
+          .setTitle('❌ Game Not Found')
+          .setDescription('This marble game was not found or has expired.')
+          .setColor(0xFF0000);
+        return interaction.reply({ embeds: [errorEmbed], flags: [64] });
+      }
 
+      const [requesterId, partnerId] = interaction.values[0].split('_');
+      const requesterName = game.usernames[game.players.indexOf(requesterId)];
+      const partnerName = game.usernames[game.players.indexOf(partnerId)];
+
+      // Create partnership request
+      const embed = new EmbedBuilder()
+        .setTitle('🤝 Partnership Request')
+        .setDescription(`**${requesterName}** wants to partner with **${partnerName}** for the marble game!`)
+        .setColor(0x4169E1);
+
+      const acceptButton = new ButtonBuilder()
+        .setCustomId(`marble_accept_partnership_${gameId}_${requesterId}_${partnerId}`)
+        .setLabel('Accept Partnership')
+        .setEmoji('✅')
+        .setStyle(ButtonStyle.Success);
+
+      const declineButton = new ButtonBuilder()
+        .setCustomId(`marble_decline_partnership_${gameId}_${requesterId}_${partnerId}`)
+        .setLabel('Decline')
+        .setEmoji('❌')
+        .setStyle(ButtonStyle.Danger);
+
+      const row = new ActionRowBuilder().addComponents(acceptButton, declineButton);
+      
+      await interaction.update({
+        content: `<@${partnerId}> - Partnership request from ${requesterName}!`,
+        embeds: [embed],
+        components: [row]
+      });
+    }
+
+    // Handle Partnership Response
+    if (interaction.isButton() && (interaction.customId.startsWith('marble_accept_partnership_') || interaction.customId.startsWith('marble_decline_partnership_'))) {
+      const isAccept = interaction.customId.startsWith('marble_accept_partnership_');
+      const prefix = isAccept ? 'marble_accept_partnership_' : 'marble_decline_partnership_';
+      const remaining = interaction.customId.substring(prefix.length);
+      
+      // Split only on the last two underscores to get requesterId and partnerId
+      const lastUnderscoreIndex = remaining.lastIndexOf('_');
+      const secondLastUnderscoreIndex = remaining.lastIndexOf('_', lastUnderscoreIndex - 1);
+      
+      const gameId = remaining.substring(0, secondLastUnderscoreIndex);
+      const requesterId = remaining.substring(secondLastUnderscoreIndex + 1, lastUnderscoreIndex);
+      const partnerId = remaining.substring(lastUnderscoreIndex + 1);
+      
+      const game = activeMarbleGames[gameId];
+      
       if (!game) {
         const errorEmbed = new EmbedBuilder()
           .setTitle('❌ Game Not Found')
@@ -1113,100 +1024,7 @@ client.on('messageCreate', async message => {
       }
 
       const userId = interaction.user.id;
-      if (userId !== game.tempRequesterId) {
-        const errorEmbed = new EmbedBuilder()
-          .setTitle('❌ Access Denied')
-          .setDescription('This selection menu is not for you.')
-          .setColor(0xFF0000);
-        return interaction.reply({ embeds: [errorEmbed], flags: [64] });
-      }
-
-      const selectedValue = interaction.values[0]; // Format: PARTNER_gameId_requesterId_partnerId
-      console.log(`Selected value: ${selectedValue}`);
-
-      // Split and reconstruct gameId properly (it contains underscores)
-      const valueParts = selectedValue.split('_');
-      // valueParts: ['PARTNER', 'marble', '1755262160317', '316evo9ve', 'requesterId', 'partnerId']
-
-      if (valueParts.length < 4) {
-        console.error('Invalid selected value format:', selectedValue);
-        return interaction.reply({ content: '❌ Invalid selection format.', flags: [64] });
-      }
-
-      // Get the last two parts as requester and partner IDs
-      const requesterId = valueParts[valueParts.length - 2];
-      const partnerId = valueParts[valueParts.length - 1];
-
-      console.log(`Parsed IDs - Requester: ${requesterId}, Partner: ${partnerId}`);
-
-      const requesterName = game.usernames[game.players.indexOf(requesterId)];
-      const partnerName = game.usernames[game.players.indexOf(partnerId)];
-
-      console.log(`Partnership request: ${requesterName} -> ${partnerName}`);
-
-      // Use simple format for partnership buttons
-      const embed = new EmbedBuilder()
-        .setTitle('🤝 Partnership Request')
-        .setDescription(`**${requesterName}** wants to partner with **${partnerName}** for the marble game!\n\n${partnerName}, do you accept this partnership?`)
-        .setColor(0x4169E1)
-        .addFields({
-          name: '🎯 What happens next?',
-          value: '• Accept: You will become teammates\n• Decline: Partnership request is cancelled',
-          inline: false
-        });
-
-      const acceptButton = new ButtonBuilder()
-        .setCustomId(`marble_partnership_accept|${gameId}|${requesterId}|${partnerId}`)
-        .setLabel('Accept Partnership')
-        .setEmoji('✅')
-        .setStyle(ButtonStyle.Success);
-
-      const declineButton = new ButtonBuilder()
-        .setCustomId(`marble_partnership_decline|${gameId}|${requesterId}|${partnerId}`)
-        .setLabel('Decline')
-        .setEmoji('❌')
-        .setStyle(ButtonStyle.Danger);
-
-      const row = new ActionRowBuilder().addComponents(acceptButton, declineButton);
-
-      await interaction.update({
-        content: `<@${partnerId}> - Partnership request!`,
-        embeds: [embed],
-        components: [row]
-      });
-    }
-
-    // Handle Partnership Response with pipe delimiter
-    if (interaction.isButton() && (interaction.customId.startsWith('marble_partnership_accept|') || interaction.customId.startsWith('marble_partnership_decline|'))) {
-      const isAccept = interaction.customId.startsWith('marble_partnership_accept|');
-      const parts = interaction.customId.split('|');
-
-      if (parts.length !== 4) {
-        console.error('Invalid partnership button format:', interaction.customId);
-        const errorEmbed = new EmbedBuilder()
-          .setTitle('❌ Invalid Request')
-          .setDescription('Invalid partnership request format.')
-          .setColor(0xFF0000);
-        return interaction.reply({ embeds: [errorEmbed], flags: [64] });
-      }
-
-      const gameId = parts[1];
-      const requesterId = parts[2];
-      const partnerId = parts[3];
-
-      console.log(`Partnership response: ${isAccept ? 'accept' : 'decline'}, gameId: ${gameId}, requester: ${requesterId}, partner: ${partnerId}`);
-
-      const game = activeMarbleGames[gameId];
-
-      if (!game || !game.tempRequesterId || !game.tempAvailablePlayers) {
-        const errorEmbed = new EmbedBuilder()
-          .setTitle('❌ Game Data Error')
-          .setDescription('Game data is missing or invalid. Please restart the game.')
-          .setColor(0xFF0000);
-        return interaction.reply({ embeds: [errorEmbed], flags: [64] });
-      }
-
-      if (interaction.user.id !== partnerId) {
+      if (userId !== partnerId) {
         const errorEmbed = new EmbedBuilder()
           .setTitle('❌ Wrong Recipient')
           .setDescription('This partnership request is not for you.')
@@ -1214,35 +1032,28 @@ client.on('messageCreate', async message => {
         return interaction.reply({ embeds: [errorEmbed], flags: [64] });
       }
 
-      // Clear temporary data
-      delete game.tempRequesterId;
-      delete game.tempAvailablePlayers;
-
-      if (!isAccept) {
+      if (interaction.customId.startsWith('marble_decline_partnership_')) {
         const embed = new EmbedBuilder()
           .setTitle('❌ Partnership Declined')
-          .setDescription(`**${game.usernames[game.players.indexOf(partnerId)]}** declined the partnership request from **${game.usernames[game.players.indexOf(requesterId)]}**.`)
+          .setDescription(`**${game.usernames[game.players.indexOf(partnerId)]}** declined the partnership.`)
           .setColor(0xFF0000);
 
-        await interaction.update({ content: '', embeds: [embed], components: [] });
+        await interaction.update({ embeds: [embed], components: [] });
         return;
       }
 
       // Accept partnership
-      if (!game.partnerships) game.partnerships = [];
       game.partnerships.push([requesterId, partnerId]);
-
-      console.log(`Partnerships after adding: ${game.partnerships.length}`);
-
+      
       if (game.partnerships.length === 2) {
         // Teams formed, move to betting phase
         game.teams.team1 = game.partnerships[0];
         game.teams.team2 = game.partnerships[1];
         game.status = 'betting';
-
+        
         const team1Names = game.teams.team1.map(pid => game.usernames[game.players.indexOf(pid)]);
         const team2Names = game.teams.team2.map(pid => game.usernames[game.players.indexOf(pid)]);
-
+        
         const embed = new EmbedBuilder()
           .setTitle('✅ Teams Formed!')
           .setDescription('Teams have been successfully formed! Now it\'s time to place your bets.\n\n**How betting works:**\n• Both teams must agree on the same bet amount\n• The winning team splits the total pot\n• The losing team loses their bet')
@@ -1254,7 +1065,7 @@ client.on('messageCreate', async message => {
               inline: true
             },
             {
-              name: '🔵 Team 2',
+              name: '🔵 Team 2', 
               value: team2Names.join(' & '),
               inline: true
             }
@@ -1267,12 +1078,12 @@ client.on('messageCreate', async message => {
           .setStyle(ButtonStyle.Primary);
 
         const row = new ActionRowBuilder().addComponents(setBetButton);
-        await interaction.update({ content: 'Teams are now set!', embeds: [embed], components: [row] });
-
+        await interaction.update({ embeds: [embed], components: [row] });
+        
       } else {
         // One partnership formed, waiting for second
         const partnership1Names = game.partnerships[0].map(pid => game.usernames[game.players.indexOf(pid)]);
-
+        
         const embed = new EmbedBuilder()
           .setTitle('🤝 Partnership Accepted!')
           .setDescription('First partnership formed! Waiting for the remaining players to partner up.')
@@ -1290,7 +1101,7 @@ client.on('messageCreate', async message => {
           .setStyle(ButtonStyle.Primary);
 
         const row = new ActionRowBuilder().addComponents(choosePartnerButton);
-        await interaction.update({ content: 'First partnership complete!', embeds: [embed], components: [row] });
+        await interaction.update({ embeds: [embed], components: [row] });
       }
     }
 
@@ -1298,7 +1109,7 @@ client.on('messageCreate', async message => {
     if (interaction.isButton() && interaction.customId.startsWith('marble_set_bet_')) {
       const gameId = interaction.customId.split('_')[3];
       const game = activeMarbleGames[gameId];
-
+      
       if (!game || game.status !== 'betting') {
         const errorEmbed = new EmbedBuilder()
           .setTitle('❌ Betting Not Available')
@@ -1338,7 +1149,7 @@ client.on('messageCreate', async message => {
     if (interaction.isModalSubmit() && interaction.customId.startsWith('marble_bet_modal_')) {
       const gameId = interaction.customId.split('_')[3];
       const game = activeMarbleGames[gameId];
-
+      
       if (!game) {
         const errorEmbed = new EmbedBuilder()
           .setTitle('❌ Game Not Found')
@@ -1349,39 +1160,39 @@ client.on('messageCreate', async message => {
 
       const betAmount = parseInt(interaction.fields.getTextInputValue('bet_amount'));
       const userId = interaction.user.id;
-
+      
       if (isNaN(betAmount) || betAmount <= 0) {
         return interaction.reply({ content: '❌ Please enter a valid positive number.', ephemeral: true });
       }
 
       // Check if user has enough money
       if (!userData[userId] || userData[userId].cash < betAmount) {
-        return interaction.reply({
-          content: `❌ You don't have enough money! You have $${userData[userId]?.cash || 0} but tried to bet $${betAmount}.`,
-          ephemeral: true
+        return interaction.reply({ 
+          content: `❌ You don't have enough money! You have $${userData[userId]?.cash || 0} but tried to bet $${betAmount}.`, 
+          ephemeral: false 
         });
       }
 
       // Initialize game betting if not exists
       if (!game.bets) game.bets = {};
-
+      
       game.bets[userId] = betAmount;
 
       // Check if everyone has placed their bet
       const allBetsPlaced = game.players.every(pid => game.bets[pid] !== undefined);
-
+      
       if (allBetsPlaced) {
         // Check if all bets are the same
         const betAmounts = Object.values(game.bets);
         const allSame = betAmounts.every(amount => amount === betAmounts[0]);
-
+        
         if (allSame) {
           // Start the game!
           game.status = 'playing';
           game.currentRound = 1;
           game.marbles = { team1: 10, team2: 10 };
           game.roundGuesses = {};
-
+          
           // Deduct bet amounts from all players
           game.players.forEach(pid => {
             userData[pid].cash -= game.bets[pid];
@@ -1392,7 +1203,7 @@ client.on('messageCreate', async message => {
           const firstTeam = Math.random() < 0.5 ? 'team1' : 'team2';
           game.currentTeam = firstTeam;
           game.currentPlayer = game.teams[firstTeam][0]; // First player of the chosen team
-
+          
           const embed = new EmbedBuilder()
             .setTitle('🎲 Marble Game Started!')
             .setDescription(`**Bet Amount:** $${betAmounts[0]} per player\n**Total Pot:** $${betAmounts[0] * 4}\n\nThe coin toss determined that **${firstTeam === 'team1' ? 'Team 1 🔴' : 'Team 2 🔵'}** goes first!`)
@@ -1409,8 +1220,8 @@ client.on('messageCreate', async message => {
                 inline: true
               }
             )
-            .setFooter({
-              text: `Round ${game.currentRound} • ${game.usernames[game.players.indexOf(game.currentPlayer)]}'s turn`
+            .setFooter({ 
+              text: `Round ${game.currentRound} • ${game.usernames[game.players.indexOf(game.currentPlayer)]}'s turn` 
             });
 
           const guessButton = new ButtonBuilder()
@@ -1420,13 +1231,13 @@ client.on('messageCreate', async message => {
             .setStyle(ButtonStyle.Primary);
 
           const row = new ActionRowBuilder().addComponents(guessButton);
-
-          await interaction.update({
+          
+          await interaction.update({ 
             content: `<@${game.currentPlayer}> - Your turn to guess!`,
-            embeds: [embed],
-            components: [row]
+            embeds: [embed], 
+            components: [row] 
           });
-
+          
         } else {
           // Bets don't match
           const embed = new EmbedBuilder()
@@ -1443,7 +1254,7 @@ client.on('messageCreate', async message => {
 
           // Reset bets
           game.bets = {};
-
+          
           const setBetButton = new ButtonBuilder()
             .setCustomId(`marble_set_bet_${gameId}`)
             .setLabel('Set Bet Amount')
@@ -1456,7 +1267,7 @@ client.on('messageCreate', async message => {
       } else {
         // Still waiting for more bets
         const pendingPlayers = game.players.filter(pid => game.bets[pid] === undefined);
-
+        
         const embed = new EmbedBuilder()
           .setTitle('⏳ Waiting for Bets...')
           .setDescription(`**${interaction.user.username}** has bet $${betAmount}!`)
@@ -1464,7 +1275,7 @@ client.on('messageCreate', async message => {
           .addFields(
             {
               name: '✅ Bets Placed',
-              value: Object.keys(game.bets).map(pid =>
+              value: Object.keys(game.bets).map(pid => 
                 `${game.usernames[game.players.indexOf(pid)]}: $${game.bets[pid]}`
               ).join('\n'),
               inline: true
@@ -1491,14 +1302,14 @@ client.on('messageCreate', async message => {
     if (interaction.isButton() && interaction.customId.startsWith('marble_guess_')) {
       const gameId = interaction.customId.split('_')[2];
       const game = activeMarbleGames[gameId];
-
+      
       if (!game || game.status !== 'playing') {
         return interaction.reply({ content: '❌ Game not found or not in playing phase.', ephemeral: true });
       }
 
       const userId = interaction.user.id;
       if (userId !== game.currentPlayer) {
-        return interaction.reply({ content: '❌ It\'s not your turn to guess!', ephemeral: true });
+        return interaction.reply({ content: '❌ It\'s not your turn to guess!', ephemeral: false });
       }
 
       // Show guess modal
@@ -1525,16 +1336,16 @@ client.on('messageCreate', async message => {
     if (interaction.isModalSubmit() && interaction.customId.startsWith('marble_guess_modal_')) {
       const gameId = interaction.customId.split('_')[3];
       const game = activeMarbleGames[gameId];
-
+      
       if (!game || game.status !== 'playing') {
-        return interaction.reply({ content: '❌ Game not found or not in playing phase.', ephemeral: true });
+        return interaction.reply({ content: '❌ Game not found or not in playing phase.', ephemeral: false });
       }
 
       const userId = interaction.user.id;
       const guess = parseInt(interaction.fields.getTextInputValue('guess_number'));
-
+      
       if (isNaN(guess) || guess < 1 || guess > 20) {
-        return interaction.reply({ content: '❌ Please enter a number between 1 and 20.', ephemeral: true });
+        return interaction.reply({ content: '❌ Please enter a number between 1 and 20.', ephemeral: false });
       }
 
       // Record the guess
@@ -1545,11 +1356,11 @@ client.on('messageCreate', async message => {
       const currentTeamKey = game.currentTeam;
       const currentTeamPlayers = game.teams[currentTeamKey];
       const currentPlayerIndex = currentTeamPlayers.indexOf(game.currentPlayer);
-
+      
       if (currentPlayerIndex === 0) {
         // First player of team guessed, move to second player
         game.currentPlayer = currentTeamPlayers[1];
-
+        
         const embed = new EmbedBuilder()
           .setTitle('🎯 Guess Recorded!')
           .setDescription(`**${game.usernames[game.players.indexOf(userId)]}** has made their guess!`)
@@ -1566,8 +1377,8 @@ client.on('messageCreate', async message => {
               inline: true
             }
           )
-          .setFooter({
-            text: `Round ${game.currentRound} • ${game.usernames[game.players.indexOf(game.currentPlayer)]}'s turn`
+          .setFooter({ 
+            text: `Round ${game.currentRound} • ${game.usernames[game.players.indexOf(game.currentPlayer)]}'s turn` 
           });
 
         const guessButton = new ButtonBuilder()
@@ -1577,21 +1388,21 @@ client.on('messageCreate', async message => {
           .setStyle(ButtonStyle.Primary);
 
         const row = new ActionRowBuilder().addComponents(guessButton);
-
-        await interaction.update({
+        
+        await interaction.update({ 
           content: `<@${game.currentPlayer}> - Your turn to guess!`,
-          embeds: [embed],
-          components: [row]
+          embeds: [embed], 
+          components: [row] 
         });
-
+        
       } else {
         // Second player of team guessed, switch to other team or process round
         const otherTeam = currentTeamKey === 'team1' ? 'team2' : 'team1';
         const otherTeamPlayers = game.teams[otherTeam];
-
+        
         // Check if other team has also completed their guesses
         const otherTeamGuessed = otherTeamPlayers.every(pid => game.roundGuesses[pid] !== undefined);
-
+        
         if (otherTeamGuessed) {
           // Both teams have guessed, process the round
           await processMarbleRound(interaction, game, gameId);
@@ -1599,7 +1410,7 @@ client.on('messageCreate', async message => {
           // Switch to other team
           game.currentTeam = otherTeam;
           game.currentPlayer = otherTeamPlayers[0];
-
+          
           const embed = new EmbedBuilder()
             .setTitle('🎯 Guess Recorded!')
             .setDescription(`**${game.usernames[game.players.indexOf(userId)]}** has made their guess!\n\nNow it's the other team's turn!`)
@@ -1616,8 +1427,8 @@ client.on('messageCreate', async message => {
                 inline: true
               }
             )
-            .setFooter({
-              text: `Round ${game.currentRound} • ${game.usernames[game.players.indexOf(game.currentPlayer)]}'s turn`
+            .setFooter({ 
+              text: `Round ${game.currentRound} • ${game.usernames[game.players.indexOf(game.currentPlayer)]}'s turn` 
             });
 
           const guessButton = new ButtonBuilder()
@@ -1627,11 +1438,11 @@ client.on('messageCreate', async message => {
             .setStyle(ButtonStyle.Primary);
 
           const row = new ActionRowBuilder().addComponents(guessButton);
-
-          await interaction.update({
+          
+          await interaction.update({ 
             content: `<@${game.currentPlayer}> - Your turn to guess!`,
-            embeds: [embed],
-            components: [row]
+            embeds: [embed], 
+            components: [row] 
           });
         }
       }
@@ -1644,15 +1455,12 @@ client.on('messageCreate', async message => {
       if (interaction.customId.startsWith('item_confirm_') || interaction.customId.startsWith('item_cancel_')) {
         const parts = interaction.customId.split('_');
         const userId = parts[2];
-        if (interaction.user.id !== userId) {
-          return interaction.reply({ content: '❌ This button is not for you.', flags: [64] });
-        }
 
         if (interaction.customId.startsWith('item_confirm_')) {
           const guildId = parts[1];
           const itemName = parts.slice(3).join('_'); // Handle names with underscores
           const item = global.tempItems?.[userId];
-          if (!item) return interaction.reply({ content: '❌ No item found to confirm.', ephemeral: true });
+          if (!item) return interaction.reply({ content: '❌ No item found to confirm.', ephemeral: false });
 
           if (!userData.guildItems[guildId]) userData.guildItems[guildId] = [];
           userData.guildItems[guildId].push(item);
@@ -1732,7 +1540,7 @@ client.on('messageCreate', async message => {
 
         } else if (subaction === 'add_art') {
           const trade = activeTrades[tradeId];
-          if (!trade || trade.status !== 'open') return interaction.reply({ content: 'Trade not active.', ephemeral: true });
+          if (!trade || trade.status !== 'open') return interaction.reply({ content: 'Trade not active.', ephemeral: false });
           if (trade.from !== interaction.user.id && trade.to !== interaction.user.id) {
             return interaction.reply({ content: 'You are not part of this trade.', flags: 64 });
           }
@@ -1747,10 +1555,10 @@ client.on('messageCreate', async message => {
 
           const options = availableArtefacts.slice(0, 25).map((art, index) => {
             const rarity = getRarityByArtefact(art);
-            const rarityEmoji = rarity ?
-              (rarity.name === 'Common' ? '⚪' :
-               rarity.name === 'Uncommon' ? '🟢' :
-               rarity.name === 'Rare' ? '🔵' :
+            const rarityEmoji = rarity ? 
+              (rarity.name === 'Common' ? '⚪' : 
+               rarity.name === 'Uncommon' ? '🟢' : 
+               rarity.name === 'Rare' ? '🔵' : 
                rarity.name === 'Legendary' ? '🟡' : '⚫') : '❓';
 
             return {
@@ -1914,10 +1722,10 @@ client.on('messageCreate', async message => {
         trade.offers[userId].artefacts.push(selectedArtefact);
 
         const rarity = getRarityByArtefact(selectedArtefact);
-        const rarityEmoji = rarity ?
-          (rarity.name === 'Common' ? '⚪' :
-           rarity.name === 'Uncommon' ? '🟢' :
-           rarity.name === 'Rare' ? '🔵' :
+        const rarityEmoji = rarity ? 
+          (rarity.name === 'Common' ? '⚪' : 
+           rarity.name === 'Uncommon' ? '🟢' : 
+           rarity.name === 'Rare' ? '🔵' : 
            rarity.name === 'Legendary' ? '🟡' : '⚫') : '❓';
 
         await interaction.reply({ content: `✅ Added ${rarityEmoji} **${selectedArtefact}** to your trade offer!`, flags: 64 });
@@ -1941,10 +1749,10 @@ client.on('messageCreate', async message => {
         const rar = getRarityByArtefact(selArt);
         const price = rar ? rar.sell : 0;
 
-        const rarityEmoji = rar ?
-          (rar.name === 'Common' ? '⚪' :
-           rar.name === 'Uncommon' ? '🟢' :
-           rar.name === 'Rare' ? '🔵' :
+        const rarityEmoji = rar ? 
+          (rar.name === 'Common' ? '⚪' : 
+           rar.name === 'Uncommon' ? '🟢' : 
+           rar.name === 'Rare' ? '🔵' : 
            rar.name === 'Legendary' ? '🟡' : '⚫') : '❓';
 
         const confirmEmbed = new EmbedBuilder()
@@ -2025,8 +1833,8 @@ client.on('messageCreate', async message => {
 
         const channel = interaction.channel;
         const messages = await channel.messages.fetch({ limit: 50 });
-        const tradeMessage = messages.find(msg =>
-          msg.embeds.length > 0 &&
+        const tradeMessage = messages.find(msg => 
+          msg.embeds.length > 0 && 
           msg.embeds[0].title === '🏪 Interactive Trading Interface'
         );
 
@@ -2043,38 +1851,38 @@ async function processMarbleRound(interaction, game, gameId) {
   let rolledNumber;
   let attempts = 0;
   const maxAttempts = 10; // Safety limit to prevent infinite loops
-
+  
   do {
     rolledNumber = Math.floor(Math.random() * 20) + 1;
     attempts++;
-
+    
     // Check if anyone guessed this number
     const winners = game.players.filter(pid => game.roundGuesses[pid] === rolledNumber);
-
+    
     if (winners.length > 0) {
       // Someone won this round!
       const winnerTeam = game.teams.team1.includes(winners[0]) ? 'team1' : 'team2';
       const loserTeam = winnerTeam === 'team1' ? 'team2' : 'team1';
-
+      
       // Transfer marble
       game.marbles[winnerTeam] += 1;
       game.marbles[loserTeam] -= 1;
-
+      
       const winnerNames = winners.map(pid => game.usernames[game.players.indexOf(pid)]);
-
+      
       // Check for game end
       if (game.marbles[winnerTeam] >= 20) {
         // Game over! This team wins
         game.status = 'finished';
         const totalPot = Object.values(game.bets).reduce((sum, bet) => sum + bet, 0);
         const winningsPerPlayer = totalPot / 2; // Split between 2 winners
-
+        
         // Award winnings to winning team
         game.teams[winnerTeam].forEach(pid => {
           userData[pid].cash += winningsPerPlayer;
         });
         saveUserData();
-
+        
         const finalEmbed = new EmbedBuilder()
           .setTitle('🎉 GAME OVER!')
           .setDescription(`**${winnerTeam === 'team1' ? 'Team 1 🔴' : 'Team 2 🔵'}** has won the marble game!\n\n**Final Roll:** ${rolledNumber}\n**Winning Guess:** ${winners.map(pid => `${game.usernames[game.players.indexOf(pid)]} (${game.roundGuesses[pid]})`).join(', ')}`)
@@ -2098,26 +1906,26 @@ async function processMarbleRound(interaction, game, gameId) {
           )
           .setFooter({ text: `Game completed after ${game.currentRound} rounds` });
 
-        await interaction.update({
-          content: '🎊 Congratulations to the winners!',
-          embeds: [finalEmbed],
-          components: []
+        await interaction.update({ 
+          content: '🎊 Congratulations to the winners!', 
+          embeds: [finalEmbed], 
+          components: [] 
         });
-
+        
         // Clean up the game
         delete activeMarbleGames[gameId];
         return;
       }
-
+      
       // Continue game - prepare next round
       game.currentRound++;
       game.roundGuesses = {};
-
+      
       // Switch starting team for next round
       const nextStartingTeam = winnerTeam === 'team1' ? 'team2' : 'team1';
       game.currentTeam = nextStartingTeam;
       game.currentPlayer = game.teams[nextStartingTeam][0];
-
+      
       const roundEmbed = new EmbedBuilder()
         .setTitle(`🎯 Round ${game.currentRound - 1} Results`)
         .setDescription(`**Rolled Number:** ${rolledNumber}\n**Winner:** ${winnerNames.join(' & ')} guessed correctly!\n\n${winnerTeam === 'team1' ? 'Team 1 🔴' : 'Team 2 🔵'} gains 1 marble!`)
@@ -2134,7 +1942,7 @@ async function processMarbleRound(interaction, game, gameId) {
             inline: true
           }
         )
-        .setFooter({
+        .setFooter({ 
           text: `Round ${game.currentRound} starting • ${game.usernames[game.players.indexOf(game.currentPlayer)]}'s turn`
         });
 
@@ -2145,26 +1953,26 @@ async function processMarbleRound(interaction, game, gameId) {
         .setStyle(ButtonStyle.Primary);
 
       const row = new ActionRowBuilder().addComponents(guessButton);
-
+      
       // Add 3 second delay before next round
-      await interaction.update({
-        content: 'Processing next round in 3 seconds...',
-        embeds: [roundEmbed],
-        components: []
+      await interaction.update({ 
+        content: 'Processing next round in 3 seconds...', 
+        embeds: [roundEmbed], 
+        components: [] 
       });
-
+      
       setTimeout(async () => {
-        await interaction.editReply({
+        await interaction.editReply({ 
           content: `<@${game.currentPlayer}> - Your turn to guess!`,
-          embeds: [roundEmbed],
-          components: [row]
+          embeds: [roundEmbed], 
+          components: [row] 
         });
       }, 3000);
-
+      
       return; // Exit the function as we found winners
     }
   } while (attempts < maxAttempts);
-
+  
   // If we get here, no one guessed the number after max attempts
   // This is a backup - in practice, this should rarely happen
   const noWinnerEmbed = new EmbedBuilder()
@@ -2173,11 +1981,11 @@ async function processMarbleRound(interaction, game, gameId) {
     .setColor(0xFFFF00);
 
   await interaction.update({ embeds: [noWinnerEmbed], components: [] });
-
+  
   // Reset round and continue
   game.roundGuesses = {};
   game.currentPlayer = game.teams[game.currentTeam][0];
-
+  
   setTimeout(async () => {
     const guessButton = new ButtonBuilder()
       .setCustomId(`marble_guess_${gameId}`)
@@ -2186,10 +1994,10 @@ async function processMarbleRound(interaction, game, gameId) {
       .setStyle(ButtonStyle.Primary);
 
     const row = new ActionRowBuilder().addComponents(guessButton);
-
-    await interaction.editReply({
+    
+    await interaction.editReply({ 
       content: `<@${game.currentPlayer}> - Your turn to guess!`,
-      components: [row]
+      components: [row] 
     });
   }, 2000);
 }
