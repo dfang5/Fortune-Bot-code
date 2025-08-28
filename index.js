@@ -61,7 +61,9 @@ const rest = new REST({ version:'10' }).setToken(token);
   } catch (err) { console.error(err); }
 })();
 
-client.once('ready', () => console.log(`Fortune Bot online as ${client.user.tag}`));
+client.once('ready', () => {
+  console.log(`Fortune Bot online as ${client.user.tag}`);
+});
 
 // Handle slash /info
 client.on('interactionCreate', async interaction => {
@@ -146,7 +148,7 @@ client.on('messageCreate', async message => {
 
   if (!userData[userId]) userData[userId] = { cash: 0, artefacts: [], bankBalance: 0 };
 
-  // Banking System Commands
+  // Banking System Commands (here we go again...)
 
   // !bank {amount} - Deposit money
   if (content.startsWith('!bank ')) {
@@ -173,12 +175,12 @@ client.on('messageCreate', async message => {
     saveUserData();
 
     const embed = new EmbedBuilder()
-      .setTitle('🏦 Deposit Successful!')
+      .setTitle('Deposit Successful!')
       .setDescription(`You deposited $${amount.toLocaleString()} into your bank account.`)
       .addFields(
-        { name: '💰 Cash on Hand', value: `$${userData[userId].cash.toLocaleString()}`, inline: true },
-        { name: '🏦 Bank Balance', value: `$${userData[userId].bankBalance.toLocaleString()}`, inline: true },
-        { name: '📊 Bank Capacity', value: `${((userData[userId].bankBalance / 50000) * 100).toFixed(1)}%`, inline: true }
+        { name: 'Cash on Hand', value: `$${userData[userId].cash.toLocaleString()}`, inline: true },
+        { name: 'Bank Balance', value: `$${userData[userId].bankBalance.toLocaleString()}`, inline: true },
+        { name: 'Bank Capacity', value: `${((userData[userId].bankBalance / 50000) * 100).toFixed(1)}%`, inline: true }
       )
       .setColor(0x00AA00)
       .setTimestamp();
@@ -206,12 +208,12 @@ client.on('messageCreate', async message => {
     saveUserData();
 
     const embed = new EmbedBuilder()
-      .setTitle('🏦 Withdrawal Successful!')
+      .setTitle('Withdrawal Successful!')
       .setDescription(`You withdrew $${amount.toLocaleString()} from your bank account.`)
       .addFields(
-        { name: '💰 Cash on Hand', value: `$${userData[userId].cash.toLocaleString()}`, inline: true },
-        { name: '🏦 Bank Balance', value: `$${userData[userId].bankBalance.toLocaleString()}`, inline: true },
-        { name: '📊 Bank Capacity', value: `${((userData[userId].bankBalance / 50000) * 100).toFixed(1)}%`, inline: true }
+        { name: 'Cash on Hand', value: `$${userData[userId].cash.toLocaleString()}`, inline: true },
+        { name: 'Bank Balance', value: `$${userData[userId].bankBalance.toLocaleString()}`, inline: true },
+        { name: 'Bank Capacity', value: `${((userData[userId].bankBalance / 50000) * 100).toFixed(1)}%`, inline: true }
       )
       .setColor(0x0099FF)
       .setTimestamp();
@@ -250,6 +252,9 @@ client.on('messageCreate', async message => {
     // Calculate success rate based on amount
     // Formula: Base 80% success, decreases as amount increases
     // $100 = ~75%, $400 = ~50%, $1000 = ~25%, $2000+ = ~10%
+    // Minimum success rate is 10% to prevent impossible steals
+    // Maximum success rate is 80% to prevent guaranteed steals
+    // This really took a lot of time to make :3 
     let successRate = Math.max(10, 80 - (amount / 20));
     successRate = Math.min(80, successRate); // Cap at 80%
 
@@ -266,9 +271,9 @@ client.on('messageCreate', async message => {
         .setTitle('💰 Theft Successful!')
         .setDescription(`You successfully stole $${amount.toLocaleString()} from ${mentioned.username}!`)
         .addFields(
-          { name: '🎯 Success Rate', value: `${successRate.toFixed(1)}%`, inline: true },
-          { name: '🎲 Your Roll', value: `${randomRoll.toFixed(1)}%`, inline: true },
-          { name: '💵 Your Cash', value: `$${userData[userId].cash.toLocaleString()}`, inline: true }
+          { name: 'Success Rate', value: `${successRate.toFixed(1)}%`, inline: true },
+          { name: 'Your Roll', value: `${randomRoll.toFixed(1)}%`, inline: true },
+          { name: 'Your Cash', value: `$${userData[userId].cash.toLocaleString()}`, inline: true }
         )
         .setColor(0x00AA00)
         .setTimestamp();
@@ -277,7 +282,7 @@ client.on('messageCreate', async message => {
 
       // Notify the victim
       const victimEmbed = new EmbedBuilder()
-        .setTitle('🚨 You Were Robbed!')
+        .setTitle('You Were Robbed!')
         .setDescription(`${message.author.username} stole $${amount.toLocaleString()} from you!`)
         .addFields(
           { name: '💰 Remaining Cash', value: `$${userData[targetId].cash.toLocaleString()}`, inline: true },
@@ -297,11 +302,11 @@ client.on('messageCreate', async message => {
       // Failed steal
       const embed = new EmbedBuilder()
         .setTitle('❌ Theft Failed!')
-        .setDescription(`You failed to steal from ${mentioned.username}! Better luck next time.`)
+        .setDescription(`You failed to steal from ${mentioned.username}! Try stealing a smaller number, they increase your chances of success.`)
         .addFields(
-          { name: '🎯 Success Rate', value: `${successRate.toFixed(1)}%`, inline: true },
-          { name: '🎲 Your Roll', value: `${randomRoll.toFixed(1)}%`, inline: true },
-          { name: '💔 Result', value: 'Mission Failed!', inline: true }
+          { name: 'Success Rate', value: `${successRate.toFixed(1)}%`, inline: true },
+          { name: 'Your Roll', value: `${randomRoll.toFixed(1)}%`, inline: true },
+          { name: 'Result', value: 'Mission Failed!', inline: true }
         )
         .setColor(0xFF0000)
         .setTimestamp();
@@ -309,74 +314,6 @@ client.on('messageCreate', async message => {
       return message.reply({ embeds: [embed] });
     }
   }
-    const modal = new ModalBuilder()
-      .setCustomId('modal_add_item')
-      .setTitle('🌟 Create a Custom Item');
-
-    const nameInput = new TextInputBuilder()
-      .setCustomId('item_name')
-      .setLabel('📛 Item Name')
-      .setStyle(TextInputStyle.Short)
-      .setPlaceholder('Ex: Your Item Name Here')
-      .setRequired(true);
-
-    const descInput = new TextInputBuilder()
-      .setCustomId('item_desc')
-      .setLabel('📝 Item Description')
-      .setStyle(TextInputStyle.Paragraph)
-      .setPlaceholder('What makes this item special?')
-      .setRequired(true);
-
-    const valueInput = new TextInputBuilder()
-      .setCustomId('item_value')
-      .setLabel('💰 Item Value')
-      .setStyle(TextInputStyle.Short)
-      .setPlaceholder('Enter value in dollars')
-      .setRequired(true);
-
-    const firstRow = new ActionRowBuilder().addComponents(nameInput);
-    const secondRow = new ActionRowBuilder().addComponents(descInput);
-    const thirdRow = new ActionRowBuilder().addComponents(valueInput);
-
-    modal.addComponents(firstRow, secondRow, thirdRow);
-
-    return interaction.showModal(modal);
-  }
-
-  // Modal submit → Save item
-  if (interaction.isModalSubmit() && interaction.customId === 'modal_add_item') {
-    const name = interaction.fields.getTextInputValue('item_name');
-    const desc = interaction.fields.getTextInputValue('item_desc');
-    const value = parseFloat(interaction.fields.getTextInputValue('item_value'));
-
-    if (isNaN(value) || value < 0) {
-      return interaction.reply({ content: '⚠️ Invalid value. Please try again.', flags: [64] });
-    }
-
-    const guildId = interaction.guild?.id;
-    if (!userData.guildItems) userData.guildItems = {};
-    if (!userData.guildItems[guildId]) userData.guildItems[guildId] = [];
-
-    userData.guildItems[guildId].push({ name, desc, value });
-
-    // Save to file
-    const fs = require('fs');
-    fs.writeFileSync('./userData.json', JSON.stringify(userData, null, 2));
-
-    const embed = new EmbedBuilder()
-      .setTitle('✅ New Item Created!')
-      .setColor(0x00ff99)
-      .addFields(
-        { name: '📛 Name', value: name, inline: true },
-        { name: '💰 Value', value: `$${value}`, inline: true },
-        { name: '📝 Description', value: desc }
-      )
-      .setFooter({ text: `Added by ${interaction.user.tag}` })
-      .setTimestamp();
-
-    return interaction.reply({ embeds: [embed] });
-  }
-});
 
 // Cooldowns
 const SCAVENGE_COOLDOWN = 2 * 60 * 60 * 1000;
@@ -385,16 +322,16 @@ const LABOR_COOLDOWN = 40 * 60 * 1000;
 // Enhanced Trade UI Functions
 function createTradeRequestEmbed(fromUser, toUser) {
   return new EmbedBuilder()
-    .setTitle('🤝 Trade Request')
+    .setTitle('Trade Request')
     .setDescription(`✨ **<@${fromUser}>** wants to start a trading session with **<@${toUser}>**!\n\n🎯 Ready to exchange valuable artefacts and fortune?`)
     .addFields(
       {
-        name: '🎮 What happens next?',
+        name: 'What happens next?',
         value: '• Accept to enter the interactive trading interface\n• Decline to politely refuse this trade',
         inline: false
       },
       {
-        name: '💡 Trading Tips',
+        name: 'Trading Tips',
         value: '• Both parties can add artefacts and money\n• Review everything before confirming\n• Trades are secure and instant',
         inline: false
       }
@@ -442,11 +379,11 @@ function createTradeInterfaceEmbed(trade, fromUser, toUser) {
   }, 0) || 0);
 
   return new EmbedBuilder()
-    .setTitle('🏪 Interactive Trading Interface')
-    .setDescription(`💫 **Live Trade Session Active**\n\n🔄 Use the buttons below to manage your offers!`)
+    .setTitle('Interactive Trading Interface')
+    .setDescription(`**Live Trade Session Active**\n\n Use the buttons below to manage your offers!`)
     .addFields(
       {
-        name: `👤 ${fromUser}'s Offer`,
+        name: `${fromUser}'s Offer`,
         value: `**Artefacts:**\n${fromArtefacts}\n\n💰 **Cash:** $${(fromOffer.cash || 0).toLocaleString()}\n📊 **Total Value:** ~$${totalFromValue.toLocaleString()}`,
         inline: true
       },
@@ -536,6 +473,9 @@ function showLeaderboardPage(message, page) {
 
   return message.channel.send({ embeds: [leaderboardEmbed], components: [row] });
 }
+
+});
+
 client.on('messageCreate', async message => {
   if (message.author.bot) return;
   const userId = message.author.id;
@@ -823,13 +763,13 @@ client.on('messageCreate', async message => {
       const embed = new EmbedBuilder()
           .setTitle(`${message.author.username}'s Inventory`)
           .addFields(
-              { name: '💰 Cash on Hand', value: `$${ud.cash.toLocaleString()}`, inline: true },
-              { name: '🏦 Bank Balance', value: `$${(ud.bankBalance || 0).toLocaleString()}`, inline: true },
-              { name: '💎 Total Wealth', value: `$${totalWealth.toLocaleString()}`, inline: true },
-              { name: '📦 Artefacts', value: artefactList, inline: false },
+              { name: 'Cash on Hand', value: `$${ud.cash.toLocaleString()}`, inline: true },
+              { name: 'Bank Balance', value: `$${(ud.bankBalance || 0).toLocaleString()}`, inline: true },
+              { name: 'Total Wealth', value: `$${totalWealth.toLocaleString()}`, inline: true },
+              { name: 'Artefacts', value: artefactList, inline: false },
           )
           .setColor(0x00AAFF)
-          .setFooter({ text: '💡 Tip: Keep money in your bank to protect it from thieves!' });
+          .setFooter({ text: '💡 Tip: Consider putting money in your bank in case of theft.' });
 
       return message.reply({ embeds: [embed] });
   }
@@ -1142,7 +1082,7 @@ client.on('messageCreate', async message => {
         .setColor(0x4169E1);
 
       const row = new ActionRowBuilder().addComponents(selectMenu);
-      await interaction.reply({ embeds: [selectEmbed], components: [row], flags: [64] });
+      await interaction.reply({ embeds: [selectEmbed], components: [row], flags: 64 });
     }
 
     // Handle Partner Selection Menu - Standardized
