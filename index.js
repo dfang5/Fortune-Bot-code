@@ -63,7 +63,7 @@ const client = new Client({
   ]
 });
 
-client.once('ready', async () => {
+client.once('clientReady', async () => {
   console.log(`Fortune Bot online as ${client.user.tag}`);
   
   // Register all slash commands
@@ -117,7 +117,12 @@ client.once('ready', async () => {
     
     new SlashCommandBuilder()
       .setName('sell')
-      .setDescription('Sell your artefacts for cash'),
+      .setDescription('Sell a specific artefact for cash')
+      .addStringOption(option =>
+        option.setName('artefact')
+          .setDescription('Name of the artefact to sell')
+          .setRequired(true)
+          .setAutocomplete(true)),
     
     new SlashCommandBuilder()
       .setName('trade')
@@ -133,7 +138,49 @@ client.once('ready', async () => {
     
     new SlashCommandBuilder()
       .setName('store')
-      .setDescription('View all the items that admins have added')
+      .setDescription('View all the items that admins have added'),
+    
+    new SlashCommandBuilder()
+      .setName('mass-sell')
+      .setDescription('Sell multiple artefacts at once'),
+    
+    new SlashCommandBuilder()
+      .setName('add-item')
+      .setDescription('Add a custom server item (Admin only)')
+      .addStringOption(option =>
+        option.setName('name')
+          .setDescription('Name of the item')
+          .setRequired(true))
+      .addIntegerOption(option =>
+        option.setName('price')
+          .setDescription('Price of the item')
+          .setRequired(true)
+          .setMinValue(1))
+      .addStringOption(option =>
+        option.setName('description')
+          .setDescription('Description of the item')
+          .setRequired(false)),
+    
+    new SlashCommandBuilder()
+      .setName('remove-item')
+      .setDescription('Remove a custom server item (Admin only)')
+      .addStringOption(option =>
+        option.setName('name')
+          .setDescription('Name of the item to remove')
+          .setRequired(true)),
+    
+    new SlashCommandBuilder()
+      .setName('view-items')
+      .setDescription('View all custom server items (Admin only)'),
+    
+    new SlashCommandBuilder()
+      .setName('marble')
+      .setDescription('Play the marble gambling game')
+      .addIntegerOption(option =>
+        option.setName('bet')
+          .setDescription('Amount to bet (minimum $50)')
+          .setRequired(true)
+          .setMinValue(50))
   ];
   
   const rest = new REST({ version:'10' }).setToken(token);
@@ -149,8 +196,29 @@ client.once('ready', async () => {
   }
 });
 
-// Handle all slash command interactions
+// Handle autocomplete interactions
 client.on('interactionCreate', async interaction => {
+  if (interaction.isAutocomplete()) {
+    const { commandName, focusedOption } = interaction;
+    
+    if (commandName === 'sell' && focusedOption.name === 'artefact') {
+      const userId = interaction.user.id;
+      if (!userData[userId]) userData[userId] = { cash: 0, artefacts: [], bankBalance: 0 };
+      
+      const userArtefacts = userData[userId].artefacts || [];
+      const focusedValue = focusedOption.value.toLowerCase();
+      
+      const filtered = userArtefacts
+        .filter(artefact => artefact.toLowerCase().includes(focusedValue))
+        .slice(0, 25);
+      
+      await interaction.respond(
+        filtered.map(artefact => ({ name: artefact, value: artefact }))
+      );
+      return;
+    }
+  }
+  
   if (!interaction.isChatInputCommand()) return;
 
   const userId = interaction.user.id;
@@ -191,19 +259,37 @@ client.on('interactionCreate', async interaction => {
       case 'store':
         await handleStoreCommand(interaction);
         break;
+      case 'mass-sell':
+        await handleMassSellCommand(interaction, userId);
+        break;
+      case 'add-item':
+        await handleAddItemCommand(interaction);
+        break;
+      case 'remove-item':
+        await handleRemoveItemCommand(interaction);
+        break;
+      case 'view-items':
+        await handleViewItemsCommand(interaction);
+        break;
+      case 'marble':
+        await handleMarbleCommand(interaction, userId);
+        break;
     }
   } catch (error) {
     console.error('Error handling slash command:', error);
-    const errorEmbed = new EmbedBuilder()
-      .setTitle('Command Error')
-      .setDescription('An error occurred while processing your command. Please try again.')
-      .setColor(0xFF6B6B)
-      .setTimestamp();
     
-    if (interaction.replied) {
-      await interaction.followUp({ embeds: [errorEmbed], ephemeral: true });
-    } else {
-      await interaction.reply({ embeds: [errorEmbed], ephemeral: true });
+    try {
+      const errorEmbed = new EmbedBuilder()
+        .setTitle('Command Error')
+        .setDescription('An error occurred while processing your command. Please try again.')
+        .setColor(0xFF6B6B)
+        .setTimestamp();
+      
+      if (!interaction.replied && !interaction.deferred) {
+        await interaction.reply({ embeds: [errorEmbed], flags: 64 });
+      }
+    } catch (replyError) {
+      console.error('Failed to send error message:', replyError);
     }
   }
 });
@@ -601,41 +687,47 @@ async function handleInventoryCommand(interaction, userId) {
 }
 
 async function handleSellCommand(interaction, userId) {
-  if (!userData[userId].artefacts.length) {
+  const user = userData[userId];
+  const artefactName = interaction.options.getString('artefact');
+  
+  if (!user.artefacts.length) {
     const noArtefactsEmbed = new EmbedBuilder()
       .setTitle('No Artefacts to Sell')
-      .setDescription('You do not have any artefacts in your collection.')
-      .addFields(
-        { name: 'Suggestion', value: 'Use /scavenge to find artefacts', inline: false }
-      )
-      .setColor(0xFF9F43)
+      .setDescription('You need to find some artefacts first before you can sell them.')
+      .addFields({ name: 'How to Find Artefacts', value: 'Use `/scavenge` to search for rare artefacts', inline: false })
+      .setColor(0xFF6B6B)
       .setTimestamp();
       
     return await interaction.reply({ embeds: [noArtefactsEmbed] });
   }
-
-  let totalEarnings = 0;
-  const soldItems = [];
   
-  userData[userId].artefacts.forEach(artefact => {
-    const rarity = getRarityByArtefact(artefact);
-    if (rarity) {
-      totalEarnings += rarity.sell;
-      soldItems.push(`${artefact} - $${rarity.sell.toLocaleString()}`);
-    }
-  });
+  const artefactIndex = user.artefacts.findIndex(item => item === artefactName);
+  if (artefactIndex === -1) {
+    const notFoundEmbed = new EmbedBuilder()
+      .setTitle('Artefact Not Found')
+      .setDescription(`You don't have an artefact named "${artefactName}".`)
+      .addFields({ name: 'Check Your Inventory', value: 'Use `/inventory` to see what artefacts you own', inline: false })
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+      
+    return await interaction.reply({ embeds: [notFoundEmbed] });
+  }
   
-  userData[userId].cash += totalEarnings;
-  userData[userId].artefacts = [];
+  const rarity = getRarityByArtefact(artefactName);
+  const sellValue = rarity ? rarity.sell : 100;
+  
+  userData[userId].cash += sellValue;
+  userData[userId].artefacts.splice(artefactIndex, 1);
   saveUserData();
   
   const sellEmbed = new EmbedBuilder()
-    .setTitle('Artefacts Sold')
-    .setDescription('Successfully sold your entire artefact collection.')
+    .setTitle('Artefact Sold')
+    .setDescription(`You successfully sold your ${artefactName}.`)
     .addFields(
-      { name: 'Items Sold', value: soldItems.join('\n'), inline: false },
-      { name: 'Total Earnings', value: `$${totalEarnings.toLocaleString()}`, inline: true },
-      { name: 'New Cash Total', value: `$${userData[userId].cash.toLocaleString()}`, inline: true }
+      { name: 'Artefact', value: artefactName, inline: true },
+      { name: 'Rarity', value: rarity ? rarity.name : 'Unknown', inline: true },
+      { name: 'Sale Price', value: `$${sellValue.toLocaleString()}`, inline: true },
+      { name: 'New Cash Balance', value: `$${userData[userId].cash.toLocaleString()}`, inline: false }
     )
     .setColor(0x51CF66)
     .setTimestamp();
@@ -707,6 +799,169 @@ async function handleStoreCommand(interaction) {
     .setTimestamp();
     
   await interaction.reply({ embeds: [storeEmbed] });
+}
+
+// New command handlers
+async function handleMassSellCommand(interaction, userId) {
+  const user = userData[userId];
+  
+  if (!user.artefacts.length) {
+    const noArtefactsEmbed = new EmbedBuilder()
+      .setTitle('No Artefacts to Sell')
+      .setDescription('You need to find some artefacts first before you can sell them.')
+      .addFields({ name: 'How to Find Artefacts', value: 'Use `/scavenge` to search for rare artefacts', inline: false })
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+      
+    return await interaction.reply({ embeds: [noArtefactsEmbed] });
+  }
+  
+  let totalEarnings = 0;
+  const soldItems = [];
+  
+  userData[userId].artefacts.forEach(artefact => {
+    const rarity = getRarityByArtefact(artefact);
+    const sellValue = rarity ? rarity.sell : 100;
+    totalEarnings += sellValue;
+    soldItems.push(`${artefact} - $${sellValue.toLocaleString()}`);
+  });
+  
+  userData[userId].cash += totalEarnings;
+  userData[userId].artefacts = [];
+  saveUserData();
+  
+  const massellEmbed = new EmbedBuilder()
+    .setTitle('Mass Sale Complete')
+    .setDescription('Successfully sold your entire artefact collection.')
+    .addFields(
+      { name: 'Items Sold', value: soldItems.join('\n'), inline: false },
+      { name: 'Total Earnings', value: `$${totalEarnings.toLocaleString()}`, inline: true },
+      { name: 'New Cash Total', value: `$${userData[userId].cash.toLocaleString()}`, inline: true }
+    )
+    .setColor(0x51CF66)
+    .setTimestamp();
+    
+  await interaction.reply({ embeds: [massellEmbed] });
+}
+
+async function handleAddItemCommand(interaction) {
+  // Check if user is admin
+  if (interaction.user.id !== DEVELOPER_ID && !interaction.member.permissions.has('Administrator')) {
+    const noPermEmbed = new EmbedBuilder()
+      .setTitle('Access Denied')
+      .setDescription('Only administrators can add custom server items.')
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+      
+    return await interaction.reply({ embeds: [noPermEmbed] });
+  }
+  
+  const itemName = interaction.options.getString('name');
+  const itemPrice = interaction.options.getInteger('price');
+  const itemDescription = interaction.options.getString('description') || 'Custom server item';
+  const guildId = interaction.guild.id;
+  
+  if (!userData.guildItems) userData.guildItems = {};
+  if (!userData.guildItems[guildId]) userData.guildItems[guildId] = {};
+  
+  userData.guildItems[guildId][itemName] = {
+    price: itemPrice,
+    description: itemDescription,
+    addedBy: interaction.user.id,
+    addedAt: Date.now()
+  };
+  
+  saveUserData();
+  
+  const addEmbed = new EmbedBuilder()
+    .setTitle('Item Added Successfully')
+    .setDescription(`Added "${itemName}" to the server store.`)
+    .addFields(
+      { name: 'Item Name', value: itemName, inline: true },
+      { name: 'Price', value: `$${itemPrice.toLocaleString()}`, inline: true },
+      { name: 'Description', value: itemDescription, inline: false }
+    )
+    .setColor(0x51CF66)
+    .setTimestamp();
+    
+  await interaction.reply({ embeds: [addEmbed] });
+}
+
+async function handleRemoveItemCommand(interaction) {
+  // Check if user is admin
+  if (interaction.user.id !== DEVELOPER_ID && !interaction.member.permissions.has('Administrator')) {
+    const noPermEmbed = new EmbedBuilder()
+      .setTitle('Access Denied')
+      .setDescription('Only administrators can remove custom server items.')
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+      
+    return await interaction.reply({ embeds: [noPermEmbed] });
+  }
+  
+  const itemName = interaction.options.getString('name');
+  const guildId = interaction.guild.id;
+  
+  if (!userData.guildItems || !userData.guildItems[guildId] || !userData.guildItems[guildId][itemName]) {
+    const notFoundEmbed = new EmbedBuilder()
+      .setTitle('Item Not Found')
+      .setDescription(`No custom item named "${itemName}" exists in this server.`)
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+      
+    return await interaction.reply({ embeds: [notFoundEmbed] });
+  }
+  
+  delete userData.guildItems[guildId][itemName];
+  saveUserData();
+  
+  const removeEmbed = new EmbedBuilder()
+    .setTitle('Item Removed')
+    .setDescription(`Successfully removed "${itemName}" from the server store.`)
+    .setColor(0x51CF66)
+    .setTimestamp();
+    
+  await interaction.reply({ embeds: [removeEmbed] });
+}
+
+async function handleViewItemsCommand(interaction) {
+  // Check if user is admin
+  if (interaction.user.id !== DEVELOPER_ID && !interaction.member.permissions.has('Administrator')) {
+    const noPermEmbed = new EmbedBuilder()
+      .setTitle('Access Denied')
+      .setDescription('Only administrators can view the custom items management panel.')
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+      
+    return await interaction.reply({ embeds: [noPermEmbed] });
+  }
+  
+  const guildId = interaction.guild.id;
+  const guildItems = userData.guildItems?.[guildId] || {};
+  
+  if (Object.keys(guildItems).length === 0) {
+    const noItemsEmbed = new EmbedBuilder()
+      .setTitle('No Custom Items')
+      .setDescription('This server has no custom items yet.')
+      .addFields({ name: 'Add Items', value: 'Use `/add-item` to create custom server items', inline: false })
+      .setColor(0xFF9F43)
+      .setTimestamp();
+      
+    return await interaction.reply({ embeds: [noItemsEmbed] });
+  }
+  
+  const itemList = Object.entries(guildItems).map(([name, data]) => 
+    `**${name}** - $${data.price.toLocaleString()}\n${data.description}`
+  ).join('\n\n');
+  
+  const viewEmbed = new EmbedBuilder()
+    .setTitle('Custom Server Items')
+    .setDescription(`This server has ${Object.keys(guildItems).length} custom item(s).`)
+    .addFields({ name: 'Items', value: itemList, inline: false })
+    .setColor(0x339AF0)
+    .setTimestamp();
+    
+  await interaction.reply({ embeds: [viewEmbed] });
 }
 
 client.login(token);
