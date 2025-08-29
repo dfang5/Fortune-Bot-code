@@ -40,6 +40,8 @@ let cooldowns = fs.existsSync(COOLDOWN_FILE) ? JSON.parse(fs.readFileSync(COOLDO
 
 if (!userData.guildItems) userData.guildItems = {}; // 🧠 Server-specific custom items
 global.tempItems = {}; // 💾 Store items awaiting confirmation
+global.activeTrades = {}; // Store active trade sessions
+global.activeMarbleGames = {}; // Store active marble game sessions
 
 // Save functions
 function saveUserData() { fs.writeFileSync(DATA_FILE, JSON.stringify(userData, null, 2)); }
@@ -65,13 +67,13 @@ const client = new Client({
 
 client.once('clientReady', async () => {
   console.log(`Fortune Bot online as ${client.user.tag}`);
-  
+
   // Register all slash commands
   const commands = [
     new SlashCommandBuilder()
       .setName('info')
       .setDescription('Shows information about the bot'),
-    
+
     new SlashCommandBuilder()
       .setName('bank')
       .setDescription('Deposit money into your secure bank account')
@@ -80,7 +82,7 @@ client.once('clientReady', async () => {
           .setDescription('Amount to deposit')
           .setRequired(true)
           .setMinValue(1)),
-    
+
     new SlashCommandBuilder()
       .setName('withdraw')
       .setDescription('Withdraw money from your bank account')
@@ -89,7 +91,7 @@ client.once('clientReady', async () => {
           .setDescription('Amount to withdraw')
           .setRequired(true)
           .setMinValue(1)),
-    
+
     new SlashCommandBuilder()
       .setName('steal')
       .setDescription('Attempt to steal cash from another player')
@@ -102,19 +104,19 @@ client.once('clientReady', async () => {
           .setDescription('Amount to steal')
           .setRequired(true)
           .setMinValue(1)),
-    
+
     new SlashCommandBuilder()
       .setName('scavenge')
       .setDescription('Search for rare artefacts (2 hour cooldown)'),
-    
+
     new SlashCommandBuilder()
       .setName('labor')
       .setDescription('Work to earn money (40 minute cooldown)'),
-    
+
     new SlashCommandBuilder()
       .setName('inventory')
       .setDescription('View your cash, bank balance and artefacts'),
-    
+
     new SlashCommandBuilder()
       .setName('sell')
       .setDescription('Sell a specific artefact for cash')
@@ -123,7 +125,7 @@ client.once('clientReady', async () => {
           .setDescription('Name of the artefact to sell')
           .setRequired(true)
           .setAutocomplete(true)),
-    
+
     new SlashCommandBuilder()
       .setName('trade')
       .setDescription('Start a trade with another user')
@@ -131,19 +133,19 @@ client.once('clientReady', async () => {
         option.setName('user')
           .setDescription('User to trade with')
           .setRequired(true)),
-    
+
     new SlashCommandBuilder()
       .setName('leaderboard')
       .setDescription('View the leaderboard and your current rating'),
-    
+
     new SlashCommandBuilder()
       .setName('store')
       .setDescription('View all the items that admins have added'),
-    
+
     new SlashCommandBuilder()
       .setName('mass-sell')
       .setDescription('Sell multiple artefacts at once'),
-    
+
     new SlashCommandBuilder()
       .setName('add-item')
       .setDescription('Add a custom server item (Admin only)')
@@ -160,7 +162,7 @@ client.once('clientReady', async () => {
         option.setName('description')
           .setDescription('Description of the item')
           .setRequired(false)),
-    
+
     new SlashCommandBuilder()
       .setName('remove-item')
       .setDescription('Remove a custom server item (Admin only)')
@@ -168,23 +170,40 @@ client.once('clientReady', async () => {
         option.setName('name')
           .setDescription('Name of the item to remove')
           .setRequired(true)),
-    
+
     new SlashCommandBuilder()
       .setName('view-items')
       .setDescription('View all custom server items (Admin only)'),
-    
+
     new SlashCommandBuilder()
-      .setName('marble')
-      .setDescription('Play the marble gambling game')
-      .addIntegerOption(option =>
-        option.setName('bet')
-          .setDescription('Amount to bet (minimum $50)')
+      .setName('marble-game')
+      .setDescription('Start a 4-player marble gambling game with cash betting')
+      .addUserOption(option => 
+        option.setName('player2')
+          .setDescription('Second player to invite')
           .setRequired(true)
-          .setMinValue(50))
+      )
+      .addUserOption(option => 
+        option.setName('player3')
+          .setDescription('Third player to invite')
+          .setRequired(true)
+      )
+      .addUserOption(option => 
+        option.setName('player4')
+          .setDescription('Fourth player to invite')
+          .setRequired(true)
+      )
+      .addIntegerOption(option =>
+        option.setName('bet-amount')
+          .setDescription('Amount each player must bet (minimum $100)')
+          .setRequired(true)
+          .setMinValue(100)
+      ),
+
   ];
-  
+
   const rest = new REST({ version:'10' }).setToken(token);
-  
+
   try {
     console.log('Started refreshing application (/) commands.');
     await rest.put(Routes.applicationCommands(clientId), { 
@@ -200,28 +219,38 @@ client.once('clientReady', async () => {
 client.on('interactionCreate', async interaction => {
   if (interaction.isAutocomplete()) {
     const { commandName, focusedOption } = interaction;
-    
+
     if (commandName === 'sell' && focusedOption.name === 'artefact') {
       const userId = interaction.user.id;
       if (!userData[userId]) userData[userId] = { cash: 0, artefacts: [], bankBalance: 0 };
-      
+
       const userArtefacts = userData[userId].artefacts || [];
       const focusedValue = focusedOption.value.toLowerCase();
-      
+
       const filtered = userArtefacts
         .filter(artefact => artefact.toLowerCase().includes(focusedValue))
         .slice(0, 25);
-      
+
       await interaction.respond(
         filtered.map(artefact => ({ name: artefact, value: artefact }))
       );
       return;
     }
   }
-  
+
   // Handle component interactions (buttons, select menus)
   if (interaction.isStringSelectMenu() || interaction.isButton()) {
     return await handleComponentInteraction(interaction);
+  }
+
+  if (interaction.isModalSubmit()) {
+    const { customId } = interaction;
+    
+    if (customId.startsWith('number_modal_')) {
+      const gameId = customId.replace('number_modal_', '');
+      await processNumberGuess(interaction, gameId);
+      return;
+    }
   }
 
   if (!interaction.isChatInputCommand()) return;
@@ -276,20 +305,21 @@ client.on('interactionCreate', async interaction => {
       case 'view-items':
         await handleViewItemsCommand(interaction);
         break;
-      case 'marble':
-        await handleMarbleCommand(interaction, userId);
+
+      case 'marble-game':
+        await handleMarbleGame(interaction);
         break;
     }
   } catch (error) {
     console.error('Error handling slash command:', error);
-    
+
     try {
       const errorEmbed = new EmbedBuilder()
         .setTitle('Command Error')
         .setDescription('An error occurred while processing your command. Please try again.')
         .setColor(0xFF6B6B)
         .setTimestamp();
-      
+
       if (!interaction.replied && !interaction.deferred) {
         await interaction.reply({ embeds: [errorEmbed], flags: 64 });
       }
@@ -302,57 +332,58 @@ client.on('interactionCreate', async interaction => {
 // Command handlers
 async function handleInfoCommand(interaction) {
   const infoEmbed = new EmbedBuilder()
-    .setTitle('Fortune Bot - Build Your Empire')
-    .setDescription('Welcome to Fortune Bot, where you build your fortune in virtual currency, collect rare artefacts, trade with others, and shape your destiny')
-    .setColor(0xFFD700)
+    .setTitle('⚡ Fortune Bot - Build Your Empire')
+    .setDescription('**Welcome to Fortune Bot!** Build your fortune through virtual currency, collect rare artefacts, trade with players, and climb the leaderboards!')
+    .setColor(0x2F3136)
+    .setThumbnail('https://cdn.discordapp.com/emojis/1234567890123456789.png')
     .addFields(
       {
-        name: 'Core Commands',
+        name: '⚒️ Core Commands',
         value: [
-          '/scavenge - Search for rare artefacts (2h cooldown)',
-          '/labor - Work to earn money (40min cooldown)',
-          '/inventory - View your cash, bank balance and artefacts',
-          '/sell [artefact] - Sell a specific artefact for cash',
-          '/mass-sell - Sell all artefacts at once',
-          '/trade [user] - Interactive trading with other players',
-          '/marble [bet] - Gambling game with 4x payout'
+          '`/scavenge` - Search for rare artefacts (2h cooldown)',
+          '`/labor` - Work to earn money (40min cooldown)',
+          '`/inventory` - View your cash, bank balance and artefacts',
+          '`/sell [artefact]` - Sell a specific artefact for cash',
+          '`/mass-sell` - Sell all artefacts at once',
+          '`/trade [user]` - Interactive trading with other players',
+          '`/store` - View items available for purchase'
         ].join('\n'),
         inline: false
       },
       {
-        name: 'Banking System',
+        name: '🏦 Banking System',
         value: [
-          '/bank [amount] - Deposit money (max $50,000 total)',
-          '/withdraw [amount] - Withdraw money from bank',
-          '/steal [user] [amount] - Steal cash from other players',
-          'Note: Only cash on hand can be stolen, bank money is protected'
+          '`/bank [amount]` - Deposit money (max $50,000 total)',
+          '`/withdraw [amount]` - Withdraw money from bank',
+          '`/steal [user] [amount]` - Steal cash from other players',
+          '**Note:** Only cash on hand can be stolen, bank money is protected'
         ].join('\n'),
         inline: false
       },
       {
-        name: 'Social & Admin Features',
+        name: '👥 Social & Admin Features',
         value: [
-          '/leaderboard - View wealth rankings',
-          '/store - View custom server items',
-          '/add-item [name] [price] - Add custom server item (Admin)',
-          '/remove-item [name] - Remove server item (Admin)',
-          '/view-items - Manage server items (Admin)'
+          '`/leaderboard` - View wealth rankings',
+          '`/store` - View custom server items',
+          '`/add-item [name] [price]` - Add custom server item (Admin)',
+          '`/remove-item [name]` - Remove server item (Admin)',
+          '`/view-items` - Manage server items (Admin)'
         ].join('\n'),
         inline: false
       },
       {
-        name: 'Rarity Levels',
+        name: '💎 Rarity Levels',
         value: [
-          'Common (65%) - $100-150',
-          'Uncommon (20%) - $550-700', 
-          'Rare (10%) - $1,500-2,500',
-          'Legendary (4%) - $5,000',
-          'Unknown (1%) - $15,000'
+          '**Common** (65%) - $100-150',
+          '**Uncommon** (20%) - $550-700', 
+          '**Rare** (10%) - $1,500-2,500',
+          '**Legendary** (4%) - $5,000',
+          '**Unknown** (1%) - $15,000'
         ].join('\n'),
         inline: false
       }
     )
-    .setFooter({ text: 'Tip: Start with /scavenge to find your first artefact' })
+    .setFooter({ text: '💡 Tip: Start with /scavenge to find your first artefact!' })
     .setTimestamp();
 
   await interaction.reply({ embeds: [infoEmbed] });
@@ -378,7 +409,7 @@ async function handleBankCommand(interaction, userId) {
       )
       .setColor(0xFF9F43)
       .setTimestamp();
-    
+
     return await interaction.reply({ embeds: [capacityEmbed] });
   }
 
@@ -394,7 +425,7 @@ async function handleBankCommand(interaction, userId) {
       )
       .setColor(0xFF6B6B)
       .setTimestamp();
-    
+
     return await interaction.reply({ embeds: [insufficientEmbed] });
   }
 
@@ -404,18 +435,18 @@ async function handleBankCommand(interaction, userId) {
   saveUserData();
 
   const successEmbed = new EmbedBuilder()
-    .setTitle('Bank Deposit Completed')
-    .setDescription(`Successfully deposited $${amount.toLocaleString()} into your secure bank account.`)
+    .setTitle('🏦 Bank Deposit Completed')
+    .setDescription(`**Successfully deposited $${amount.toLocaleString()}** into your secure bank account.`)
     .addFields(
-      { name: 'Transaction Amount', value: `$${amount.toLocaleString()}`, inline: true },
-      { name: 'Remaining Cash', value: `$${userData[userId].cash.toLocaleString()}`, inline: true },
-      { name: 'New Bank Balance', value: `$${userData[userId].bankBalance.toLocaleString()}`, inline: true },
-      { name: 'Bank Capacity Used', value: `${((userData[userId].bankBalance / 50000) * 100).toFixed(1)}%`, inline: true },
-      { name: 'Available Space', value: `$${(50000 - userData[userId].bankBalance).toLocaleString()}`, inline: true },
-      { name: 'Security Status', value: 'Funds Protected', inline: true }
+      { name: '💵 Transaction Amount', value: `**$${amount.toLocaleString()}**`, inline: true },
+      { name: '💰 Remaining Cash', value: `$${userData[userId].cash.toLocaleString()}`, inline: true },
+      { name: '🏦 New Bank Balance', value: `**$${userData[userId].bankBalance.toLocaleString()}**`, inline: true },
+      { name: '📈 Bank Capacity Used', value: `${((userData[userId].bankBalance / 50000) * 100).toFixed(1)}%`, inline: true },
+      { name: '💾 Available Space', value: `$${(50000 - userData[userId].bankBalance).toLocaleString()}`, inline: true },
+      { name: '🔒 Security Status', value: '**Funds Protected**', inline: true }
     )
-    .setColor(0x51CF66)
-    .setFooter({ text: 'Your banked money is safe from theft attempts' })
+    .setColor(0x00FF7F)
+    .setFooter({ text: '🔒 Your banked money is safe from theft attempts' })
     .setTimestamp();
 
   await interaction.reply({ embeds: [successEmbed] });
@@ -437,7 +468,7 @@ async function handleWithdrawCommand(interaction, userId) {
       )
       .setColor(0xFF6B6B)
       .setTimestamp();
-    
+
     return await interaction.reply({ embeds: [insufficientEmbed] });
   }
 
@@ -474,7 +505,7 @@ async function handleStealCommand(interaction, userId) {
       .setDescription('You cannot steal from yourself.')
       .setColor(0xFF6B6B)
       .setTimestamp();
-    
+
     return await interaction.reply({ embeds: [selfEmbed] });
   }
 
@@ -494,7 +525,7 @@ async function handleStealCommand(interaction, userId) {
       )
       .setColor(0xFF9F43)
       .setTimestamp();
-    
+
     return await interaction.reply({ embeds: [unavailableEmbed] });
   }
 
@@ -569,12 +600,12 @@ async function handleStealCommand(interaction, userId) {
 async function handleScavengeCommand(interaction, userId) {
   const now = Date.now();
   const SCAVENGE_COOLDOWN = 2 * 60 * 60 * 1000; // 2 hours
-  
+
   if (cooldowns.scavenge[userId] && (now - cooldowns.scavenge[userId]) < SCAVENGE_COOLDOWN) {
     const timeLeft = SCAVENGE_COOLDOWN - (now - cooldowns.scavenge[userId]);
     const hours = Math.floor(timeLeft / (60 * 60 * 1000));
     const minutes = Math.floor((timeLeft % (60 * 60 * 1000)) / (60 * 1000));
-    
+
     const cooldownEmbed = new EmbedBuilder()
       .setTitle('Scavenge Cooldown Active')
       .setDescription('You must wait before scavenging again.')
@@ -584,7 +615,7 @@ async function handleScavengeCommand(interaction, userId) {
       )
       .setColor(0xFF9F43)
       .setTimestamp();
-      
+
     return await interaction.reply({ embeds: [cooldownEmbed] });
   }
 
@@ -592,7 +623,7 @@ async function handleScavengeCommand(interaction, userId) {
   const random = Math.random() * 100;
   let selectedRarity = null;
   let cumulative = 0;
-  
+
   for (const rarity of rarities) {
     cumulative += rarity.chance;
     if (random <= cumulative) {
@@ -600,37 +631,37 @@ async function handleScavengeCommand(interaction, userId) {
       break;
     }
   }
-  
+
   const artefact = selectedRarity.items[Math.floor(Math.random() * selectedRarity.items.length)];
   userData[userId].artefacts.push(artefact);
   cooldowns.scavenge[userId] = now;
-  
+
   saveUserData();
   saveCooldowns();
-  
+
   const scavengeEmbed = new EmbedBuilder()
-    .setTitle('Scavenge Complete')
-    .setDescription(`You discovered a valuable artefact during your search.`)
+    .setTitle('🏕️ Scavenge Complete')
+    .setDescription(`**You discovered a valuable artefact during your search!**`)
     .addFields(
-      { name: 'Artefact Found', value: artefact, inline: true },
-      { name: 'Rarity', value: selectedRarity.name, inline: true },
-      { name: 'Estimated Value', value: `$${selectedRarity.value.toLocaleString()}`, inline: true },
-      { name: 'Next Scavenge', value: 'Available in 2 hours', inline: false }
+      { name: '💎 Artefact Found', value: `**${artefact}**`, inline: true },
+      { name: '✨ Rarity', value: `**${selectedRarity.name}**`, inline: true },
+      { name: '💰 Estimated Value', value: `**$${selectedRarity.value.toLocaleString()}**`, inline: true },
+      { name: '⏰ Next Scavenge', value: 'Available in **2 hours**', inline: false }
     )
     .setColor(selectedRarity.color)
     .setTimestamp();
-    
+
   await interaction.reply({ embeds: [scavengeEmbed] });
 }
 
 async function handleLaborCommand(interaction, userId) {
   const now = Date.now();
   const LABOR_COOLDOWN = 40 * 60 * 1000; // 40 minutes
-  
+
   if (cooldowns.labor[userId] && (now - cooldowns.labor[userId]) < LABOR_COOLDOWN) {
     const timeLeft = LABOR_COOLDOWN - (now - cooldowns.labor[userId]);
     const minutes = Math.floor(timeLeft / (60 * 1000));
-    
+
     const cooldownEmbed = new EmbedBuilder()
       .setTitle('Labor Cooldown Active')
       .setDescription('You must rest before working again.')
@@ -640,17 +671,17 @@ async function handleLaborCommand(interaction, userId) {
       )
       .setColor(0xFF9F43)
       .setTimestamp();
-      
+
     return await interaction.reply({ embeds: [cooldownEmbed] });
   }
 
   const earnings = Math.floor(Math.random() * 500) + 100; // $100-600
   userData[userId].cash += earnings;
   cooldowns.labor[userId] = now;
-  
+
   saveUserData();
   saveCooldowns();
-  
+
   const laborEmbed = new EmbedBuilder()
     .setTitle('Work Complete')
     .setDescription('You completed a day of honest work.')
@@ -661,7 +692,7 @@ async function handleLaborCommand(interaction, userId) {
     )
     .setColor(0x51CF66)
     .setTimestamp();
-    
+
   await interaction.reply({ embeds: [laborEmbed] });
 }
 
@@ -671,7 +702,7 @@ async function handleInventoryCommand(interaction, userId) {
     const rarity = getRarityByArtefact(artefact);
     return sum + (rarity ? rarity.value : 0);
   }, 0);
-  
+
   const artefactList = user.artefacts.length ? 
     user.artefacts.map(artefact => {
       const rarity = getRarityByArtefact(artefact);
@@ -692,14 +723,14 @@ async function handleInventoryCommand(interaction, userId) {
     )
     .setColor(0x339AF0)
     .setTimestamp();
-    
+
   await interaction.reply({ embeds: [inventoryEmbed] });
 }
 
 async function handleSellCommand(interaction, userId) {
   const user = userData[userId];
   const artefactName = interaction.options.getString('artefact');
-  
+
   if (!user.artefacts.length) {
     const noArtefactsEmbed = new EmbedBuilder()
       .setTitle('No Artefacts to Sell')
@@ -707,10 +738,10 @@ async function handleSellCommand(interaction, userId) {
       .addFields({ name: 'How to Find Artefacts', value: 'Use `/scavenge` to search for rare artefacts', inline: false })
       .setColor(0xFF6B6B)
       .setTimestamp();
-      
+
     return await interaction.reply({ embeds: [noArtefactsEmbed] });
   }
-  
+
   const artefactIndex = user.artefacts.findIndex(item => item === artefactName);
   if (artefactIndex === -1) {
     const notFoundEmbed = new EmbedBuilder()
@@ -719,17 +750,17 @@ async function handleSellCommand(interaction, userId) {
       .addFields({ name: 'Check Your Inventory', value: 'Use `/inventory` to see what artefacts you own', inline: false })
       .setColor(0xFF6B6B)
       .setTimestamp();
-      
+
     return await interaction.reply({ embeds: [notFoundEmbed] });
   }
-  
+
   const rarity = getRarityByArtefact(artefactName);
   const sellValue = rarity ? rarity.sell : 100;
-  
+
   userData[userId].cash += sellValue;
   userData[userId].artefacts.splice(artefactIndex, 1);
   saveUserData();
-  
+
   const sellEmbed = new EmbedBuilder()
     .setTitle('Artefact Sold')
     .setDescription(`You successfully sold your ${artefactName}.`)
@@ -741,98 +772,90 @@ async function handleSellCommand(interaction, userId) {
     )
     .setColor(0x51CF66)
     .setTimestamp();
-    
+
   await interaction.reply({ embeds: [sellEmbed] });
 }
 
 async function handleTradeCommand(interaction, userId) {
   const targetUser = interaction.options.getUser('user');
-  
+
   if (targetUser.id === userId) {
     const selfEmbed = new EmbedBuilder()
       .setTitle('Invalid Trade Target')
       .setDescription('You cannot trade with yourself.')
       .setColor(0xFF6B6B)
       .setTimestamp();
-      
+
     return await interaction.reply({ embeds: [selfEmbed] });
   }
-  
+
   if (targetUser.bot) {
     const botEmbed = new EmbedBuilder()
       .setTitle('Invalid Trade Target')
       .setDescription('You cannot trade with bots.')
       .setColor(0xFF6B6B)
       .setTimestamp();
-      
+
     return await interaction.reply({ embeds: [botEmbed] });
   }
-  
+
+  // Check if user is already in a trade
+  const existingTrade = Object.values(global.activeTrades).find(trade => 
+    trade.initiator === userId || trade.recipient === targetUser.id ||
+    trade.initiator === targetUser.id || trade.recipient === userId
+  );
+
+  if (existingTrade) {
+    const busyEmbed = new EmbedBuilder()
+      .setTitle('Trade Already Active')
+      .setDescription('You or the target user is already in an active trade.')
+      .setColor(0xFF9F43)
+      .setTimestamp();
+
+    return await interaction.reply({ embeds: [busyEmbed] });
+  }
+
   // Initialize target user data if needed
   if (!userData[targetUser.id]) userData[targetUser.id] = { cash: 0, artefacts: [], bankBalance: 0 };
-  
-  const userArtefacts = userData[userId].artefacts || [];
-  const userCash = userData[userId].cash || 0;
-  
-  if (userArtefacts.length === 0 && userCash === 0) {
-    const nothingEmbed = new EmbedBuilder()
-      .setTitle('Nothing to Trade')
-      .setDescription('You need cash or artefacts to start a trade.')
-      .setColor(0xFF6B6B)
-      .setTimestamp();
-      
-    return await interaction.reply({ embeds: [nothingEmbed] });
-  }
-  
-  // Create trade selection menu
-  const tradeOptions = [];
-  
-  if (userCash > 0) {
-    tradeOptions.push({
-      label: `Cash: $${userCash.toLocaleString()}`,
-      description: 'Trade some of your cash',
-      value: 'cash'
-    });
-  }
-  
-  userArtefacts.forEach((artefact, index) => {
-    const rarity = getRarityByArtefact(artefact);
-    tradeOptions.push({
-      label: artefact,
-      description: `${rarity ? rarity.name : 'Unknown'} - $${rarity ? rarity.value.toLocaleString() : '100'}`,
-      value: `artefact_${index}`
-    });
-  });
-  
-  if (tradeOptions.length === 0) {
-    const emptyEmbed = new EmbedBuilder()
-      .setTitle('Nothing to Trade')
-      .setDescription('You have no cash or artefacts to trade.')
-      .setColor(0xFF6B6B)
-      .setTimestamp();
-      
-    return await interaction.reply({ embeds: [emptyEmbed] });
-  }
-  
-  const selectMenu = new StringSelectMenuBuilder()
-    .setCustomId(`trade_select_${targetUser.id}`)
-    .setPlaceholder('Select what you want to trade')
-    .addOptions(tradeOptions.slice(0, 25)); // Discord limit
-  
-  const row = new ActionRowBuilder().addComponents(selectMenu);
-  
-  const tradeEmbed = new EmbedBuilder()
-    .setTitle('Initialize Trade')
-    .setDescription(`Starting trade with ${targetUser.displayName}`)
+
+  // Create trade request for recipient to accept/decline
+  const acceptButton = new ButtonBuilder()
+    .setCustomId(`trade_accept_${userId}`)
+    .setLabel('Accept Trade')
+    .setStyle(ButtonStyle.Success);
+
+  const declineButton = new ButtonBuilder()
+    .setCustomId(`trade_decline_${userId}`)
+    .setLabel('Decline Trade')
+    .setStyle(ButtonStyle.Danger);
+
+  const row = new ActionRowBuilder().addComponents(acceptButton, declineButton);
+
+  const tradeRequestEmbed = new EmbedBuilder()
+    .setTitle('🤝 Trade Request')
+    .setDescription(`**${interaction.user.displayName}** wants to trade with you!`)
     .addFields(
-      { name: 'Your Cash', value: `$${userCash.toLocaleString()}`, inline: true },
-      { name: 'Your Artefacts', value: userArtefacts.length.toString(), inline: true },
-      { name: 'Instructions', value: 'Select what you want to offer in this trade', inline: false }
+      { name: '👤 Initiator', value: `<@${userId}>`, inline: true },
+      { name: '🎯 Recipient', value: `<@${targetUser.id}>`, inline: true },
+      { name: '📊 Status', value: '⏳ Waiting for response...', inline: false },
+      { name: '⚡ Action Required', value: 'Choose **Accept** or **Decline** below', inline: false }
     )
-    .setColor(0x339AF0)
+    .setColor(0x5865F2)
+    .setFooter({ text: '⏰ This request will expire after 2 minutes' })
     .setTimestamp();
-    
-  await interaction.reply({ embeds: [tradeEmbed], components: [row] });
+
+  await interaction.reply({ 
+    content: `<@${targetUser.id}>`, 
+    embeds: [tradeRequestEmbed], 
+    components: [row] 
+  });
+
+  // Set timeout for trade request
+  setTimeout(() => {
+    if (global.activeTrades[`${userId}_${targetUser.id}`]) {
+      delete global.activeTrades[`${userId}_${targetUser.id}`];
+    }
+  }, 120000); // 2 minutes
 }
 
 async function handleLeaderboardCommand(interaction) {
@@ -847,39 +870,65 @@ async function handleLeaderboardCommand(interaction) {
       .setDescription('No players have earned money yet.')
       .setColor(0x339AF0)
       .setTimestamp();
-      
+
     return await interaction.reply({ embeds: [emptyEmbed] });
   }
 
   const leaderboardEmbed = new EmbedBuilder()
-    .setTitle('Top Fortune Holders')
+    .setTitle('🏆 Top Fortune Holders')
     .setDescription(users.map(([id, data], i) => {
       const totalWealth = data.cash + (data.bankBalance || 0);
-      return `**${i + 1}.** <@${id}> - $${totalWealth.toLocaleString()}`;
+      const medals = ['🥇', '🥈', '🥉'];
+      const medal = medals[i] || '🔸';
+      return `${medal} **${i + 1}.** <@${id}> - **$${totalWealth.toLocaleString()}**`;
     }).join('\n'))
     .setColor(0xFFD700)
+    .setFooter({ text: '💰 Rankings based on total wealth (cash + bank balance)' })
     .setTimestamp();
 
   await interaction.reply({ embeds: [leaderboardEmbed] });
 }
 
 async function handleStoreCommand(interaction) {
+  const guildId = interaction.guild.id;
+  const guildItems = userData.guildItems?.[guildId] || {};
+
+  if (Object.keys(guildItems).length === 0) {
+    const emptyStoreEmbed = new EmbedBuilder()
+      .setTitle('Server Store')
+      .setDescription('This server currently has no custom items available for purchase.')
+      .addFields(
+        { name: 'Get Started', value: 'Ask an administrator to add items using `/add-item`', inline: false },
+        { name: 'Available Commands', value: '`/add-item` - Add new items (Admin only)\n`/view-items` - Manage items (Admin only)', inline: false }
+      )
+      .setColor(0x6C7B7F)
+      .setTimestamp();
+
+    return await interaction.reply({ embeds: [emptyStoreEmbed] });
+  }
+
+  const itemList = Object.entries(guildItems)
+    .map(([name, data]) => `**${name}**\nPrice: $${data.price.toLocaleString()}\n${data.description}`)
+    .join('\n\n');
+
   const storeEmbed = new EmbedBuilder()
-    .setTitle('Server Store')
-    .setDescription('Custom server items are currently being developed.')
+    .setTitle('🏪 Server Store')
+    .setDescription(`**Browse ${Object.keys(guildItems).length} available items** in this server.`)
     .addFields(
-      { name: 'Coming Soon', value: 'Server-specific items and admin features will be available in a future update', inline: false }
+      { name: '📋 Available Items', value: itemList, inline: false },
+      { name: '💳 How to Purchase', value: 'Contact **server administrators** to purchase items', inline: false }
     )
-    .setColor(0x339AF0)
+    .setColor(0x9932CC)
+    .setFooter({ text: '🎆 Items shown are server-specific custom additions' })
     .setTimestamp();
-    
+
   await interaction.reply({ embeds: [storeEmbed] });
 }
 
 // New command handlers
 async function handleMassSellCommand(interaction, userId) {
   const user = userData[userId];
-  
+
   if (!user.artefacts.length) {
     const noArtefactsEmbed = new EmbedBuilder()
       .setTitle('No Artefacts to Sell')
@@ -887,24 +936,24 @@ async function handleMassSellCommand(interaction, userId) {
       .addFields({ name: 'How to Find Artefacts', value: 'Use `/scavenge` to search for rare artefacts', inline: false })
       .setColor(0xFF6B6B)
       .setTimestamp();
-      
+
     return await interaction.reply({ embeds: [noArtefactsEmbed] });
   }
-  
+
   let totalEarnings = 0;
   const soldItems = [];
-  
+
   userData[userId].artefacts.forEach(artefact => {
     const rarity = getRarityByArtefact(artefact);
     const sellValue = rarity ? rarity.sell : 100;
     totalEarnings += sellValue;
     soldItems.push(`${artefact} - $${sellValue.toLocaleString()}`);
   });
-  
+
   userData[userId].cash += totalEarnings;
   userData[userId].artefacts = [];
   saveUserData();
-  
+
   const massellEmbed = new EmbedBuilder()
     .setTitle('Mass Sale Complete')
     .setDescription('Successfully sold your entire artefact collection.')
@@ -915,7 +964,7 @@ async function handleMassSellCommand(interaction, userId) {
     )
     .setColor(0x51CF66)
     .setTimestamp();
-    
+
   await interaction.reply({ embeds: [massellEmbed] });
 }
 
@@ -927,38 +976,38 @@ async function handleAddItemCommand(interaction) {
       .setDescription('Only administrators can add custom server items.')
       .setColor(0xFF6B6B)
       .setTimestamp();
-      
+
     return await interaction.reply({ embeds: [noPermEmbed] });
   }
-  
+
   const itemName = interaction.options.getString('name');
   const itemPrice = interaction.options.getInteger('price');
   const itemDescription = interaction.options.getString('description') || 'Custom server item';
   const guildId = interaction.guild.id;
-  
+
   if (!userData.guildItems) userData.guildItems = {};
   if (!userData.guildItems[guildId]) userData.guildItems[guildId] = {};
-  
+
   userData.guildItems[guildId][itemName] = {
     price: itemPrice,
     description: itemDescription,
     addedBy: interaction.user.id,
     addedAt: Date.now()
   };
-  
+
   saveUserData();
-  
+
   const addEmbed = new EmbedBuilder()
-    .setTitle('Item Added Successfully')
-    .setDescription(`Added "${itemName}" to the server store.`)
+    .setTitle('✅ Item Added Successfully')
+    .setDescription(`**Added "${itemName}"** to the server store.`)
     .addFields(
-      { name: 'Item Name', value: itemName, inline: true },
-      { name: 'Price', value: `$${itemPrice.toLocaleString()}`, inline: true },
-      { name: 'Description', value: itemDescription, inline: false }
+      { name: '🏷️ Item Name', value: `**${itemName}**`, inline: true },
+      { name: '💰 Price', value: `**$${itemPrice.toLocaleString()}**`, inline: true },
+      { name: '📋 Description', value: itemDescription, inline: false }
     )
-    .setColor(0x51CF66)
+    .setColor(0x00FF7F)
     .setTimestamp();
-    
+
   await interaction.reply({ embeds: [addEmbed] });
 }
 
@@ -970,32 +1019,32 @@ async function handleRemoveItemCommand(interaction) {
       .setDescription('Only administrators can remove custom server items.')
       .setColor(0xFF6B6B)
       .setTimestamp();
-      
+
     return await interaction.reply({ embeds: [noPermEmbed] });
   }
-  
+
   const itemName = interaction.options.getString('name');
   const guildId = interaction.guild.id;
-  
+
   if (!userData.guildItems || !userData.guildItems[guildId] || !userData.guildItems[guildId][itemName]) {
     const notFoundEmbed = new EmbedBuilder()
       .setTitle('Item Not Found')
       .setDescription(`No custom item named "${itemName}" exists in this server.`)
       .setColor(0xFF6B6B)
       .setTimestamp();
-      
+
     return await interaction.reply({ embeds: [notFoundEmbed] });
   }
-  
+
   delete userData.guildItems[guildId][itemName];
   saveUserData();
-  
+
   const removeEmbed = new EmbedBuilder()
     .setTitle('Item Removed')
     .setDescription(`Successfully removed "${itemName}" from the server store.`)
     .setColor(0x51CF66)
     .setTimestamp();
-    
+
   await interaction.reply({ embeds: [removeEmbed] });
 }
 
@@ -1007,13 +1056,13 @@ async function handleViewItemsCommand(interaction) {
       .setDescription('Only administrators can view the custom items management panel.')
       .setColor(0xFF6B6B)
       .setTimestamp();
-      
+
     return await interaction.reply({ embeds: [noPermEmbed] });
   }
-  
+
   const guildId = interaction.guild.id;
   const guildItems = userData.guildItems?.[guildId] || {};
-  
+
   if (Object.keys(guildItems).length === 0) {
     const noItemsEmbed = new EmbedBuilder()
       .setTitle('No Custom Items')
@@ -1021,319 +1070,915 @@ async function handleViewItemsCommand(interaction) {
       .addFields({ name: 'Add Items', value: 'Use `/add-item` to create custom server items', inline: false })
       .setColor(0xFF9F43)
       .setTimestamp();
-      
+
     return await interaction.reply({ embeds: [noItemsEmbed] });
   }
-  
+
   const itemList = Object.entries(guildItems).map(([name, data]) => 
     `**${name}** - $${data.price.toLocaleString()}\n${data.description}`
   ).join('\n\n');
-  
+
   const viewEmbed = new EmbedBuilder()
     .setTitle('Custom Server Items')
     .setDescription(`This server has ${Object.keys(guildItems).length} custom item(s).`)
     .addFields({ name: 'Items', value: itemList, inline: false })
     .setColor(0x339AF0)
     .setTimestamp();
-    
+
   await interaction.reply({ embeds: [viewEmbed] });
 }
 
 // Component interaction handler
 async function handleComponentInteraction(interaction) {
   const { customId } = interaction;
-  
-  if (customId.startsWith('trade_select_')) {
-    const targetUserId = customId.split('_')[2];
-    const selectedValue = interaction.values[0];
+
+  // Handle trade accept/decline
+  if (customId.startsWith('trade_accept_')) {
+    const initiatorId = customId.split('_')[2];
+    const recipientId = interaction.user.id;
+
+    // Create trade session
+    const tradeId = `${initiatorId}_${recipientId}`;
+    global.activeTrades[tradeId] = {
+      initiator: initiatorId,
+      recipient: recipientId,
+      initiatorOffer: { cash: 0, artefacts: [] },
+      recipientOffer: { cash: 0, artefacts: [] },
+      initiatorReady: false,
+      recipientReady: false,
+      status: 'active'
+    };
+
+    await startInteractiveTrade(interaction, initiatorId, recipientId, tradeId);
+    
+  } else if (customId.startsWith('trade_decline_')) {
+    const initiatorId = customId.split('_')[2];
+    
+    const declineEmbed = new EmbedBuilder()
+      .setTitle('Trade Declined')
+      .setDescription(`<@${interaction.user.id}> has declined the trade request.`)
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+
+    await interaction.update({ embeds: [declineEmbed], components: [] });
+
+  // === MARBLE GAME BUTTON HANDLERS ===
+  } else if (customId.startsWith('marble_accept_')) {
+    const gameId = customId.replace('marble_accept_', '');
+    const game = global.activeMarbleGames[gameId];
+    
+    if (!game) {
+      return await interaction.reply({ 
+        content: '❌ **Error:** This game is no longer active!', 
+        ephemeral: true 
+      });
+    }
+
     const userId = interaction.user.id;
     
-    if (selectedValue === 'cash') {
-      // Show cash amount modal
-      const modal = new ModalBuilder()
-        .setCustomId(`trade_cash_${targetUserId}`)
-        .setTitle('Trade Cash Amount');
-        
-      const cashInput = new TextInputBuilder()
-        .setCustomId('cash_amount')
-        .setLabel('How much cash do you want to trade?')
-        .setStyle(TextInputStyle.Short)
-        .setPlaceholder('Enter amount in dollars')
-        .setRequired(true)
-        .setMaxLength(10);
-        
-      const firstActionRow = new ActionRowBuilder().addComponents(cashInput);
-      modal.addComponents(firstActionRow);
-      
-      await interaction.showModal(modal);
-    } else if (selectedValue.startsWith('artefact_')) {
-      const artefactIndex = parseInt(selectedValue.split('_')[1]);
-      const userArtefacts = userData[userId].artefacts;
-      const artefact = userArtefacts[artefactIndex];
-      
-      // Create confirmation for artefact trade
-      const confirmButton = new ButtonBuilder()
-        .setCustomId(`confirm_artefact_trade_${targetUserId}_${artefactIndex}`)
-        .setLabel('Confirm Trade')
-        .setStyle(ButtonStyle.Success);
-        
-      const cancelButton = new ButtonBuilder()
-        .setCustomId('cancel_trade')
-        .setLabel('Cancel')
-        .setStyle(ButtonStyle.Secondary);
-        
-      const row = new ActionRowBuilder().addComponents(confirmButton, cancelButton);
-      
-      const rarity = getRarityByArtefact(artefact);
-      const confirmEmbed = new EmbedBuilder()
-        .setTitle('Confirm Artefact Trade')
-        .setDescription(`Do you want to trade your ${artefact}?`)
-        .addFields(
-          { name: 'Artefact', value: artefact, inline: true },
-          { name: 'Rarity', value: rarity ? rarity.name : 'Unknown', inline: true },
-          { name: 'Value', value: `$${rarity ? rarity.value.toLocaleString() : '100'}`, inline: true },
-          { name: 'Trading With', value: `<@${targetUserId}>`, inline: false }
-        )
-        .setColor(0x339AF0)
-        .setTimestamp();
-        
-      await interaction.update({ embeds: [confirmEmbed], components: [row] });
+    // Check if this user was invited
+    if (!game.invited.some(p => p.id === userId)) {
+      return await interaction.reply({ 
+        content: '❌ **Error:** You were not invited to this game!', 
+        ephemeral: true 
+      });
     }
-  } else if (customId.startsWith('trade_cash_')) {
-    const targetUserId = customId.split('_')[2];
-    const cashAmount = parseInt(interaction.fields.getTextInputValue('cash_amount'));
+
+    // Check if already responded
+    if (game.accepted.includes(userId) || game.declined.includes(userId)) {
+      return await interaction.reply({ 
+        content: '❌ **Error:** You have already responded to this invitation!', 
+        ephemeral: true 
+      });
+    }
+
+    // Add to accepted list
+    game.accepted.push(userId);
+
+    // Check if all players have accepted
+    if (game.accepted.length === 3) {
+      // All players accepted, proceed to team selection
+      await handleTeamSelection(interaction, gameId);
+    } else {
+      // Update embed to show new acceptance
+      const updatedEmbed = createInvitationEmbed(game);
+      await interaction.update({ embeds: [updatedEmbed], components: [createInvitationButtons(gameId)] });
+    }
+
+  } else if (customId.startsWith('marble_decline_')) {
+    const gameId = customId.replace('marble_decline_', '');
+    const game = global.activeMarbleGames[gameId];
+    
+    if (!game) {
+      return await interaction.reply({ 
+        content: '❌ **Error:** This game is no longer active!', 
+        ephemeral: true 
+      });
+    }
+
     const userId = interaction.user.id;
+    const declinedUser = game.invited.find(p => p.id === userId);
+    
+    if (!declinedUser) {
+      return await interaction.reply({ 
+        content: '❌ **Error:** You were not invited to this game!', 
+        ephemeral: true 
+      });
+    }
+
+    // Game cancelled due to decline
+    const declineEmbed = new EmbedBuilder()
+      .setTitle('🚫 Marble Game Cancelled')
+      .setDescription(`**${declinedUser.displayName}** has declined the invitation. The marble game has been cancelled.`)
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+
+    await interaction.update({ embeds: [declineEmbed], components: [] });
+    
+    // Clean up the game
+    delete global.activeMarbleGames[gameId];
+
+  } else if (customId.startsWith('select_number_')) {
+    const gameId = customId.replace('select_number_', '');
+    await handleNumberSelection(interaction, gameId);
+    
+  } else if (customId.startsWith('trade_add_cash_')) {
+    await handleTradeAddCash(interaction, customId);
+    
+  } else if (customId.startsWith('trade_add_artefact_')) {
+    await handleTradeAddArtefact(interaction, customId);
+    
+  } else if (customId.startsWith('trade_remove_cash_')) {
+    await handleTradeRemoveCash(interaction, customId);
+    
+  } else if (customId.startsWith('trade_remove_artefact_')) {
+    await handleTradeRemoveArtefact(interaction, customId);
+    
+  } else if (customId.startsWith('trade_ready_')) {
+    await handleTradeReady(interaction, customId);
+    
+  } else if (customId.startsWith('trade_cancel_')) {
+    await handleTradeCancel(interaction, customId);
+    
+  } else if (customId.startsWith('trade_cash_modal_')) {
+    const tradeId = customId.split('_')[3];
+    const trade = global.activeTrades[tradeId];
+    if (!trade) return;
+    
+    const userId = interaction.user.id;
+    const cashAmount = parseInt(interaction.fields.getTextInputValue('cash_amount'));
     
     if (isNaN(cashAmount) || cashAmount <= 0) {
-      const errorEmbed = new EmbedBuilder()
-        .setTitle('Invalid Amount')
-        .setDescription('Please enter a valid cash amount.')
-        .setColor(0xFF6B6B)
-        .setTimestamp();
-        
-      return await interaction.reply({ embeds: [errorEmbed], flags: 64 });
+      return await interaction.reply({ content: 'Please enter a valid cash amount!', ephemeral: true });
     }
     
     if (cashAmount > userData[userId].cash) {
-      const insufficientEmbed = new EmbedBuilder()
-        .setTitle('Insufficient Funds')
-        .setDescription(`You only have $${userData[userId].cash.toLocaleString()} available.`)
-        .setColor(0xFF6B6B)
-        .setTimestamp();
-        
-      return await interaction.reply({ embeds: [insufficientEmbed], flags: 64 });
+      return await interaction.reply({ content: `You only have $${userData[userId].cash.toLocaleString()} available!`, ephemeral: true });
     }
     
-    // Create confirmation for cash trade
-    const confirmButton = new ButtonBuilder()
-      .setCustomId(`confirm_cash_trade_${targetUserId}_${cashAmount}`)
-      .setLabel('Confirm Trade')
-      .setStyle(ButtonStyle.Success);
-      
-    const cancelButton = new ButtonBuilder()
-      .setCustomId('cancel_trade')
-      .setLabel('Cancel')
-      .setStyle(ButtonStyle.Secondary);
-      
-    const row = new ActionRowBuilder().addComponents(confirmButton, cancelButton);
-    
-    const confirmEmbed = new EmbedBuilder()
-      .setTitle('Confirm Cash Trade')
-      .setDescription(`Do you want to trade $${cashAmount.toLocaleString()}?`)
-      .addFields(
-        { name: 'Amount', value: `$${cashAmount.toLocaleString()}`, inline: true },
-        { name: 'Trading With', value: `<@${targetUserId}>`, inline: true },
-        { name: 'Remaining Cash', value: `$${(userData[userId].cash - cashAmount).toLocaleString()}`, inline: true }
-      )
-      .setColor(0x339AF0)
-      .setTimestamp();
-      
-    await interaction.reply({ embeds: [confirmEmbed], components: [row] });
-  } else if (customId.startsWith('confirm_cash_trade_')) {
-    const parts = customId.split('_');
-    const targetUserId = parts[3];
-    const cashAmount = parseInt(parts[4]);
-    const userId = interaction.user.id;
-    
-    // Execute trade
-    userData[userId].cash -= cashAmount;
-    userData[targetUserId].cash += cashAmount;
-    saveUserData();
-    
-    const successEmbed = new EmbedBuilder()
-      .setTitle('Trade Completed')
-      .setDescription(`Successfully traded $${cashAmount.toLocaleString()} to <@${targetUserId}>`)
-      .addFields(
-        { name: 'Your New Balance', value: `$${userData[userId].cash.toLocaleString()}`, inline: true },
-        { name: 'Trade Recipient', value: `<@${targetUserId}>`, inline: true }
-      )
-      .setColor(0x51CF66)
-      .setTimestamp();
-      
-    await interaction.update({ embeds: [successEmbed], components: [] });
-    
-    // Notify target user
-    try {
-      const targetUser = await client.users.fetch(targetUserId);
-      const notifyEmbed = new EmbedBuilder()
-        .setTitle('Trade Received')
-        .setDescription(`<@${userId}> traded you $${cashAmount.toLocaleString()}!`)
-        .setColor(0x51CF66)
-        .setTimestamp();
-        
-      await targetUser.send({ embeds: [notifyEmbed] });
-    } catch (error) {
-      console.log('Could not DM target user about trade');
+    const isInitiator = trade.initiator === userId;
+    if (isInitiator) {
+      trade.initiatorOffer.cash = cashAmount;
+      trade.initiatorReady = false;
+    } else {
+      trade.recipientOffer.cash = cashAmount;
+      trade.recipientReady = false;
     }
-  } else if (customId.startsWith('confirm_artefact_trade_')) {
-    const parts = customId.split('_');
-    const targetUserId = parts[3];
-    const artefactIndex = parseInt(parts[4]);
-    const userId = interaction.user.id;
     
+    const tradeEmbed = createTradeEmbed(trade, trade.initiator, trade.recipient);
+    const components = createTradeComponents(tradeId, userId);
+    
+    await interaction.update({ embeds: [tradeEmbed], components });
+    
+  } else if (customId.startsWith('trade_artefact_select_')) {
+    const tradeId = customId.split('_')[3];
+    const trade = global.activeTrades[tradeId];
+    if (!trade) return;
+    
+    const userId = interaction.user.id;
+    const artefactIndex = parseInt(interaction.values[0]);
     const artefact = userData[userId].artefacts[artefactIndex];
     
-    // Execute trade
-    userData[userId].artefacts.splice(artefactIndex, 1);
-    userData[targetUserId].artefacts.push(artefact);
-    saveUserData();
-    
-    const rarity = getRarityByArtefact(artefact);
-    const successEmbed = new EmbedBuilder()
-      .setTitle('Trade Completed')
-      .setDescription(`Successfully traded ${artefact} to <@${targetUserId}>`)
-      .addFields(
-        { name: 'Artefact', value: artefact, inline: true },
-        { name: 'Rarity', value: rarity ? rarity.name : 'Unknown', inline: true },
-        { name: 'Trade Recipient', value: `<@${targetUserId}>`, inline: true }
-      )
-      .setColor(0x51CF66)
-      .setTimestamp();
-      
-    await interaction.update({ embeds: [successEmbed], components: [] });
-    
-    // Notify target user
-    try {
-      const targetUser = await client.users.fetch(targetUserId);
-      const notifyEmbed = new EmbedBuilder()
-        .setTitle('Artefact Received')
-        .setDescription(`<@${userId}> traded you: ${artefact}!`)
-        .addFields(
-          { name: 'Artefact', value: artefact, inline: true },
-          { name: 'Rarity', value: rarity ? rarity.name : 'Unknown', inline: true }
-        )
-        .setColor(0x51CF66)
-        .setTimestamp();
-        
-      await targetUser.send({ embeds: [notifyEmbed] });
-    } catch (error) {
-      console.log('Could not DM target user about trade');
-    }
-  } else if (customId === 'cancel_trade') {
-    const cancelEmbed = new EmbedBuilder()
-      .setTitle('Trade Cancelled')
-      .setDescription('The trade has been cancelled.')
-      .setColor(0xFF9F43)
-      .setTimestamp();
-      
-    await interaction.update({ embeds: [cancelEmbed], components: [] });
-  } else if (customId.startsWith('marble_')) {
-    const choice = customId.split('_')[1];
-    const userId = interaction.user.id;
-    const betAmount = parseInt(customId.split('_')[2]);
-    
-    // Process marble game result
-    const marbleColors = ['red', 'blue', 'green', 'yellow', 'purple'];
-    const actualMarble = marbleColors[Math.floor(Math.random() * marbleColors.length)];
-    
-    let winnings = 0;
-    let result = 'lose';
-    
-    if (choice === actualMarble) {
-      winnings = betAmount * 4; // 4x multiplier for exact match
-      result = 'win';
+    const isInitiator = trade.initiator === userId;
+    if (isInitiator) {
+      if (!trade.initiatorOffer.artefacts.includes(artefact)) {
+        trade.initiatorOffer.artefacts.push(artefact);
+      }
+      trade.initiatorReady = false;
     } else {
-      winnings = -betAmount;
+      if (!trade.recipientOffer.artefacts.includes(artefact)) {
+        trade.recipientOffer.artefacts.push(artefact);
+      }
+      trade.recipientReady = false;
     }
     
-    userData[userId].cash += winnings;
-    saveUserData();
-    
-    const resultEmbed = new EmbedBuilder()
-      .setTitle(result === 'win' ? 'Marble Game - You Won!' : 'Marble Game - You Lost!')
-      .setDescription(`The marble was ${actualMarble}!`)
-      .addFields(
-        { name: 'Your Guess', value: choice, inline: true },
-        { name: 'Actual Marble', value: actualMarble, inline: true },
-        { name: 'Result', value: result === 'win' ? `+$${winnings.toLocaleString()}` : `${winnings.toLocaleString()}`, inline: true },
-        { name: 'New Balance', value: `$${userData[userId].cash.toLocaleString()}`, inline: false }
-      )
-      .setColor(result === 'win' ? 0x51CF66 : 0xFF6B6B)
-      .setTimestamp();
-      
-    await interaction.update({ embeds: [resultEmbed], components: [] });
+    await interaction.deferUpdate();
   }
 }
 
-// Marble gambling game
-async function handleMarbleCommand(interaction, userId) {
-  const betAmount = interaction.options.getInteger('bet');
+// New Trade System Functions
+async function startInteractiveTrade(interaction, initiatorId, recipientId, tradeId) {
+  const trade = global.activeTrades[tradeId];
+  if (!trade) return;
+
+  const tradeEmbed = createTradeEmbed(trade, initiatorId, recipientId);
+  const components = createTradeComponents(tradeId, interaction.user.id);
+
+  await interaction.update({ embeds: [tradeEmbed], components });
+}
+
+function createTradeEmbed(trade, initiatorId, recipientId) {
+  const initiatorOfferText = formatOffer(trade.initiatorOffer);
+  const recipientOfferText = formatOffer(trade.recipientOffer);
   
-  if (userData[userId].cash < betAmount) {
-    const insufficientEmbed = new EmbedBuilder()
-      .setTitle('Insufficient Funds')
-      .setDescription(`You need $${betAmount.toLocaleString()} to play but only have $${userData[userId].cash.toLocaleString()}.`)
-      .setColor(0xFF6B6B)
-      .setTimestamp();
-      
-    return await interaction.reply({ embeds: [insufficientEmbed] });
+  return new EmbedBuilder()
+    .setTitle('⚡ Interactive Trade Session')
+    .setDescription('**Both players can add items, cash, or artefacts to the trade**')
+    .addFields(
+      { name: '👤 Initiator Offer', value: initiatorOfferText || '*Nothing offered yet*', inline: true },
+      { name: '🎯 Recipient Offer', value: recipientOfferText || '*Nothing offered yet*', inline: true },
+      { name: '📊 Trade Status', value: getTradeStatus(trade), inline: false },
+      { name: '📋 Instructions', value: 'Use the buttons below to **add/remove** items from your offer. Both players must click **Ready** to complete the trade.', inline: false }
+    )
+    .setColor(trade.initiatorReady && trade.recipientReady ? 0x00FF7F : 0x4169E1)
+    .setFooter({ text: '⏰ Trade will expire after 10 minutes of inactivity' })
+    .setTimestamp();
+}
+
+function formatOffer(offer) {
+  const parts = [];
+  if (offer.cash > 0) parts.push(`$${offer.cash.toLocaleString()}`);
+  if (offer.artefacts.length > 0) parts.push(offer.artefacts.join(', '));
+  return parts.join('\n') || 'Nothing';
+}
+
+function getTradeStatus(trade) {
+  if (trade.initiatorReady && trade.recipientReady) return '✅ **Both players ready** - Trade will complete automatically';
+  if (trade.initiatorReady) return '⏳ **Initiator ready**, waiting for recipient';
+  if (trade.recipientReady) return '⏳ **Recipient ready**, waiting for initiator';
+  return '⚒️ **Setting up offers...**';
+}
+
+function createTradeComponents(tradeId, userId) {
+  const trade = global.activeTrades[tradeId];
+  if (!trade) return [];
+  
+  const isInitiator = trade.initiator === userId;
+  const userOffer = isInitiator ? trade.initiatorOffer : trade.recipientOffer;
+  const userReady = isInitiator ? trade.initiatorReady : trade.recipientReady;
+  
+  const row1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`trade_add_cash_${tradeId}`)
+      .setLabel('Add Cash')
+      .setStyle(ButtonStyle.Primary)
+      .setDisabled(userReady),
+    new ButtonBuilder()
+      .setCustomId(`trade_add_artefact_${tradeId}`)
+      .setLabel('Add Artefact')
+      .setStyle(ButtonStyle.Primary)
+      .setDisabled(userReady),
+    new ButtonBuilder()
+      .setCustomId(`trade_remove_cash_${tradeId}`)
+      .setLabel('Remove Cash')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(userOffer.cash === 0 || userReady)
+  );
+  
+  const row2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`trade_ready_${tradeId}`)
+      .setLabel(userReady ? 'Ready!' : 'Mark Ready')
+      .setStyle(userReady ? ButtonStyle.Success : ButtonStyle.Primary)
+      .setDisabled(userReady),
+    new ButtonBuilder()
+      .setCustomId(`trade_cancel_${tradeId}`)
+      .setLabel('Cancel Trade')
+      .setStyle(ButtonStyle.Danger)
+  );
+  
+  return [row1, row2];
+}
+
+async function handleTradeAddCash(interaction, customId) {
+  const tradeId = customId.split('_')[3];
+  const trade = global.activeTrades[tradeId];
+  if (!trade) return;
+  
+  const userId = interaction.user.id;
+  const isInitiator = trade.initiator === userId;
+  
+  if ((isInitiator && trade.initiatorReady) || (!isInitiator && trade.recipientReady)) {
+    return await interaction.reply({ content: 'You cannot modify your offer after marking ready!', ephemeral: true });
   }
   
-  // Deduct bet amount immediately
-  userData[userId].cash -= betAmount;
+  const modal = new ModalBuilder()
+    .setCustomId(`trade_cash_modal_${tradeId}`)
+    .setTitle('Add Cash to Trade');
+    
+  const cashInput = new TextInputBuilder()
+    .setCustomId('cash_amount')
+    .setLabel('Cash amount to add')
+    .setStyle(TextInputStyle.Short)
+    .setPlaceholder('Enter amount in dollars')
+    .setRequired(true)
+    .setMaxLength(10);
+    
+  const row = new ActionRowBuilder().addComponents(cashInput);
+  modal.addComponents(row);
+  
+  await interaction.showModal(modal);
+}
+
+async function handleTradeAddArtefact(interaction, customId) {
+  const tradeId = customId.split('_')[3];
+  const trade = global.activeTrades[tradeId];
+  if (!trade) return;
+  
+  const userId = interaction.user.id;
+  const userArtefacts = userData[userId].artefacts || [];
+  
+  if (userArtefacts.length === 0) {
+    return await interaction.reply({ content: 'You have no artefacts to trade!', ephemeral: true });
+  }
+  
+  const options = userArtefacts.slice(0, 25).map((artefact, index) => {
+    const rarity = getRarityByArtefact(artefact);
+    return {
+      label: artefact,
+      description: `${rarity ? rarity.name : 'Unknown'} - $${rarity ? rarity.value.toLocaleString() : '100'}`,
+      value: index.toString()
+    };
+  });
+  
+  const selectMenu = new StringSelectMenuBuilder()
+    .setCustomId(`trade_artefact_select_${tradeId}`)
+    .setPlaceholder('Choose an artefact to add')
+    .addOptions(options);
+    
+  const row = new ActionRowBuilder().addComponents(selectMenu);
+  
+  await interaction.reply({ content: 'Select an artefact to add to your trade offer:', components: [row], ephemeral: true });
+}
+
+async function handleTradeRemoveCash(interaction, customId) {
+  const tradeId = customId.split('_')[3];
+  const trade = global.activeTrades[tradeId];
+  if (!trade) return;
+  
+  const userId = interaction.user.id;
+  const isInitiator = trade.initiator === userId;
+  
+  if (isInitiator) {
+    trade.initiatorOffer.cash = 0;
+    trade.initiatorReady = false;
+  } else {
+    trade.recipientOffer.cash = 0;
+    trade.recipientReady = false;
+  }
+  
+  const tradeEmbed = createTradeEmbed(trade, trade.initiator, trade.recipient);
+  const components = createTradeComponents(tradeId, userId);
+  
+  await interaction.update({ embeds: [tradeEmbed], components });
+}
+
+async function handleTradeReady(interaction, customId) {
+  const tradeId = customId.split('_')[2];
+  const trade = global.activeTrades[tradeId];
+  if (!trade) return;
+  
+  const userId = interaction.user.id;
+  const isInitiator = trade.initiator === userId;
+  
+  if (isInitiator) {
+    trade.initiatorReady = true;
+  } else {
+    trade.recipientReady = true;
+  }
+  
+  if (trade.initiatorReady && trade.recipientReady) {
+    await executeTrade(interaction, trade, tradeId);
+  } else {
+    const tradeEmbed = createTradeEmbed(trade, trade.initiator, trade.recipient);
+    const components = createTradeComponents(tradeId, userId);
+    await interaction.update({ embeds: [tradeEmbed], components });
+  }
+}
+
+async function executeTrade(interaction, trade, tradeId) {
+  const initiator = userData[trade.initiator];
+  const recipient = userData[trade.recipient];
+  
+  // Transfer cash
+  initiator.cash -= trade.initiatorOffer.cash;
+  initiator.cash += trade.recipientOffer.cash;
+  recipient.cash -= trade.recipientOffer.cash;
+  recipient.cash += trade.initiatorOffer.cash;
+  
+  // Transfer artefacts
+  trade.initiatorOffer.artefacts.forEach(artefact => {
+    const index = initiator.artefacts.indexOf(artefact);
+    if (index > -1) {
+      initiator.artefacts.splice(index, 1);
+      recipient.artefacts.push(artefact);
+    }
+  });
+  
+  trade.recipientOffer.artefacts.forEach(artefact => {
+    const index = recipient.artefacts.indexOf(artefact);
+    if (index > -1) {
+      recipient.artefacts.splice(index, 1);
+      initiator.artefacts.push(artefact);
+    }
+  });
+  
   saveUserData();
+  delete global.activeTrades[tradeId];
   
-  // Create marble selection buttons
-  const redButton = new ButtonBuilder()
-    .setCustomId(`marble_red_${betAmount}`)
-    .setLabel('Red Marble')
-    .setStyle(ButtonStyle.Danger);
-    
-  const blueButton = new ButtonBuilder()
-    .setCustomId(`marble_blue_${betAmount}`)
-    .setLabel('Blue Marble')
-    .setStyle(ButtonStyle.Primary);
-    
-  const greenButton = new ButtonBuilder()
-    .setCustomId(`marble_green_${betAmount}`)
-    .setLabel('Green Marble')
-    .setStyle(ButtonStyle.Success);
-    
-  const yellowButton = new ButtonBuilder()
-    .setCustomId(`marble_yellow_${betAmount}`)
-    .setLabel('Yellow Marble')
-    .setStyle(ButtonStyle.Secondary);
-    
-  const purpleButton = new ButtonBuilder()
-    .setCustomId(`marble_purple_${betAmount}`)
-    .setLabel('Purple Marble')
-    .setStyle(ButtonStyle.Secondary);
-  
-  const row1 = new ActionRowBuilder().addComponents(redButton, blueButton, greenButton);
-  const row2 = new ActionRowBuilder().addComponents(yellowButton, purpleButton);
-  
-  const marbleEmbed = new EmbedBuilder()
-    .setTitle('Marble Gambling Game')
-    .setDescription('Choose a marble color! If you guess correctly, you win 4x your bet!')
+  const successEmbed = new EmbedBuilder()
+    .setTitle('🎉 Trade Completed Successfully!')
+    .setDescription('**The trade has been executed and all items have been exchanged!**')
     .addFields(
-      { name: 'Bet Amount', value: `$${betAmount.toLocaleString()}`, inline: true },
-      { name: 'Potential Winnings', value: `$${(betAmount * 4).toLocaleString()}`, inline: true },
-      { name: 'Instructions', value: 'Click a button to select your marble color', inline: false }
+      { name: '📦 Initiator Received', value: formatOffer(trade.recipientOffer) || '*Nothing*', inline: true },
+      { name: '📦 Recipient Received', value: formatOffer(trade.initiatorOffer) || '*Nothing*', inline: true }
     )
-    .setColor(0x9C88FF)
+    .setColor(0x00FF7F)
     .setTimestamp();
     
-  await interaction.reply({ embeds: [marbleEmbed], components: [row1, row2] });
+  await interaction.update({ embeds: [successEmbed], components: [] });
+}
+
+async function handleTradeCancel(interaction, customId) {
+  const tradeId = customId.split('_')[2];
+  delete global.activeTrades[tradeId];
+  
+  const cancelEmbed = new EmbedBuilder()
+    .setTitle('Trade Cancelled')
+    .setDescription('The trade has been cancelled by one of the participants.')
+    .setColor(0xFF9F43)
+    .setTimestamp();
+    
+  await interaction.update({ embeds: [cancelEmbed], components: [] });
+}
+
+// === MARBLE GAME FUNCTIONS ===
+
+async function handleMarbleGame(interaction) {
+  const userId = interaction.user.id;
+  const player2 = interaction.options.getUser('player2');
+  const player3 = interaction.options.getUser('player3');
+  const player4 = interaction.options.getUser('player4');
+  const betAmount = interaction.options.getInteger('bet-amount');
+
+  // Validation checks
+  const players = [interaction.user, player2, player3, player4];
+  const uniquePlayerIds = new Set(players.map(p => p.id));
+  
+  if (uniquePlayerIds.size !== 4) {
+    return await interaction.reply({ 
+      content: '❌ **Error:** All four players must be different users!', 
+      ephemeral: true 
+    });
+  }
+
+  if (players.some(p => p.bot)) {
+    return await interaction.reply({ 
+      content: '❌ **Error:** Bots cannot participate in marble games!', 
+      ephemeral: true 
+    });
+  }
+
+  // Check if all players have enough cash to bet
+  for (const player of players) {
+    if (!userData[player.id]) userData[player.id] = { cash: 0, artefacts: [], bankBalance: 0 };
+    if (userData[player.id].cash < betAmount) {
+      return await interaction.reply({ 
+        content: `❌ **Error:** <@${player.id}> doesn't have enough cash to bet $${betAmount.toLocaleString()}! They only have $${userData[player.id].cash.toLocaleString()}.`, 
+        ephemeral: true 
+      });
+    }
+  }
+
+  // Check if any player is already in a game
+  const existingGame = Object.values(global.activeMarbleGames).find(game => 
+    game.players.some(p => players.some(player => player.id === p.id))
+  );
+  
+  if (existingGame) {
+    return await interaction.reply({ 
+      content: '❌ **Error:** One or more players are already in an active marble game!', 
+      ephemeral: true 
+    });
+  }
+
+  // Create game ID and initialize game
+  const gameId = `${userId}_${Date.now()}`;
+  global.activeMarbleGames[gameId] = {
+    gameId,
+    initiator: interaction.user,
+    players: players,
+    invited: [player2, player3, player4],
+    accepted: [],
+    declined: [],
+    betAmount: betAmount,
+    totalPot: betAmount * 4,
+    betsCollected: false,
+    phase: 'invitation',
+    createdAt: Date.now()
+  };
+
+  const invitationEmbed = createInvitationEmbed(global.activeMarbleGames[gameId]);
+  const buttons = createInvitationButtons(gameId);
+
+  await interaction.reply({ 
+    embeds: [invitationEmbed], 
+    components: [buttons],
+    ephemeral: false 
+  });
+}
+
+function createInvitationEmbed(game) {
+  const pending = game.invited.filter(p => 
+    !game.accepted.includes(p.id) && !game.declined.includes(p.id)
+  );
+  
+  return new EmbedBuilder()
+    .setTitle('🎲 Marble Gambling Challenge')
+    .setDescription(`**${game.initiator.displayName}** has challenged you to a marble gambling contest!`)
+    .addFields(
+      { 
+        name: '👥 Players Invited', 
+        value: game.invited.map(p => `<@${p.id}>`).join(', '), 
+        inline: false 
+      },
+      { 
+        name: '⏳ Pending Responses', 
+        value: pending.length > 0 ? pending.map(p => `<@${p.id}>`).join(', ') : '*None*', 
+        inline: true 
+      },
+      { 
+        name: '✅ Accepted', 
+        value: game.accepted.length > 0 ? game.accepted.map(id => `<@${id}>`).join(', ') : '*None*', 
+        inline: true 
+      },
+      {
+        name: '🎯 Game Rules',
+        value: '• **4 players** split into 2 teams\\n• Each team starts with **10 marbles**\\n• Guess numbers 1-20 to win marbles\\n• First team to **0 marbles loses**, other team wins with **20 marbles**',
+        inline: false
+      }
+    )
+    .setColor(0xFF6B35)
+    .setFooter({ text: '⏰ This invitation expires after 2 minutes' })
+    .setTimestamp();
+}
+
+function createInvitationButtons(gameId) {
+  return new ActionRowBuilder()
+    .addComponents(
+      new ButtonBuilder()
+        .setCustomId(`marble_accept_${gameId}`)
+        .setLabel('Accept Challenge')
+        .setStyle(ButtonStyle.Success),
+      new ButtonBuilder()
+        .setCustomId(`marble_decline_${gameId}`)
+        .setLabel('Decline')
+        .setStyle(ButtonStyle.Danger)
+    );
+}
+
+async function handleTeamSelection(interaction, gameId) {
+  const game = global.activeMarbleGames[gameId];
+  if (!game) return;
+
+  const teamSelectionEmbed = new EmbedBuilder()
+    .setTitle('👥 Choose Your Teammates')
+    .setDescription('**Time to form teams!** Choose your teammate from the other players.')
+    .addFields(
+      { 
+        name: '🎮 All Players', 
+        value: game.players.map(p => `<@${p.id}>`).join(', '), 
+        inline: false 
+      },
+      {
+        name: '📋 Instructions',
+        value: 'Click the button below to select your teammate. Both players must accept the team formation.',
+        inline: false
+      }
+    )
+    .setColor(0x4169E1)
+    .setTimestamp();
+
+  const teamButtons = new ActionRowBuilder()
+    .addComponents(
+      new ButtonBuilder()
+        .setCustomId(`choose_teammate_${gameId}`)
+        .setLabel('Choose Teammate')
+        .setStyle(ButtonStyle.Primary)
+    );
+
+  await interaction.editReply({ 
+    embeds: [teamSelectionEmbed], 
+    components: [teamButtons] 
+  });
+
+  // Delete message after 3 seconds and start game
+  setTimeout(async () => {
+    await interaction.deleteReply().catch(() => {});
+    await startMarbleGame(interaction, gameId);
+  }, 3000);
+}
+
+async function startMarbleGame(interaction, gameId) {
+  const game = global.activeMarbleGames[gameId];
+  if (!game) return;
+
+  // For simplicity, randomly assign teams
+  const shuffledPlayers = [...game.players].sort(() => Math.random() - 0.5);
+  game.teamA = shuffledPlayers.slice(0, 2);
+  game.teamB = shuffledPlayers.slice(2, 4);
+  game.teamAMarbles = 10;
+  game.teamBMarbles = 10;
+  game.phase = 'game';
+  game.round = 1;
+  game.playerGuesses = {};
+  
+  // Coin flip to determine starting team
+  const coinFlip = Math.random() < 0.5 ? 'heads' : 'tails';
+  game.currentTeam = coinFlip === 'heads' ? 'A' : 'B';
+  game.currentPlayerIndex = 0;
+
+  const gameStartEmbed = createGameEmbed(game, coinFlip);
+  const numberButton = createNumberSelectionButton(gameId);
+
+  const channel = interaction.channel;
+  await channel.send({ 
+    embeds: [gameStartEmbed], 
+    components: [numberButton] 
+  });
+}
+
+function createGameEmbed(game, coinFlip = null) {
+  const currentTeam = game.currentTeam === 'A' ? game.teamA : game.teamB;
+  const currentPlayer = currentTeam[game.currentPlayerIndex];
+  
+  let description = `**Round ${game.round}** - Marble Gambling in Progress!`;
+  if (coinFlip) {
+    description += `\\n\\n🪙 **Coin Flip Result:** ${coinFlip.toUpperCase()}\\n**Team ${game.currentTeam}** goes first!`;
+  }
+
+  return new EmbedBuilder()
+    .setTitle('🎲 Marble Game - Active')
+    .setDescription(description)
+    .addFields(
+      { 
+        name: '🔴 Team A', 
+        value: `**Players:** ${game.teamA.map(p => p.displayName).join(', ')}\\n**Marbles:** ${game.teamAMarbles}/20`, 
+        inline: true 
+      },
+      { 
+        name: '🔵 Team B', 
+        value: `**Players:** ${game.teamB.map(p => p.displayName).join(', ')}\\n**Marbles:** ${game.teamBMarbles}/20`, 
+        inline: true 
+      },
+      { 
+        name: '🎯 Current Turn', 
+        value: `**${currentPlayer.displayName}** (Team ${game.currentTeam})\\nChoose a number from 1-20!`, 
+        inline: false 
+      }
+    )
+    .setColor(game.currentTeam === 'A' ? 0xFF4444 : 0x4444FF)
+    .setFooter({ text: `🎲 Round ${game.round} • Waiting for number selection` })
+    .setTimestamp();
+}
+
+function createNumberSelectionButton(gameId) {
+  return new ActionRowBuilder()
+    .addComponents(
+      new ButtonBuilder()
+        .setCustomId(`select_number_${gameId}`)
+        .setLabel('Select Number (1-20)')
+        .setStyle(ButtonStyle.Primary)
+    );
+}
+
+async function handleNumberSelection(interaction, gameId) {
+  const game = global.activeMarbleGames[gameId];
+  if (!game) return;
+
+  const currentTeam = game.currentTeam === 'A' ? game.teamA : game.teamB;
+  const currentPlayer = currentTeam[game.currentPlayerIndex];
+
+  if (interaction.user.id !== currentPlayer.id) {
+    return await interaction.reply({ 
+      content: '❌ **It\'s not your turn!**', 
+      ephemeral: true 
+    });
+  }
+
+  const modal = new ModalBuilder()
+    .setCustomId(`number_modal_${gameId}`)
+    .setTitle('Choose Your Number')
+    .addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('number_input')
+          .setLabel('Enter a number from 1 to 20')
+          .setStyle(TextInputStyle.Short)
+          .setMinLength(1)
+          .setMaxLength(2)
+          .setRequired(true)
+      )
+    );
+
+  await interaction.showModal(modal);
+}
+
+async function processNumberGuess(interaction, gameId) {
+  const game = global.activeMarbleGames[gameId];
+  if (!game) return;
+
+  const number = parseInt(interaction.fields.getTextInputValue('number_input'));
+  
+  if (isNaN(number) || number < 1 || number > 20) {
+    return await interaction.reply({ 
+      content: '❌ **Invalid number!** Please enter a number between 1 and 20.', 
+      ephemeral: true 
+    });
+  }
+
+  const playerId = interaction.user.id;
+  game.playerGuesses[playerId] = number;
+
+  await interaction.reply({ 
+    content: `✅ **You selected ${number}!** Waiting for other players...`, 
+    ephemeral: true 
+  });
+
+  // Move to next player
+  const currentTeamArray = game.currentTeam === 'A' ? game.teamA : game.teamB;
+  game.currentPlayerIndex++;
+
+  // Check if all players in current team have guessed
+  if (game.currentPlayerIndex >= currentTeamArray.length) {
+    // Switch to other team
+    if (game.currentTeam === 'A') {
+      game.currentTeam = 'B';
+      game.currentPlayerIndex = 0;
+    } else {
+      // All players have guessed, run the randomizer
+      await runRandomizer(interaction, gameId);
+      return;
+    }
+  }
+
+  // Update embed for next player
+  const updatedEmbed = createGameEmbed(game);
+  const numberButton = createNumberSelectionButton(gameId);
+  
+  await interaction.message.edit({ 
+    embeds: [updatedEmbed], 
+    components: [numberButton] 
+  });
+}
+
+async function runRandomizer(interaction, gameId) {
+  const game = global.activeMarbleGames[gameId];
+  if (!game) return;
+
+  const allGuesses = Object.values(game.playerGuesses);
+  let randomNumber;
+  let attempts = 0;
+  const maxAttempts = 100; // Prevent infinite loops
+
+  // Keep rolling until we hit a guessed number or max attempts
+  do {
+    randomNumber = Math.floor(Math.random() * 20) + 1;
+    attempts++;
+    
+    if (attempts >= maxAttempts) {
+      // Force a hit to prevent infinite loops
+      randomNumber = allGuesses[Math.floor(Math.random() * allGuesses.length)];
+      break;
+    }
+    
+    if (!allGuesses.includes(randomNumber)) {
+      // Show re-roll message
+      const rerollEmbed = new EmbedBuilder()
+        .setTitle('🎲 Randomizer Rolling...')
+        .setDescription(`**Number ${randomNumber}** - No hits! Re-rolling in 3 seconds...`)
+        .setColor(0xFFA500)
+        .setTimestamp();
+      
+      await interaction.message.edit({ embeds: [rerollEmbed], components: [] });
+      await new Promise(resolve => setTimeout(resolve, 3000));
+    }
+  } while (!allGuesses.includes(randomNumber));
+
+  // Find the winner
+  const winnerId = Object.keys(game.playerGuesses).find(
+    playerId => game.playerGuesses[playerId] === randomNumber
+  );
+  const winnerUser = game.players.find(p => p.id === winnerId);
+  const winnerTeam = game.teamA.some(p => p.id === winnerId) ? 'A' : 'B';
+  const loserTeam = winnerTeam === 'A' ? 'B' : 'A';
+
+  // Transfer marble
+  if (winnerTeam === 'A') {
+    game.teamAMarbles++;
+    game.teamBMarbles--;
+  } else {
+    game.teamBMarbles++;
+    game.teamAMarbles--;
+  }
+
+  const resultEmbed = new EmbedBuilder()
+    .setTitle('🎯 Randomiser Result!')
+    .setDescription(`**Number ${randomNumber}** was chosen!\\n**${winnerUser.displayName}** (Team ${winnerTeam}) wins this round!`)
+    .addFields(
+      { 
+        name: '🏆 Round Winner', 
+        value: `**${winnerUser.displayName}** guessed **${randomNumber}**`, 
+        inline: false 
+      },
+      { 
+        name: '📊 Current Scores', 
+        value: `🔴 **Team A:** ${game.teamAMarbles} marbles\\n🔵 **Team B:** ${game.teamBMarbles} marbles`, 
+        inline: false 
+      }
+    )
+    .setColor(winnerTeam === 'A' ? 0xFF4444 : 0x4444FF)
+    .setTimestamp();
+
+  await interaction.message.edit({ embeds: [resultEmbed], components: [] });
+
+  // Check win condition
+  if (game.teamAMarbles === 0 || game.teamBMarbles === 0 || game.teamAMarbles === 20 || game.teamBMarbles === 20) {
+    setTimeout(() => endGame(interaction, gameId), 3000);
+  } else {
+    setTimeout(() => nextRound(interaction, gameId), 5000);
+  }
+}
+
+async function nextRound(interaction, gameId) {
+  const game = global.activeMarbleGames[gameId];
+  if (!game) return;
+
+  // Reset for next round
+  game.round++;
+  game.playerGuesses = {};
+  
+  // Flip coin for next round
+  const coinFlip = Math.random() < 0.5 ? 'heads' : 'tails';
+  game.currentTeam = coinFlip === 'heads' ? 'A' : 'B';
+  game.currentPlayerIndex = 0;
+
+  const nextRoundEmbed = createGameEmbed(game, coinFlip);
+  const numberButton = createNumberSelectionButton(gameId);
+
+  await interaction.message.edit({ 
+    embeds: [nextRoundEmbed], 
+    components: [numberButton] 
+  });
+}
+
+async function endGame(interaction, gameId) {
+  const game = global.activeMarbleGames[gameId];
+  if (!game) return;
+
+  const winningTeam = game.teamAMarbles === 20 || game.teamBMarbles === 0 ? 'A' : 'B';
+  const winningPlayers = winningTeam === 'A' ? game.teamA : game.teamB;
+  const finalScoreA = game.teamAMarbles;
+  const finalScoreB = game.teamBMarbles;
+
+  const gameEndEmbed = new EmbedBuilder()
+    .setTitle('Marble Game Complete!')
+    .setDescription(`**Team ${winningTeam} Wins!**\\n\\nCongratulations to the victorious players!`)
+    .addFields(
+      { 
+        name: 'Winners', 
+        value: winningPlayers.map(p => `**${p.displayName}**`).join('\\n'), 
+        inline: true 
+      },
+      { 
+        name: 'Final Score', 
+        value: `🔴 **Team A:** ${finalScoreA} marbles\\n🔵 **Team B:** ${finalScoreB} marbles`, 
+        inline: true 
+      },
+      { 
+        name: 'Game Stats', 
+        value: `**Rounds Played:** ${game.round}\\n**Duration:** ${Math.round((Date.now() - game.createdAt) / 60000)} minutes`, 
+        inline: false 
+      }
+    )
+    .setColor(0x00FF7F)
+    .setFooter({ text: 'Thanks for playing the Marble Game!' })
+    .setTimestamp();
+
+  await interaction.message.edit({ embeds: [gameEndEmbed], components: [] });
+
+  // Clean up
+  delete global.activeMarbleGames[gameId];
 }
 
 client.login(token);
