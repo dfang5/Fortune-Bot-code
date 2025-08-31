@@ -39,9 +39,11 @@ let userData = fs.existsSync(DATA_FILE) ? JSON.parse(fs.readFileSync(DATA_FILE))
 let cooldowns = fs.existsSync(COOLDOWN_FILE) ? JSON.parse(fs.readFileSync(COOLDOWN_FILE)) : { scavenge: {}, labor: {} };
 
 if (!userData.guildItems) userData.guildItems = {}; // 🧠 Server-specific custom items
+if (!userData.xpData) userData.xpData = {}; // XP tracking data
 global.tempItems = {}; // 💾 Store items awaiting confirmation
 global.activeTrades = {}; // Store active trade sessions
 global.activeMarbleGames = {}; // Store active marble game sessions
+global.messageTracker = {}; // Track recent messages for conversation detection
 
 // Save functions
 function saveUserData() { fs.writeFileSync(DATA_FILE, JSON.stringify(userData, null, 2)); }
@@ -63,6 +65,54 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent
   ]
+});
+
+// XP System - Message tracking for conversation detection
+client.on('messageCreate', async (message) => {
+  // Ignore bot messages
+  if (message.author.bot) return;
+
+  const userId = message.author.id;
+  const channelId = message.channel.id;
+  const now = Date.now();
+
+  // Initialize user data if needed
+  if (!userData[userId]) userData[userId] = { cash: 0, artefacts: [], bankBalance: 0 };
+  if (!userData.xpData[userId]) userData.xpData[userId] = { xp: 0, messageCount: 0, lastMessage: 0 };
+
+  // Initialize channel tracking
+  if (!global.messageTracker[channelId]) global.messageTracker[channelId] = [];
+
+  // Add this message to channel tracker
+  global.messageTracker[channelId].push({
+    userId: userId,
+    timestamp: now
+  });
+
+  // Clean old messages (only keep last 5 minutes)
+  global.messageTracker[channelId] = global.messageTracker[channelId].filter(
+    msg => now - msg.timestamp < 300000 // 5 minutes
+  );
+
+  // Check if this is part of a conversation
+  const recentMessages = global.messageTracker[channelId].filter(
+    msg => now - msg.timestamp < 120000 // 2 minutes
+  );
+
+  // Get unique users who have sent messages in the last 2 minutes
+  const uniqueUsers = new Set(recentMessages.map(msg => msg.userId));
+
+  // Only award XP if there's a conversation (at least 2 different users)
+  if (uniqueUsers.size >= 2) {
+    userData.xpData[userId].messageCount++;
+
+    // Award XP every 2 messages
+    if (userData.xpData[userId].messageCount % 2 === 0) {
+      userData.xpData[userId].xp++;
+      userData.xpData[userId].lastMessage = now;
+      saveUserData();
+    }
+  }
 });
 
 client.once('clientReady', async () => {
@@ -194,6 +244,10 @@ client.once('clientReady', async () => {
           .setRequired(true)
       ),
 
+    new SlashCommandBuilder()
+      .setName('convert')
+      .setDescription('Convert your XP into cash (1 XP = $2)'),
+
   ];
 
   const rest = new REST({ version:'10' }).setToken(token);
@@ -302,6 +356,10 @@ client.on('interactionCreate', async interaction => {
 
       case 'marble-game':
         await handleMarbleGame(interaction);
+        break;
+
+      case 'convert':
+        await handleConvertCommand(interaction, userId);
         break;
     }
   } catch (error) {
@@ -429,18 +487,18 @@ async function handleBankCommand(interaction, userId) {
   saveUserData();
 
   const successEmbed = new EmbedBuilder()
-    .setTitle('🏦 Bank Deposit Completed')
-    .setDescription(`**Successfully deposited $${amount.toLocaleString()}** into your secure bank account.`)
+    .setTitle('Bank Deposit Completed')
+    .setDescription(`Successfully deposited $${amount.toLocaleString()} into your secure bank account.`)
     .addFields(
-      { name: '💵 Transaction Amount', value: `**$${amount.toLocaleString()}**`, inline: true },
-      { name: '💰 Remaining Cash', value: `$${userData[userId].cash.toLocaleString()}`, inline: true },
-      { name: '🏦 New Bank Balance', value: `**$${userData[userId].bankBalance.toLocaleString()}**`, inline: true },
-      { name: '📈 Bank Capacity Used', value: `${((userData[userId].bankBalance / 50000) * 100).toFixed(1)}%`, inline: true },
-      { name: '💾 Available Space', value: `$${(50000 - userData[userId].bankBalance).toLocaleString()}`, inline: true },
-      { name: '🔒 Security Status', value: '**Funds Protected**', inline: true }
+      { name: 'Transaction Amount', value: `$${amount.toLocaleString()}`, inline: true },
+      { name: 'Remaining Cash', value: `$${userData[userId].cash.toLocaleString()}`, inline: true },
+      { name: 'New Bank Balance', value: `$${userData[userId].bankBalance.toLocaleString()}`, inline: true },
+      { name: 'Bank Capacity Used', value: `${((userData[userId].bankBalance / 50000) * 100).toFixed(1)}%`, inline: true },
+      { name: 'Available Space', value: `$${(50000 - userData[userId].bankBalance).toLocaleString()}`, inline: true },
+      { name: 'Security Status', value: 'Funds Protected', inline: true }
     )
     .setColor(0x00FF7F)
-    .setFooter({ text: '🔒 Your banked money is safe from theft attempts' })
+    .setFooter({ text: 'Your banked money is safe from theft attempts' })
     .setTimestamp();
 
   await interaction.reply({ embeds: [successEmbed] });
@@ -634,13 +692,13 @@ async function handleScavengeCommand(interaction, userId) {
   saveCooldowns();
 
   const scavengeEmbed = new EmbedBuilder()
-    .setTitle('🏕️ Scavenge Complete')
-    .setDescription(`**You discovered a valuable artefact during your search!**`)
+    .setTitle('Scavenge Complete')
+    .setDescription('You discovered a valuable artefact during your search!')
     .addFields(
-      { name: '💎 Artefact Found', value: `**${artefact}**`, inline: true },
-      { name: '✨ Rarity', value: `**${selectedRarity.name}**`, inline: true },
-      { name: '💰 Estimated Value', value: `**$${selectedRarity.value.toLocaleString()}**`, inline: true },
-      { name: '⏰ Next Scavenge', value: 'Available in **2 hours**', inline: false }
+      { name: 'Artefact Found', value: `${artefact}`, inline: true },
+      { name: 'Rarity', value: `${selectedRarity.name}`, inline: true },
+      { name: 'Estimated Value', value: `$${selectedRarity.value.toLocaleString()}`, inline: true },
+      { name: 'Next Scavenge', value: 'Available in 2 hours', inline: false }
     )
     .setColor(selectedRarity.color)
     .setTimestamp();
@@ -692,6 +750,8 @@ async function handleLaborCommand(interaction, userId) {
 
 async function handleInventoryCommand(interaction, userId) {
   const user = userData[userId];
+  const userXpData = userData.xpData[userId] || { xp: 0, messageCount: 0, lastMessage: 0 };
+  
   const totalValue = user.artefacts.reduce((sum, artefact) => {
     const rarity = getRarityByArtefact(artefact);
     return sum + (rarity ? rarity.value : 0);
@@ -710,12 +770,16 @@ async function handleInventoryCommand(interaction, userId) {
       { name: 'Cash on Hand', value: `$${user.cash.toLocaleString()}`, inline: true },
       { name: 'Bank Balance', value: `$${(user.bankBalance || 0).toLocaleString()}`, inline: true },
       { name: 'Total Wealth', value: `$${(user.cash + (user.bankBalance || 0)).toLocaleString()}`, inline: true },
+      { name: 'Experience Points', value: `${userXpData.xp.toLocaleString()} XP`, inline: true },
+      { name: 'XP Cash Value', value: `$${(userXpData.xp * 2).toLocaleString()}`, inline: true },
+      { name: 'Messages Sent', value: `${userXpData.messageCount.toLocaleString()}`, inline: true },
       { name: 'Artefacts Owned', value: user.artefacts.length.toString(), inline: true },
       { name: 'Collection Value', value: `$${totalValue.toLocaleString()}`, inline: true },
       { name: 'Bank Capacity', value: `${(((user.bankBalance || 0) / 50000) * 100).toFixed(1)}%`, inline: true },
       { name: 'Artefact Collection', value: artefactList, inline: false }
     )
     .setColor(0x339AF0)
+    .setFooter({ text: 'Use /convert to turn XP into cash (1 XP = $2)' })
     .setTimestamp();
 
   await interaction.reply({ embeds: [inventoryEmbed] });
@@ -1365,6 +1429,63 @@ async function handleComponentInteraction(interaction) {
       embeds: [tradeEmbed], 
       components 
     });
+
+  } else if (customId.startsWith('convert_accept_')) {
+    const userId = customId.replace('convert_accept_', '');
+    
+    if (interaction.user.id !== userId) {
+      return await interaction.reply({ 
+        content: '❌ This conversion is not for you!', 
+        ephemeral: true 
+      });
+    }
+
+    const userXpData = userData.xpData[userId];
+    if (!userXpData || userXpData.xp === 0) {
+      return await interaction.reply({ 
+        content: '❌ You have no XP to convert!', 
+        ephemeral: true 
+      });
+    }
+
+    const xpToConvert = userXpData.xp;
+    const cashEarned = xpToConvert * 2;
+
+    // Convert XP to cash
+    userData[userId].cash += cashEarned;
+    userData.xpData[userId].xp = 0;
+    saveUserData();
+
+    const successEmbed = new EmbedBuilder()
+      .setTitle('XP Conversion Successful')
+      .setDescription('Your XP has been successfully converted to cash!')
+      .addFields(
+        { name: 'XP Converted', value: `${xpToConvert.toLocaleString()} XP`, inline: true },
+        { name: 'Cash Earned', value: `$${cashEarned.toLocaleString()}`, inline: true },
+        { name: 'New Cash Total', value: `$${userData[userId].cash.toLocaleString()}`, inline: true }
+      )
+      .setColor(0x00FF7F)
+      .setTimestamp();
+
+    await interaction.update({ embeds: [successEmbed], components: [] });
+
+  } else if (customId.startsWith('convert_decline_')) {
+    const userId = customId.replace('convert_decline_', '');
+    
+    if (interaction.user.id !== userId) {
+      return await interaction.reply({ 
+        content: '❌ This conversion is not for you!', 
+        ephemeral: true 
+      });
+    }
+
+    const declineEmbed = new EmbedBuilder()
+      .setTitle('XP Conversion Cancelled')
+      .setDescription('You have chosen to keep your XP. You can convert it later using `/convert`.')
+      .setColor(0xFF9F43)
+      .setTimestamp();
+
+    await interaction.update({ embeds: [declineEmbed], components: [] });
   }
 }
 
@@ -2013,7 +2134,7 @@ async function processNumberGuess(interaction, gameId) {
   game.playerGuesses[playerId] = number;
 
   await interaction.reply({ 
-    content: `**You selected ${number}!** Waiting for other players...`, 
+    content: `✅ **You selected ${number}!** Waiting for other players...`, 
     ephemeral: true 
   });
 
@@ -2067,7 +2188,7 @@ async function runRandomizer(interaction, gameId) {
     if (!allGuesses.includes(randomNumber)) {
       // Show re-roll message
       const rerollEmbed = new EmbedBuilder()
-        .setTitle('Randomiser Rolling...')
+        .setTitle('🎲 Randomizer Rolling...')
         .setDescription(`**Number ${randomNumber}** - No hits! Re-rolling in 3 seconds...`)
         .setColor(0xFFA500)
         .setTimestamp();
@@ -2095,16 +2216,16 @@ async function runRandomizer(interaction, gameId) {
   }
 
   const resultEmbed = new EmbedBuilder()
-    .setTitle('Randomiser Result!')
+    .setTitle('🎯 Randomiser Result!')
     .setDescription(`**Number ${randomNumber}** was chosen!\n**${winnerUser.displayName}** (Team ${winnerTeam}) wins this round!`)
     .addFields(
       { 
-        name: 'Round Winner', 
+        name: '🏆 Round Winner', 
         value: `**${winnerUser.displayName}** guessed **${randomNumber}**`, 
         inline: false 
       },
       { 
-        name: 'Current Scores', 
+        name: '📊 Current Scores', 
         value: `🔴 **Team A:** ${game.teamAMarbles} marbles\n🔵 **Team B:** ${game.teamBMarbles} marbles`, 
         inline: false 
       }
@@ -2161,26 +2282,26 @@ async function endGame(interaction, gameId) {
   saveUserData();
 
   const gameEndEmbed = new EmbedBuilder()
-    .setTitle('Marble Game Complete!')
+    .setTitle('🏆 Marble Game Complete!')
     .setDescription(`**Team ${winningTeam} Wins!**\n\nCongratulations to the victorious players!`)
     .addFields(
       { 
-        name: 'Winners', 
+        name: '🎉 Winners', 
         value: winningPlayers.map(p => `**${p.displayName}**`).join('\\n'), 
         inline: true 
       },
       { 
-        name: 'Final Score', 
+        name: '🎯 Final Score', 
         value: `🔴 **Team A:** ${finalScoreA} marbles\n🔵 **Team B:** ${finalScoreB} marbles`, 
         inline: true 
       },
       { 
-        name: 'Prize Distribution', 
+        name: '💰 Prize Distribution', 
         value: `**Each Winner Receives:** $${winningsPerPlayer.toLocaleString()}\n**Total Pot:** $${game.totalPot.toLocaleString()}`, 
         inline: false 
       },
       { 
-        name: 'Game Stats', 
+        name: '📊 Game Stats', 
         value: `**Rounds Played:** ${game.round}\n**Duration:** ${Math.round((Date.now() - game.createdAt) / 60000)} minutes`, 
         inline: false 
       }
@@ -2193,6 +2314,63 @@ async function endGame(interaction, gameId) {
 
   // Clean up
   delete global.activeMarbleGames[gameId];
+}
+
+// === XP CONVERSION SYSTEM ===
+
+async function handleConvertCommand(interaction, userId) {
+  // Initialize user XP data if needed
+  if (!userData.xpData[userId]) {
+    userData.xpData[userId] = { xp: 0, messageCount: 0, lastMessage: 0 };
+  }
+
+  const userXpData = userData.xpData[userId];
+
+  if (userXpData.xp === 0) {
+    const noXpEmbed = new EmbedBuilder()
+      .setTitle('No XP Available')
+      .setDescription('You don\'t have any XP to convert yet.')
+      .addFields(
+        { name: 'Current XP', value: '0 XP', inline: true },
+        { name: 'How to Earn XP', value: 'Participate in conversations! You earn 1 XP for every 2 messages sent during active conversations.', inline: false },
+        { name: 'Anti-Spam Protection', value: 'XP is only awarded when you\'re actively conversing with other users in the same channel.', inline: false }
+      )
+      .setColor(0xFF9F43)
+      .setTimestamp();
+
+    return await interaction.reply({ embeds: [noXpEmbed] });
+  }
+
+  const cashValue = userXpData.xp * 2;
+
+  const convertEmbed = new EmbedBuilder()
+    .setTitle('XP Conversion Available')
+    .setDescription('Would you like to convert your XP into cash?')
+    .addFields(
+      { name: 'Available XP', value: `${userXpData.xp.toLocaleString()} XP`, inline: true },
+      { name: 'Conversion Rate', value: '1 XP = $2', inline: true },
+      { name: 'Cash Value', value: `$${cashValue.toLocaleString()}`, inline: true },
+      { name: 'Current Cash', value: `$${userData[userId].cash.toLocaleString()}`, inline: true },
+      { name: 'Cash After Conversion', value: `$${(userData[userId].cash + cashValue).toLocaleString()}`, inline: true },
+      { name: 'Note', value: 'Converted cash goes directly to your wallet (not bank)', inline: false }
+    )
+    .setColor(0x5865F2)
+    .setFooter({ text: 'This action cannot be undone' })
+    .setTimestamp();
+
+  const acceptButton = new ButtonBuilder()
+    .setCustomId(`convert_accept_${userId}`)
+    .setLabel('Accept Conversion')
+    .setStyle(ButtonStyle.Success);
+
+  const declineButton = new ButtonBuilder()
+    .setCustomId(`convert_decline_${userId}`)
+    .setLabel('Keep XP')
+    .setStyle(ButtonStyle.Secondary);
+
+  const row = new ActionRowBuilder().addComponents(acceptButton, declineButton);
+
+  await interaction.reply({ embeds: [convertEmbed], components: [row] });
 }
 
 client.login(token);
