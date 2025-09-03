@@ -44,6 +44,7 @@ global.tempItems = {}; // 💾 Store items awaiting confirmation
 global.activeTrades = {}; // Store active trade sessions
 global.activeMarbleGames = {}; // Store active marble game sessions
 global.messageTracker = {}; // Track recent messages for conversation detection
+global.massSellSessions = {}; // Store active mass sell sessions
 
 // Save functions
 function saveUserData() { fs.writeFileSync(DATA_FILE, JSON.stringify(userData, null, 2)); }
@@ -998,32 +999,26 @@ async function handleMassSellCommand(interaction, userId) {
     return await interaction.reply({ embeds: [noArtefactsEmbed] });
   }
 
-  let totalEarnings = 0;
-  const soldItems = [];
+  // Create a temporary session for this mass sell
+  const sessionId = `${userId}_${Date.now()}`;
+  global.massSellSessions = global.massSellSessions || {};
+  global.massSellSessions[sessionId] = {
+    userId: userId,
+    selectedArtefacts: [],
+    createdAt: Date.now()
+  };
 
-  userData[userId].artefacts.forEach(artefact => {
-    const rarity = getRarityByArtefact(artefact);
-    const sellValue = rarity ? rarity.sell : 100;
-    totalEarnings += sellValue;
-    soldItems.push(`${artefact} - $${sellValue.toLocaleString()}`);
-  });
+  const massSellEmbed = createMassSellEmbed(user.artefacts, []);
+  const components = createMassSellComponents(sessionId, user.artefacts);
 
-  userData[userId].cash += totalEarnings;
-  userData[userId].artefacts = [];
-  saveUserData();
+  await interaction.reply({ embeds: [massSellEmbed], components });
 
-  const massellEmbed = new EmbedBuilder()
-    .setTitle('Mass Sale Complete')
-    .setDescription('Successfully sold your entire artefact collection.')
-    .addFields(
-      { name: 'Items Sold', value: soldItems.join('\n'), inline: false },
-      { name: 'Total Earnings', value: `$${totalEarnings.toLocaleString()}`, inline: true },
-      { name: 'New Cash Total', value: `$${userData[userId].cash.toLocaleString()}`, inline: true }
-    )
-    .setColor(0x51CF66)
-    .setTimestamp();
-
-  await interaction.reply({ embeds: [massellEmbed] });
+  // Auto-cleanup after 5 minutes
+  setTimeout(() => {
+    if (global.massSellSessions[sessionId]) {
+      delete global.massSellSessions[sessionId];
+    }
+  }, 300000);
 }
 
 async function handleAddItemCommand(interaction) {
@@ -1486,6 +1481,110 @@ async function handleComponentInteraction(interaction) {
       .setTimestamp();
 
     await interaction.update({ embeds: [declineEmbed], components: [] });
+
+  } else if (customId.startsWith('mass_sell_add_')) {
+    const sessionId = customId.replace('mass_sell_add_', '');
+    const session = global.massSellSessions?.[sessionId];
+    if (!session || interaction.user.id !== session.userId) return;
+
+    const selectedArtefacts = interaction.values;
+    session.selectedArtefacts.push(...selectedArtefacts);
+
+    const user = userData[session.userId];
+    const updatedEmbed = createMassSellEmbed(user.artefacts, session.selectedArtefacts);
+    const updatedComponents = createMassSellComponents(sessionId, user.artefacts);
+
+    await interaction.update({ embeds: [updatedEmbed], components: updatedComponents });
+
+  } else if (customId.startsWith('mass_sell_remove_')) {
+    const sessionId = customId.replace('mass_sell_remove_', '');
+    const session = global.massSellSessions?.[sessionId];
+    if (!session || interaction.user.id !== session.userId) return;
+
+    const artefactsToRemove = interaction.values;
+    session.selectedArtefacts = session.selectedArtefacts.filter(art => !artefactsToRemove.includes(art));
+
+    const user = userData[session.userId];
+    const updatedEmbed = createMassSellEmbed(user.artefacts, session.selectedArtefacts);
+    const updatedComponents = createMassSellComponents(sessionId, user.artefacts);
+
+    await interaction.update({ embeds: [updatedEmbed], components: updatedComponents });
+
+  } else if (customId.startsWith('mass_sell_select_all_')) {
+    const sessionId = customId.replace('mass_sell_select_all_', '');
+    const session = global.massSellSessions?.[sessionId];
+    if (!session || interaction.user.id !== session.userId) return;
+
+    const user = userData[session.userId];
+    session.selectedArtefacts = [...user.artefacts];
+
+    const updatedEmbed = createMassSellEmbed(user.artefacts, session.selectedArtefacts);
+    const updatedComponents = createMassSellComponents(sessionId, user.artefacts);
+
+    await interaction.update({ embeds: [updatedEmbed], components: updatedComponents });
+
+  } else if (customId.startsWith('mass_sell_confirm_')) {
+    const sessionId = customId.replace('mass_sell_confirm_', '');
+    const session = global.massSellSessions?.[sessionId];
+    if (!session || interaction.user.id !== session.userId) return;
+
+    if (session.selectedArtefacts.length === 0) {
+      return await interaction.reply({ 
+        content: '❌ You haven\'t selected any artefacts to sell!', 
+        ephemeral: true 
+      });
+    }
+
+    let totalEarnings = 0;
+    const soldItems = [];
+
+    // Process each selected artefact
+    session.selectedArtefacts.forEach(artefact => {
+      const artefactIndex = userData[session.userId].artefacts.indexOf(artefact);
+      if (artefactIndex > -1) {
+        const rarity = getRarityByArtefact(artefact);
+        const sellValue = rarity ? rarity.sell : 100;
+        totalEarnings += sellValue;
+        soldItems.push(`${artefact} - $${sellValue.toLocaleString()}`);
+        userData[session.userId].artefacts.splice(artefactIndex, 1);
+      }
+    });
+
+    userData[session.userId].cash += totalEarnings;
+    saveUserData();
+
+    const successEmbed = new EmbedBuilder()
+      .setTitle('Selected Artefacts Sold')
+      .setDescription(`Successfully sold ${session.selectedArtefacts.length} selected artefact(s).`)
+      .addFields(
+        { name: 'Items Sold', value: soldItems.join('\n'), inline: false },
+        { name: 'Total Earnings', value: `$${totalEarnings.toLocaleString()}`, inline: true },
+        { name: 'New Cash Total', value: `$${userData[session.userId].cash.toLocaleString()}`, inline: true },
+        { name: 'Remaining Artefacts', value: userData[session.userId].artefacts.length.toString(), inline: true }
+      )
+      .setColor(0x00FF7F)
+      .setTimestamp();
+
+    await interaction.update({ embeds: [successEmbed], components: [] });
+
+    // Clean up session
+    delete global.massSellSessions[sessionId];
+
+  } else if (customId.startsWith('mass_sell_cancel_')) {
+    const sessionId = customId.replace('mass_sell_cancel_', '');
+    const session = global.massSellSessions?.[sessionId];
+    if (!session || interaction.user.id !== session.userId) return;
+
+    const cancelEmbed = new EmbedBuilder()
+      .setTitle('Mass Sale Cancelled')
+      .setDescription('You have cancelled the mass sale. No artefacts were sold.')
+      .setColor(0xFF9F43)
+      .setTimestamp();
+
+    await interaction.update({ embeds: [cancelEmbed], components: [] });
+
+    // Clean up session
+    delete global.massSellSessions[sessionId];
   }
 }
 
@@ -2314,6 +2413,125 @@ async function endGame(interaction, gameId) {
 
   // Clean up
   delete global.activeMarbleGames[gameId];
+}
+
+// === MASS SELL SYSTEM ===
+
+function createMassSellEmbed(allArtefacts, selectedArtefacts) {
+  const selectedValue = selectedArtefacts.reduce((sum, artefact) => {
+    const rarity = getRarityByArtefact(artefact);
+    return sum + (rarity ? rarity.sell : 100);
+  }, 0);
+
+  const availableArtefacts = allArtefacts.filter(art => !selectedArtefacts.includes(art));
+
+  return new EmbedBuilder()
+    .setTitle('Select Artefacts to Sell')
+    .setDescription('Choose which artefacts you want to sell from your collection.')
+    .addFields(
+      { 
+        name: 'Available Artefacts', 
+        value: availableArtefacts.length > 0 ? 
+          availableArtefacts.slice(0, 10).map(art => {
+            const rarity = getRarityByArtefact(art);
+            return `${art} (${rarity ? rarity.name : 'Unknown'}) - $${rarity ? rarity.sell.toLocaleString() : '100'}`;
+          }).join('\n') + (availableArtefacts.length > 10 ? `\n... and ${availableArtefacts.length - 10} more` : '') :
+          'None available',
+        inline: false 
+      },
+      { 
+        name: 'Selected for Sale', 
+        value: selectedArtefacts.length > 0 ? 
+          selectedArtefacts.map(art => {
+            const rarity = getRarityByArtefact(art);
+            return `${art} - $${rarity ? rarity.sell.toLocaleString() : '100'}`;
+          }).join('\n') : 
+          'None selected',
+        inline: false 
+      },
+      { 
+        name: 'Total Sale Value', 
+        value: `$${selectedValue.toLocaleString()}`, 
+        inline: true 
+      },
+      { 
+        name: 'Items to Sell', 
+        value: selectedArtefacts.length.toString(), 
+        inline: true 
+      }
+    )
+    .setColor(selectedArtefacts.length > 0 ? 0x00FF7F : 0x339AF0)
+    .setFooter({ text: 'Use the buttons below to add/remove artefacts and confirm sale' })
+    .setTimestamp();
+}
+
+function createMassSellComponents(sessionId, allArtefacts) {
+  const session = global.massSellSessions[sessionId];
+  if (!session) return [];
+
+  const availableArtefacts = allArtefacts.filter(art => !session.selectedArtefacts.includes(art));
+
+  const components = [];
+
+  // Add artefact select menu if there are available artefacts
+  if (availableArtefacts.length > 0) {
+    const addOptions = availableArtefacts.slice(0, 25).map((artefact, index) => {
+      const rarity = getRarityByArtefact(artefact);
+      return {
+        label: artefact,
+        description: `${rarity ? rarity.name : 'Unknown'} - $${rarity ? rarity.sell.toLocaleString() : '100'}`,
+        value: artefact
+      };
+    });
+
+    const addSelectMenu = new StringSelectMenuBuilder()
+      .setCustomId(`mass_sell_add_${sessionId}`)
+      .setPlaceholder('Add artefacts to sell')
+      .addOptions(addOptions);
+
+    components.push(new ActionRowBuilder().addComponents(addSelectMenu));
+  }
+
+  // Remove artefact select menu if there are selected artefacts
+  if (session.selectedArtefacts.length > 0) {
+    const removeOptions = session.selectedArtefacts.slice(0, 25).map(artefact => {
+      const rarity = getRarityByArtefact(artefact);
+      return {
+        label: artefact,
+        description: `Remove from sale - $${rarity ? rarity.sell.toLocaleString() : '100'}`,
+        value: artefact
+      };
+    });
+
+    const removeSelectMenu = new StringSelectMenuBuilder()
+      .setCustomId(`mass_sell_remove_${sessionId}`)
+      .setPlaceholder('Remove artefacts from sale')
+      .addOptions(removeOptions);
+
+    components.push(new ActionRowBuilder().addComponents(removeSelectMenu));
+  }
+
+  // Action buttons
+  const actionRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`mass_sell_confirm_${sessionId}`)
+      .setLabel(`Sell Selected (${session.selectedArtefacts.length})`)
+      .setStyle(ButtonStyle.Success)
+      .setDisabled(session.selectedArtefacts.length === 0),
+    new ButtonBuilder()
+      .setCustomId(`mass_sell_select_all_${sessionId}`)
+      .setLabel('Select All')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(availableArtefacts.length === 0),
+    new ButtonBuilder()
+      .setCustomId(`mass_sell_cancel_${sessionId}`)
+      .setLabel('Cancel')
+      .setStyle(ButtonStyle.Danger)
+  );
+
+  components.push(actionRow);
+
+  return components;
 }
 
 // === XP CONVERSION SYSTEM ===
