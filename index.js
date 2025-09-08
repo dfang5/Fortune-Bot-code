@@ -500,9 +500,10 @@ client.once('clientReady', async () => {
   try {
     console.log('Started refreshing application (/) commands.');
     
-    // Register public commands globally
+    // Register all commands globally (public + developer)
+    // Developer commands will only work for authorized users due to permission checks
     await rest.put(Routes.applicationCommands(clientId), { 
-      body: commands.map(command => command.toJSON()) 
+      body: [...commands, ...devCommands].map(command => command.toJSON()) 
     });
     
     // Register developer commands for specific users only
@@ -510,13 +511,29 @@ client.once('clientReady', async () => {
     const guilds = client.guilds.cache;
     for (const [guildId, guild] of guilds) {
       try {
+        // Fetch guild members if not cached
+        if (!guild.members.cache.has(DEVELOPER_ID) && !guild.members.cache.has(CO_DEVELOPER_ID)) {
+          try {
+            await guild.members.fetch();
+          } catch (fetchErr) {
+            console.log(`Could not fetch members for guild ${guildId}`);
+          }
+        }
+
         // Check if developers are in this guild
         const hasDevelopers = guild.members.cache.has(DEVELOPER_ID) || 
                              guild.members.cache.has(CO_DEVELOPER_ID);
         
         if (hasDevelopers) {
+          console.log(`Registering developer commands for guild: ${guild.name} (${guildId})`);
           await rest.put(Routes.applicationGuildCommands(clientId, guildId), {
             body: [...commands, ...devCommands].map(command => command.toJSON())
+          });
+        } else {
+          console.log(`No developers found in guild: ${guild.name} (${guildId})`);
+          // Register only public commands for this guild
+          await rest.put(Routes.applicationGuildCommands(clientId, guildId), {
+            body: commands.map(command => command.toJSON())
           });
         }
       } catch (guildErr) {
