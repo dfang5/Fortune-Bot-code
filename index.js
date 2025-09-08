@@ -40,6 +40,12 @@ let cooldowns = fs.existsSync(COOLDOWN_FILE) ? JSON.parse(fs.readFileSync(COOLDO
 
 if (!userData.guildItems) userData.guildItems = {}; // 🧠 Server-specific custom items
 if (!userData.xpData) userData.xpData = {}; // XP tracking data
+if (!userData.eventSystem) userData.eventSystem = { // Event system data
+  currentEvent: null,
+  lastEventStart: 0,
+  nextEventTime: Date.now() + (4 * 24 * 60 * 60 * 1000), // 4 days from now
+  eventHistory: []
+};
 global.tempItems = {}; // 💾 Store items awaiting confirmation
 global.activeTrades = {}; // Store active trade sessions
 global.activeMarbleGames = {}; // Store active marble game sessions
@@ -53,12 +59,192 @@ function saveCooldowns() { fs.writeFileSync(COOLDOWN_FILE, JSON.stringify(cooldo
 // Rarity and artefact config
 const rarities = [
   { name:'Common', chance:65, color:0xAAAAAA, value:100, sell:150, items:['Quartz','Mica','Olivine'] },
-  { name:'Uncommon', chance:20, color:0x00FF00, value:700, sell:550, items:['Garnet','Talc','Magnetite'] },
-  { name:'Rare', chance:10, color:0x00008B, value:2500, sell:1500, items:['Eye of Monazite','Chest of Xenotime','Euxenite'] },
-  { name:'Legendary', chance:4, color:0xFFD700, value:10000, sell:10000, items:['Watch of Scandium','Statue of Bastnasite','Allanite'] },
-  { name:'Unknown', chance:1, color:0x000000, value:1000000, sell:1000000, items:['Gem of Diamond','Kyawthuite'] }
+  { name:'Uncommon', chance:20, color:0x00FF00, value:500, sell:500, items:['Garnet','Talc','Magnetite'] },
+  { name:'Rare', chance:10, color:0x00008B, value:1500, sell:1500, items:['Eye of Monazite','Chest of Xenotime','Euxenite'] },
+  { name:'Legendary', chance:4, color:0xFFD700, value:5000, sell:5000, items:['Watch of Scandium','Statue of Bastnasite','Allanite'] },
+  { name:'Unknown', chance:1, color:0x000000, value:15000, sell:15000, items:['Gem of Diamond','Kyawthuite'] }
 ];
 function getRarityByArtefact(name) { return rarities.find(r => r.items.includes(name)); }
+
+// === EVENT SYSTEM ===
+
+// Get all possible artefacts from all rarities
+function getAllArtefacts() {
+  return rarities.flatMap(rarity => rarity.items);
+}
+
+// Check and handle event system
+function checkAndHandleEvents() {
+  const now = Date.now();
+  const eventData = userData.eventSystem;
+
+  // Check if current event should end
+  if (eventData.currentEvent && now >= eventData.currentEvent.endTime) {
+    endCurrentEvent();
+  }
+
+  // Check if new event should start
+  if (!eventData.currentEvent && now >= eventData.nextEventTime) {
+    startNewEvent();
+  }
+}
+
+function startNewEvent() {
+  const allArtefacts = getAllArtefacts();
+  const now = Date.now();
+  
+  // Randomly select two different artefacts
+  const shuffledArtefacts = [...allArtefacts].sort(() => Math.random() - 0.5);
+  const negativeArtefact = shuffledArtefacts[0];
+  const positiveArtefact = shuffledArtefacts[1];
+
+  const newEvent = {
+    id: `event_${now}`,
+    startTime: now,
+    endTime: now + (24 * 60 * 60 * 1000), // 24 hours
+    negativeArtefact,
+    positiveArtefact,
+    type: 'mine_collapse'
+  };
+
+  userData.eventSystem.currentEvent = newEvent;
+  userData.eventSystem.lastEventStart = now;
+  userData.eventSystem.nextEventTime = now + (4 * 24 * 60 * 60 * 1000); // Next event in 4 days
+  userData.eventSystem.eventHistory.unshift(newEvent);
+
+  // Keep only last 10 events in history
+  if (userData.eventSystem.eventHistory.length > 10) {
+    userData.eventSystem.eventHistory = userData.eventSystem.eventHistory.slice(0, 10);
+  }
+
+  saveUserData();
+  broadcastEventStart(newEvent);
+}
+
+function endCurrentEvent() {
+  const event = userData.eventSystem.currentEvent;
+  if (!event) return;
+
+  userData.eventSystem.currentEvent = null;
+  saveUserData();
+  broadcastEventEnd(event);
+}
+
+async function broadcastEventStart(event) {
+  try {
+    // Create event start embed
+    const eventEmbed = new EmbedBuilder()
+      .setTitle('🚨 MINING CRISIS ALERT!')
+      .setDescription(`**A catastrophic mine collapse has occurred in the ${event.negativeArtefact} mining sector!**`)
+      .addFields(
+        { 
+          name: '💥 Mine Collapse Report', 
+          value: `The **${event.negativeArtefact}** mine has suffered a devastating collapse! Explorers cannot approach the mining site due to unstable conditions and falling debris.`, 
+          inline: false 
+        },
+        { 
+          name: '🚫 Scavenging Restriction', 
+          value: `**${event.negativeArtefact}** cannot be scavenged during this 24-hour emergency period while repair crews work to stabilize the site.`, 
+          inline: false 
+        },
+        { 
+          name: '🎉 Unexpected Opportunity', 
+          value: `However, the nearby **${event.positiveArtefact}** mine has expanded due to shifting geological conditions, creating new accessible veins!`, 
+          inline: false 
+        },
+        { 
+          name: '📈 Enhanced Discovery Rate', 
+          value: `**${event.positiveArtefact}** discovery chances have **doubled** during this event! Scavenge while this opportunity lasts!`, 
+          inline: false 
+        },
+        { 
+          name: '⏰ Event Duration', 
+          value: 'This mining crisis will last exactly **24 hours**', 
+          inline: true 
+        },
+        { 
+          name: '🔧 Estimated Repair Time', 
+          value: 'Mine restoration crews are working around the clock', 
+          inline: true 
+        }
+      )
+      .setColor(0xFF4500)
+      .setFooter({ text: 'Fortune Bot Mining Authority • Emergency Broadcast System' })
+      .setTimestamp();
+
+    // Send to all channels where the bot is active (this is a simplified approach)
+    // In a real implementation, you'd want to store channel IDs to broadcast to
+    console.log('🚨 MINING EVENT STARTED:', event);
+    
+  } catch (error) {
+    console.error('Error broadcasting event start:', error);
+  }
+}
+
+async function broadcastEventEnd(event) {
+  try {
+    const eventEmbed = new EmbedBuilder()
+      .setTitle('✅ MINING OPERATIONS RESTORED')
+      .setDescription('**The mining crisis has been resolved!**')
+      .addFields(
+        { 
+          name: '🔧 Restoration Complete', 
+          value: `The **${event.negativeArtefact}** mine has been fully repaired and stabilized. Safety inspectors have cleared the site for normal operations.`, 
+          inline: false 
+        },
+        { 
+          name: '📊 Mining Status', 
+          value: `**${event.negativeArtefact}** is now available for scavenging again at normal rates.`, 
+          inline: false 
+        },
+        { 
+          name: '🏗️ Geological Shift', 
+          value: `The **${event.positiveArtefact}** mine has returned to standard geological conditions and normal discovery rates.`, 
+          inline: false 
+        },
+        { 
+          name: '📈 Operations Summary', 
+          value: 'All mining sectors have returned to baseline scavenging probabilities', 
+          inline: false 
+        }
+      )
+      .setColor(0x00FF7F)
+      .setFooter({ text: 'Fortune Bot Mining Authority • All Clear Signal' })
+      .setTimestamp();
+
+    console.log('✅ MINING EVENT ENDED:', event);
+
+  } catch (error) {
+    console.error('Error broadcasting event end:', error);
+  }
+}
+
+// Modified scavenge function to account for events
+function getModifiedArtefactChances() {
+  const event = userData.eventSystem.currentEvent;
+  if (!event) return rarities; // No event active, return normal chances
+
+  // Create modified rarities based on current event
+  return rarities.map(rarity => {
+    const modifiedItems = rarity.items.map(item => {
+      if (item === event.negativeArtefact) {
+        // This artefact cannot be found during the event
+        return null;
+      }
+      return item;
+    }).filter(item => item !== null);
+
+    // If positive artefact is in this rarity, double its effective chance
+    const hasPositiveArtefact = rarity.items.includes(event.positiveArtefact);
+    
+    return {
+      ...rarity,
+      items: modifiedItems,
+      // If this rarity contains the positive artefact, increase its chance
+      chance: hasPositiveArtefact ? rarity.chance * 1.5 : rarity.chance
+    };
+  }).filter(rarity => rarity.items.length > 0); // Remove rarities with no items
+}
 
 const client = new Client({
   intents: [
@@ -118,6 +304,14 @@ client.on('messageCreate', async (message) => {
 
 client.once('clientReady', async () => {
   console.log(`Fortune Bot online as ${client.user.tag}`);
+
+  // Initialize event system checking
+  checkAndHandleEvents();
+  
+  // Set up periodic event checking every 15 minutes
+  setInterval(() => {
+    checkAndHandleEvents();
+  }, 15 * 60 * 1000);
 
   // Register all slash commands
   const commands = [
@@ -249,6 +443,10 @@ client.once('clientReady', async () => {
       .setName('convert')
       .setDescription('Convert your XP into cash (1 XP = $2)'),
 
+    new SlashCommandBuilder()
+      .setName('mining-status')
+      .setDescription('Check current mining events and sector status'),
+
   ];
 
   const rest = new REST({ version:'10' }).setToken(token);
@@ -361,6 +559,10 @@ client.on('interactionCreate', async interaction => {
 
       case 'convert':
         await handleConvertCommand(interaction, userId);
+        break;
+        
+      case 'mining-status':
+        await handleMiningStatusCommand(interaction);
         break;
     }
   } catch (error) {
@@ -672,17 +874,29 @@ async function handleScavengeCommand(interaction, userId) {
     return await interaction.reply({ embeds: [cooldownEmbed] });
   }
 
-  // Random artefact generation
-  const random = Math.random() * 100;
+  // Check for active events before scavenging
+  checkAndHandleEvents();
+
+  // Get modified chances based on current events
+  const currentRarities = getModifiedArtefactChances();
+  const totalChance = currentRarities.reduce((sum, rarity) => sum + rarity.chance, 0);
+  
+  // Random artefact generation with event modifications
+  const random = Math.random() * totalChance;
   let selectedRarity = null;
   let cumulative = 0;
 
-  for (const rarity of rarities) {
+  for (const rarity of currentRarities) {
     cumulative += rarity.chance;
     if (random <= cumulative) {
       selectedRarity = rarity;
       break;
     }
+  }
+
+  if (!selectedRarity || selectedRarity.items.length === 0) {
+    // Fallback to common rarity if something goes wrong
+    selectedRarity = rarities[0];
   }
 
   const artefact = selectedRarity.items[Math.floor(Math.random() * selectedRarity.items.length)];
@@ -692,17 +906,33 @@ async function handleScavengeCommand(interaction, userId) {
   saveUserData();
   saveCooldowns();
 
+  // Check if this find was affected by events
+  const event = userData.eventSystem.currentEvent;
+  let eventText = '';
+  let scavengeColor = selectedRarity.color;
+
+  if (event && artefact === event.positiveArtefact) {
+    eventText = `⚡ **EVENT BONUS:** Found in the expanded ${event.positiveArtefact} mine!`;
+    scavengeColor = 0xFFD700; // Gold color for event bonus
+  }
+
   const scavengeEmbed = new EmbedBuilder()
-    .setTitle('Scavenge Complete')
-    .setDescription('You discovered a valuable artefact during your search!')
+    .setTitle(event && artefact === event.positiveArtefact ? '🌟 Enhanced Scavenge Complete!' : 'Scavenge Complete')
+    .setDescription(event && artefact === event.positiveArtefact ? 
+      'You discovered a valuable artefact in the expanded mine sector!' : 
+      'You discovered a valuable artefact during your search!')
     .addFields(
       { name: 'Artefact Found', value: `${artefact}`, inline: true },
       { name: 'Rarity', value: `${selectedRarity.name}`, inline: true },
       { name: 'Estimated Value', value: `$${selectedRarity.value.toLocaleString()}`, inline: true },
       { name: 'Next Scavenge', value: 'Available in 2 hours', inline: false }
     )
-    .setColor(selectedRarity.color)
+    .setColor(scavengeColor)
     .setTimestamp();
+
+  if (eventText) {
+    scavengeEmbed.addFields({ name: 'Mining Event', value: eventText, inline: false });
+  }
 
   await interaction.reply({ embeds: [scavengeEmbed] });
 }
@@ -752,7 +982,7 @@ async function handleLaborCommand(interaction, userId) {
 async function handleInventoryCommand(interaction, userId) {
   const user = userData[userId];
   const userXpData = userData.xpData[userId] || { xp: 0, messageCount: 0, lastMessage: 0 };
-  
+
   const totalValue = user.artefacts.reduce((sum, artefact) => {
     const rarity = getRarityByArtefact(artefact);
     return sum + (rarity ? rarity.value : 0);
@@ -1145,6 +1375,8 @@ async function handleViewItemsCommand(interaction) {
 async function handleComponentInteraction(interaction) {
   const { customId } = interaction;
 
+  try {
+
   // Handle trade accept/decline
   if (customId.startsWith('trade_accept_')) {
     const initiatorId = customId.split('_')[2];
@@ -1321,7 +1553,7 @@ async function handleComponentInteraction(interaction) {
           .setDescription('**Bets do not match!** Please place your bets again.')
           .setColor(0xFF6B6B)
           .setTimestamp();
-        
+
         await interaction.message.edit({ embeds: [mismatchEmbed], components: [] });
         delete global.activeMarbleGames[gameId]; // Clean up this game instance
       }
@@ -1348,7 +1580,9 @@ async function handleComponentInteraction(interaction) {
   } else if (customId.startsWith('trade_cash_modal_')) {
     const tradeId = customId.split('_')[3];
     const trade = global.activeTrades[tradeId];
-    if (!trade) return;
+    if (!trade) {
+      return await interaction.reply({ content: '❌ Trade session not found!', ephemeral: true });
+    }
 
     const userId = interaction.user.id;
     const cashAmount = parseInt(interaction.fields.getTextInputValue('cash_amount'));
@@ -1378,11 +1612,17 @@ async function handleComponentInteraction(interaction) {
   } else if (customId.startsWith('trade_artefact_select_')) {
     const tradeId = customId.split('_')[3];
     const trade = global.activeTrades[tradeId];
-    if (!trade) return;
+    if (!trade) {
+      return await interaction.reply({ content: '❌ Trade session not found!', ephemeral: true });
+    }
 
     const userId = interaction.user.id;
     const artefactIndex = parseInt(interaction.values[0]);
     const artefact = userData[userId].artefacts[artefactIndex];
+
+    if (!artefact) {
+      return await interaction.reply({ content: '❌ Artefact not found in your inventory!', ephemeral: true });
+    }
 
     const isInitiator = trade.initiator === userId;
     if (isInitiator) {
@@ -1397,7 +1637,10 @@ async function handleComponentInteraction(interaction) {
       trade.recipientReady = false;
     }
 
-    await interaction.deferUpdate();
+    const tradeEmbed = createTradeEmbed(trade, trade.initiator, trade.recipient);
+    const components = createTradeComponents(tradeId, userId);
+
+    await interaction.update({ embeds: [tradeEmbed], components });
 
   } else if (customId.startsWith('trade_remove_artefact_select_')) {
     const tradeId = customId.split('_')[4];
@@ -1427,7 +1670,7 @@ async function handleComponentInteraction(interaction) {
 
   } else if (customId.startsWith('convert_accept_')) {
     const userId = customId.replace('convert_accept_', '');
-    
+
     if (interaction.user.id !== userId) {
       return await interaction.reply({ 
         content: '❌ This conversion is not for you!', 
@@ -1466,7 +1709,7 @@ async function handleComponentInteraction(interaction) {
 
   } else if (customId.startsWith('convert_decline_')) {
     const userId = customId.replace('convert_decline_', '');
-    
+
     if (interaction.user.id !== userId) {
       return await interaction.reply({ 
         content: '❌ This conversion is not for you!', 
@@ -1539,17 +1782,19 @@ async function handleComponentInteraction(interaction) {
     const soldItems = [];
 
     // Process each selected artefact
-    session.selectedArtefacts.forEach(artefact => {
+    for (const artefact of session.selectedArtefacts) {
       const artefactIndex = userData[session.userId].artefacts.indexOf(artefact);
       if (artefactIndex > -1) {
         const rarity = getRarityByArtefact(artefact);
         const sellValue = rarity ? rarity.sell : 100;
         totalEarnings += sellValue;
         soldItems.push(`${artefact} - $${sellValue.toLocaleString()}`);
+        // Remove artefact from inventory
         userData[session.userId].artefacts.splice(artefactIndex, 1);
       }
-    });
+    }
 
+    // Add earnings to user's cash
     userData[session.userId].cash += totalEarnings;
     saveUserData();
 
@@ -1585,6 +1830,21 @@ async function handleComponentInteraction(interaction) {
 
     // Clean up session
     delete global.massSellSessions[sessionId];
+  }
+
+  } catch (error) {
+    console.error('Component interaction error:', error);
+
+    try {
+      if (!interaction.replied && !interaction.deferred) {
+        await interaction.reply({ 
+          content: '❌ An error occurred while processing your request. Please try again.', 
+          ephemeral: true 
+        });
+      }
+    } catch (replyError) {
+      console.error('Failed to send error response:', replyError);
+    }
   }
 }
 
@@ -1809,6 +2069,27 @@ async function handleTradeReady(interaction, customId) {
   const userId = interaction.user.id;
   const isInitiator = trade.initiator === userId;
 
+  // Validate that user has the items they're offering
+  const userOffer = isInitiator ? trade.initiatorOffer : trade.recipientOffer;
+
+  // Check cash availability
+  if (userOffer.cash > userData[userId].cash) {
+    return await interaction.reply({ 
+      content: `❌ You don't have enough cash! You're offering $${userOffer.cash.toLocaleString()} but only have $${userData[userId].cash.toLocaleString()}`, 
+      ephemeral: true 
+    });
+  }
+
+  // Check artefact availability
+  for (const artefact of userOffer.artefacts) {
+    if (!userData[userId].artefacts.includes(artefact)) {
+      return await interaction.reply({ 
+        content: `❌ You no longer have "${artefact}" in your inventory!`, 
+        ephemeral: true 
+      });
+    }
+  }
+
   if (isInitiator) {
     trade.initiatorReady = true;
   } else {
@@ -1828,43 +2109,82 @@ async function executeTrade(interaction, trade, tradeId) {
   const initiator = userData[trade.initiator];
   const recipient = userData[trade.recipient];
 
-  // Transfer cash
-  initiator.cash -= trade.initiatorOffer.cash;
-  initiator.cash += trade.recipientOffer.cash;
-  recipient.cash -= trade.recipientOffer.cash;
-  recipient.cash += trade.initiatorOffer.cash;
-
-  // Transfer artefacts
-  trade.initiatorOffer.artefacts.forEach(artefact => {
-    const index = initiator.artefacts.indexOf(artefact);
-    if (index > -1) {
-      initiator.artefacts.splice(index, 1);
-      recipient.artefacts.push(artefact);
+  try {
+    // Final validation before executing trade
+    if (trade.initiatorOffer.cash > initiator.cash) {
+      throw new Error(`Initiator doesn't have enough cash`);
     }
-  });
-
-  trade.recipientOffer.artefacts.forEach(artefact => {
-    const index = recipient.artefacts.indexOf(artefact);
-    if (index > -1) {
-      recipient.artefacts.splice(index, 1);
-      initiator.artefacts.push(artefact);
+    if (trade.recipientOffer.cash > recipient.cash) {
+      throw new Error(`Recipient doesn't have enough cash`);
     }
-  });
 
-  saveUserData();
-  delete global.activeTrades[tradeId];
+    // Validate artefacts exist
+    for (const artefact of trade.initiatorOffer.artefacts) {
+      if (!initiator.artefacts.includes(artefact)) {
+        throw new Error(`Initiator doesn't have "${artefact}"`);
+      }
+    }
+    for (const artefact of trade.recipientOffer.artefacts) {
+      if (!recipient.artefacts.includes(artefact)) {
+        throw new Error(`Recipient doesn't have "${artefact}"`);
+      }
+    }
 
-  const successEmbed = new EmbedBuilder()
-    .setTitle('🎉 Trade Completed Successfully!')
-    .setDescription('**The trade has been executed and all items have been exchanged!**')
-    .addFields(
-      { name: '📦 Initiator Received', value: formatOffer(trade.recipientOffer) || '*Nothing*', inline: true },
-      { name: '📦 Recipient Received', value: formatOffer(trade.initiatorOffer) || '*Nothing*', inline: true }
-    )
-    .setColor(0x00FF7F)
-    .setTimestamp();
+    // Execute the trade
+    // Transfer cash
+    initiator.cash -= trade.initiatorOffer.cash;
+    initiator.cash += trade.recipientOffer.cash;
+    recipient.cash -= trade.recipientOffer.cash;
+    recipient.cash += trade.initiatorOffer.cash;
 
-  await interaction.update({ embeds: [successEmbed], components: [] });
+    // Transfer artefacts
+    trade.initiatorOffer.artefacts.forEach(artefact => {
+      const index = initiator.artefacts.indexOf(artefact);
+      if (index > -1) {
+        initiator.artefacts.splice(index, 1);
+        recipient.artefacts.push(artefact);
+      }
+    });
+
+    trade.recipientOffer.artefacts.forEach(artefact => {
+      const index = recipient.artefacts.indexOf(artefact);
+      if (index > -1) {
+        recipient.artefacts.splice(index, 1);
+        initiator.artefacts.push(artefact);
+      }
+    });
+
+    saveUserData();
+    delete global.activeTrades[tradeId];
+
+    const successEmbed = new EmbedBuilder()
+      .setTitle('🎉 Trade Completed Successfully!')
+      .setDescription('**The trade has been executed and all items have been exchanged!**')
+      .addFields(
+        { name: '📦 Initiator Received', value: formatOffer(trade.recipientOffer) || '*Nothing*', inline: true },
+        { name: '📦 Recipient Received', value: formatOffer(trade.initiatorOffer) || '*Nothing*', inline: true }
+      )
+      .setColor(0x00FF7F)
+      .setTimestamp();
+
+    await interaction.update({ embeds: [successEmbed], components: [] });
+
+  } catch (error) {
+    console.error('Trade execution error:', error);
+
+    const errorEmbed = new EmbedBuilder()
+      .setTitle('❌ Trade Failed')
+      .setDescription('The trade could not be completed due to validation errors.')
+      .addFields(
+        { name: 'Error', value: error.message, inline: false },
+        { name: 'Action Required', value: 'Please restart the trade with updated offers', inline: false }
+      )
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+
+    await interaction.update({ embeds: [errorEmbed], components: [] });
+    delete global.activeTrades[tradeId];
+  }
 }
 
 async function handleTradeCancel(interaction, customId) {
@@ -2589,6 +2909,89 @@ async function handleConvertCommand(interaction, userId) {
   const row = new ActionRowBuilder().addComponents(acceptButton, declineButton);
 
   await interaction.reply({ embeds: [convertEmbed], components: [row] });
+}
+
+async function handleMiningStatusCommand(interaction) {
+  checkAndHandleEvents(); // Ensure events are up to date
+
+  const event = userData.eventSystem.currentEvent;
+  const nextEventTime = userData.eventSystem.nextEventTime;
+  const now = Date.now();
+
+  if (event) {
+    // Active event
+    const timeLeft = event.endTime - now;
+    const hoursLeft = Math.floor(timeLeft / (60 * 60 * 1000));
+    const minutesLeft = Math.floor((timeLeft % (60 * 60 * 1000)) / (60 * 1000));
+
+    const eventEmbed = new EmbedBuilder()
+      .setTitle('🚨 ACTIVE MINING EVENT')
+      .setDescription('**A mining crisis is currently affecting exploration operations!**')
+      .addFields(
+        { 
+          name: '💥 Collapsed Mine', 
+          value: `**${event.negativeArtefact}** mine is currently **CLOSED** due to structural collapse`, 
+          inline: false 
+        },
+        { 
+          name: '📈 Expanded Mine', 
+          value: `**${event.positiveArtefact}** mine has **DOUBLED** discovery rates due to geological expansion`, 
+          inline: false 
+        },
+        { 
+          name: '⏰ Time Remaining', 
+          value: `**${hoursLeft}h ${minutesLeft}m** until mines return to normal`, 
+          inline: true 
+        },
+        { 
+          name: '🎯 Scavenging Impact', 
+          value: `• **${event.negativeArtefact}**: Cannot be found\n• **${event.positiveArtefact}**: 2x discovery chance\n• All other artefacts: Normal rates`, 
+          inline: false 
+        }
+      )
+      .setColor(0xFF4500)
+      .setFooter({ text: 'Take advantage of the expanded mine while you can!' })
+      .setTimestamp();
+
+    await interaction.reply({ embeds: [eventEmbed] });
+
+  } else {
+    // No active event
+    const timeUntilNext = nextEventTime - now;
+    const daysUntilNext = Math.floor(timeUntilNext / (24 * 60 * 60 * 1000));
+    const hoursUntilNext = Math.floor((timeUntilNext % (24 * 60 * 60 * 1000)) / (60 * 60 * 1000));
+
+    const statusEmbed = new EmbedBuilder()
+      .setTitle('⛏️ MINING OPERATIONS STATUS')
+      .setDescription('**All mining sectors are operating under normal conditions**')
+      .addFields(
+        { 
+          name: '🏭 Mine Status', 
+          value: 'All artefact mines are **OPERATIONAL** and accessible for exploration', 
+          inline: false 
+        },
+        { 
+          name: '📊 Discovery Rates', 
+          value: 'Standard scavenging probabilities are in effect across all sectors', 
+          inline: false 
+        },
+        { 
+          name: '⏰ Next Event', 
+          value: `Expected mining event in **${daysUntilNext}d ${hoursUntilNext}h**`, 
+          inline: true 
+        },
+        { 
+          name: '🎯 Current Scavenging', 
+          value: 'All artefacts available at normal discovery rates', 
+          inline: false 
+        }
+      )
+      .setColor(0x00FF7F)
+      .setFooter({ text: 'Fortune Bot Mining Authority • Real-time status monitoring' })
+      .setTimestamp();
+
+    await interaction.reply({ embeds: [statusEmbed] });
+  }
 }
 
 client.login(token);
