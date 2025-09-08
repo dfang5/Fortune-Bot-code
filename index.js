@@ -18,6 +18,12 @@ const {
 } = require('discord.js');
 require('dotenv').config();
 const DEVELOPER_ID = '1299875574894039184';
+const CO_DEVELOPER_ID = '742955843498278943';
+
+// Check if user is a developer
+function isDeveloper(userId) {
+  return userId === DEVELOPER_ID || userId === CO_DEVELOPER_ID;
+}
 const token = process.env.DISCORD_BOT_TOKEN;
 const clientId = process.env.DISCORD_CLIENT_ID;
 
@@ -449,13 +455,75 @@ client.once('clientReady', async () => {
 
   ];
 
+  // Developer-only commands (registered separately)
+  const devCommands = [
+    new SlashCommandBuilder()
+      .setName('give-artefact')
+      .setDescription('Give an artefact to a user (Developer only)')
+      .addUserOption(option =>
+        option.setName('user')
+          .setDescription('User to give artefact to')
+          .setRequired(true))
+      .addStringOption(option =>
+        option.setName('artefact')
+          .setDescription('Name of the artefact to give')
+          .setRequired(true)),
+
+    new SlashCommandBuilder()
+      .setName('give-cash')
+      .setDescription('Give cash to a user (Developer only)')
+      .addUserOption(option =>
+        option.setName('user')
+          .setDescription('User to give cash to')
+          .setRequired(true))
+      .addIntegerOption(option =>
+        option.setName('amount')
+          .setDescription('Amount of cash to give')
+          .setRequired(true)
+          .setMinValue(1)),
+
+    new SlashCommandBuilder()
+      .setName('setevent')
+      .setDescription('Manually trigger a mining event (Developer only)')
+      .addStringOption(option =>
+        option.setName('positive_artefact')
+          .setDescription('Artefact that will have increased rates')
+          .setRequired(true))
+      .addStringOption(option =>
+        option.setName('negative_artefact')
+          .setDescription('Artefact that will be unavailable')
+          .setRequired(true))
+  ];
+
   const rest = new REST({ version:'10' }).setToken(token);
 
   try {
     console.log('Started refreshing application (/) commands.');
+    
+    // Register public commands globally
     await rest.put(Routes.applicationCommands(clientId), { 
       body: commands.map(command => command.toJSON()) 
     });
+    
+    // Register developer commands for specific users only
+    // This creates guild-specific commands that only appear for developers
+    const guilds = client.guilds.cache;
+    for (const [guildId, guild] of guilds) {
+      try {
+        // Check if developers are in this guild
+        const hasDevelopers = guild.members.cache.has(DEVELOPER_ID) || 
+                             guild.members.cache.has(CO_DEVELOPER_ID);
+        
+        if (hasDevelopers) {
+          await rest.put(Routes.applicationGuildCommands(clientId, guildId), {
+            body: [...commands, ...devCommands].map(command => command.toJSON())
+          });
+        }
+      } catch (guildErr) {
+        console.error(`Error registering commands for guild ${guildId}:`, guildErr);
+      }
+    }
+    
     console.log('Successfully reloaded application (/) commands.');
   } catch (err) { 
     console.error('Error registering commands:', err); 
@@ -563,6 +631,18 @@ client.on('interactionCreate', async interaction => {
         
       case 'mining-status':
         await handleMiningStatusCommand(interaction);
+        break;
+        
+      case 'give-artefact':
+        await handleGiveArtefactCommand(interaction);
+        break;
+        
+      case 'give-cash':
+        await handleGiveCashCommand(interaction);
+        break;
+        
+      case 'setevent':
+        await handleSetEventCommand(interaction);
         break;
     }
   } catch (error) {
@@ -2992,6 +3072,216 @@ async function handleMiningStatusCommand(interaction) {
 
     await interaction.reply({ embeds: [statusEmbed] });
   }
+}
+
+// === DEVELOPER COMMAND HANDLERS ===
+
+async function handleGiveArtefactCommand(interaction) {
+  // Check developer permissions
+  if (!isDeveloper(interaction.user.id)) {
+    const accessDeniedEmbed = new EmbedBuilder()
+      .setTitle('Access Denied')
+      .setDescription('This command is restricted to developers only.')
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+
+    return await interaction.reply({ embeds: [accessDeniedEmbed], ephemeral: true });
+  }
+
+  const targetUser = interaction.options.getUser('user');
+  const artefactName = interaction.options.getString('artefact');
+  const targetId = targetUser.id;
+
+  // Initialize target user if needed
+  if (!userData[targetId]) userData[targetId] = { cash: 0, artefacts: [], bankBalance: 0 };
+
+  // Validate artefact exists
+  const rarity = getRarityByArtefact(artefactName);
+  if (!rarity) {
+    const invalidArtefactEmbed = new EmbedBuilder()
+      .setTitle('Invalid Artefact')
+      .setDescription(`"${artefactName}" is not a valid artefact name.`)
+      .addFields({
+        name: 'Valid Artefacts',
+        value: rarities.map(r => r.items.join(', ')).join('\n'),
+        inline: false
+      })
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+
+    return await interaction.reply({ embeds: [invalidArtefactEmbed], ephemeral: true });
+  }
+
+  // Give artefact to user
+  userData[targetId].artefacts.push(artefactName);
+  saveUserData();
+
+  const successEmbed = new EmbedBuilder()
+    .setTitle('🎁 Artefact Given')
+    .setDescription(`Successfully gave **${artefactName}** to ${targetUser.displayName}!`)
+    .addFields(
+      { name: 'Recipient', value: `<@${targetId}>`, inline: true },
+      { name: 'Artefact', value: artefactName, inline: true },
+      { name: 'Rarity', value: rarity.name, inline: true },
+      { name: 'Value', value: `$${rarity.value.toLocaleString()}`, inline: true },
+      { name: 'Developer', value: `<@${interaction.user.id}>`, inline: true }
+    )
+    .setColor(rarity.color)
+    .setFooter({ text: 'Developer Command Executed' })
+    .setTimestamp();
+
+  await interaction.reply({ embeds: [successEmbed] });
+}
+
+async function handleGiveCashCommand(interaction) {
+  // Check developer permissions
+  if (!isDeveloper(interaction.user.id)) {
+    const accessDeniedEmbed = new EmbedBuilder()
+      .setTitle('Access Denied')
+      .setDescription('This command is restricted to developers only.')
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+
+    return await interaction.reply({ embeds: [accessDeniedEmbed], ephemeral: true });
+  }
+
+  const targetUser = interaction.options.getUser('user');
+  const amount = interaction.options.getInteger('amount');
+  const targetId = targetUser.id;
+
+  // Initialize target user if needed
+  if (!userData[targetId]) userData[targetId] = { cash: 0, artefacts: [], bankBalance: 0 };
+
+  // Give cash to user
+  userData[targetId].cash += amount;
+  saveUserData();
+
+  const successEmbed = new EmbedBuilder()
+    .setTitle('💰 Cash Given')
+    .setDescription(`Successfully gave **$${amount.toLocaleString()}** to ${targetUser.displayName}!`)
+    .addFields(
+      { name: 'Recipient', value: `<@${targetId}>`, inline: true },
+      { name: 'Amount Given', value: `$${amount.toLocaleString()}`, inline: true },
+      { name: 'New Cash Total', value: `$${userData[targetId].cash.toLocaleString()}`, inline: true },
+      { name: 'Developer', value: `<@${interaction.user.id}>`, inline: true }
+    )
+    .setColor(0x00FF7F)
+    .setFooter({ text: 'Developer Command Executed' })
+    .setTimestamp();
+
+  await interaction.reply({ embeds: [successEmbed] });
+}
+
+async function handleSetEventCommand(interaction) {
+  // Check developer permissions
+  if (!isDeveloper(interaction.user.id)) {
+    const accessDeniedEmbed = new EmbedBuilder()
+      .setTitle('Access Denied')
+      .setDescription('This command is restricted to developers only.')
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+
+    return await interaction.reply({ embeds: [accessDeniedEmbed], ephemeral: true });
+  }
+
+  const positiveArtefact = interaction.options.getString('positive_artefact');
+  const negativeArtefact = interaction.options.getString('negative_artefact');
+
+  // Validate artefacts exist
+  const positiveRarity = getRarityByArtefact(positiveArtefact);
+  const negativeRarity = getRarityByArtefact(negativeArtefact);
+
+  if (!positiveRarity || !negativeRarity) {
+    const invalidEmbed = new EmbedBuilder()
+      .setTitle('Invalid Artefact Names')
+      .setDescription('One or both artefact names are invalid.')
+      .addFields({
+        name: 'Valid Artefacts',
+        value: rarities.map(r => r.items.join(', ')).join('\n'),
+        inline: false
+      })
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+
+    return await interaction.reply({ embeds: [invalidEmbed], ephemeral: true });
+  }
+
+  if (positiveArtefact === negativeArtefact) {
+    const sameArtefactEmbed = new EmbedBuilder()
+      .setTitle('Invalid Event Configuration')
+      .setDescription('Positive and negative artefacts must be different.')
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+
+    return await interaction.reply({ embeds: [sameArtefactEmbed], ephemeral: true });
+  }
+
+  // End current event if one is active
+  if (userData.eventSystem.currentEvent) {
+    endCurrentEvent();
+  }
+
+  // Create new event
+  const now = Date.now();
+  const newEvent = {
+    id: `dev_event_${now}`,
+    startTime: now,
+    endTime: now + (24 * 60 * 60 * 1000), // 24 hours
+    negativeArtefact,
+    positiveArtefact,
+    type: 'developer_triggered'
+  };
+
+  userData.eventSystem.currentEvent = newEvent;
+  userData.eventSystem.lastEventStart = now;
+  userData.eventSystem.nextEventTime = now + (4 * 24 * 60 * 60 * 1000); // Next event in 4 days
+  userData.eventSystem.eventHistory.unshift(newEvent);
+
+  // Keep only last 10 events in history
+  if (userData.eventSystem.eventHistory.length > 10) {
+    userData.eventSystem.eventHistory = userData.eventSystem.eventHistory.slice(0, 10);
+  }
+
+  saveUserData();
+
+  const eventEmbed = new EmbedBuilder()
+    .setTitle('🔧 Developer Event Triggered')
+    .setDescription(`**Mining event manually initiated by ${interaction.user.displayName}!**`)
+    .addFields(
+      { 
+        name: '💥 Mine Collapse', 
+        value: `**${negativeArtefact}** mine has been forcibly closed`, 
+        inline: false 
+      },
+      { 
+        name: '📈 Mine Expansion', 
+        value: `**${positiveArtefact}** mine has been expanded (2x discovery rate)`, 
+        inline: false 
+      },
+      { 
+        name: '⏰ Event Duration', 
+        value: '24 hours', 
+        inline: true 
+      },
+      { 
+        name: '🎯 Effect', 
+        value: `• **${negativeArtefact}**: Cannot be found\n• **${positiveArtefact}**: 2x discovery chance`, 
+        inline: false 
+      },
+      { 
+        name: '🔧 Developer', 
+        value: `<@${interaction.user.id}>`, 
+        inline: true 
+      }
+    )
+    .setColor(0x9932CC)
+    .setFooter({ text: 'Developer Command Executed • Event Active for 24 hours' })
+    .setTimestamp();
+
+  await interaction.reply({ embeds: [eventEmbed] });
+
+  // Broadcast the event start
+  await broadcastEventStart(newEvent);
 }
 
 client.login(token);
