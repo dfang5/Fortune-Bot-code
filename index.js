@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { MongoClient } = require('mongodb');
 const {
   Client,
   GatewayIntentBits,
@@ -37,30 +38,131 @@ if (!clientId) {
   console.error('ERROR: DISCORD_CLIENT_ID is not set in environment variables');
   process.exit(1);
 }
-const DATA_FILE = path.join(__dirname, 'data.json');
-const COOLDOWN_FILE = path.join(__dirname, 'cooldowns.json');
+// MongoDB connection
+let mongoClient;
+let db;
+let usersCollection;
+let cooldownsCollection;
+let eventSystemCollection;
+let guildItemsCollection;
 
-// Load persistent data
-let userData = fs.existsSync(DATA_FILE) ? JSON.parse(fs.readFileSync(DATA_FILE)) : {};
-let cooldowns = fs.existsSync(COOLDOWN_FILE) ? JSON.parse(fs.readFileSync(COOLDOWN_FILE)) : { scavenge: {}, labor: {} };
+// Initialize MongoDB connection
+async function initializeDatabase() {
+  try {
+    const mongoUri = process.env.MONGODB_URI;
+    if (!mongoUri) {
+      console.error('ERROR: MONGODB_URI is not set in environment variables');
+      process.exit(1);
+    }
 
-if (!userData.guildItems) userData.guildItems = {}; // Server-specific custom items
-if (!userData.xpData) userData.xpData = {}; // XP tracking data
-if (!userData.eventSystem) userData.eventSystem = { // Event system data
-  currentEvent: null,
-  lastEventStart: 0,
-  nextEventTime: Date.now() + (4 * 24 * 60 * 60 * 1000), // 4 days from now
-  eventHistory: []
-};
-global.tempItems = {}; // Store items awaiting confirmation
-global.activeTrades = {}; // Store active trade sessions
-global.activeMarbleGames = {}; // Store active marble game sessions
-global.messageTracker = {}; // Track recent messages for conversation detection
-global.massSellSessions = {}; // Store active mass sell sessions
+    mongoClient = new MongoClient(mongoUri);
+    await mongoClient.connect();
+    console.log('Connected to MongoDB Atlas');
 
-// Save functions
-function saveUserData() { fs.writeFileSync(DATA_FILE, JSON.stringify(userData, null, 2)); }
-function saveCooldowns() { fs.writeFileSync(COOLDOWN_FILE, JSON.stringify(cooldowns, null, 2)); }
+    db = mongoClient.db('fortunebot');
+    usersCollection = db.collection('users');
+    cooldownsCollection = db.collection('cooldowns');
+    eventSystemCollection = db.collection('eventSystem');
+    guildItemsCollection = db.collection('guildItems');
+
+    // Initialize event system if it doesn't exist
+    const eventSystem = await eventSystemCollection.findOne({ _id: 'main' });
+    if (!eventSystem) {
+      await eventSystemCollection.insertOne({
+        _id: 'main',
+        currentEvent: null,
+        lastEventStart: 0,
+        nextEventTime: Date.now() + (4 * 24 * 60 * 60 * 1000),
+        eventHistory: []
+      });
+    }
+
+  } catch (error) {
+    console.error('Failed to connect to MongoDB:', error);
+    process.exit(1);
+  }
+}
+
+// Global data objects (loaded from MongoDB)
+let userData = {};
+let cooldowns = { scavenge: {}, labor: {} };
+global.tempItems = {};
+global.activeTrades = {};
+global.activeMarbleGames = {};
+global.messageTracker = {};
+global.massSellSessions = {};
+
+// Database helper functions
+async function getUser(userId) {
+  if (!userData[userId]) {
+    const user = await usersCollection.findOne({ _id: userId });
+    userData[userId] = user || { cash: 0, artefacts: [], bankBalance: 0 };
+  }
+  return userData[userId];
+}
+
+async function saveUser(userId) {
+  if (userData[userId]) {
+    await usersCollection.replaceOne(
+      { _id: userId },
+      { _id: userId, ...userData[userId] },
+      { upsert: true }
+    );
+  }
+}
+
+async function getCooldowns() {
+  const cooldownDoc = await cooldownsCollection.findOne({ _id: 'main' });
+  return cooldownDoc || { scavenge: {}, labor: {} };
+}
+
+async function saveCooldowns() {
+  await cooldownsCollection.replaceOne(
+    { _id: 'main' },
+    { _id: 'main', ...cooldowns },
+    { upsert: true }
+  );
+}
+
+async function getEventSystem() {
+  return await eventSystemCollection.findOne({ _id: 'main' });
+}
+
+async function saveEventSystem(eventData) {
+  await eventSystemCollection.replaceOne(
+    { _id: 'main' },
+    { _id: 'main', ...eventData },
+    { upsert: true }
+  );
+}
+
+async function getXpData(userId) {
+  const user = await getUser(userId);
+  if (!user.xpData) {
+    user.xpData = { xp: 0, messageCount: 0, lastMessage: 0 };
+    await saveUser(userId);
+  }
+  return user.xpData;
+}
+
+async function getGuildItems(guildId) {
+  const guildDoc = await guildItemsCollection.findOne({ _id: guildId });
+  return guildDoc?.items || {};
+}
+
+async function saveGuildItems(guildId, items) {
+  await guildItemsCollection.replaceOne(
+    { _id: guildId },
+    { _id: guildId, items },
+    { upsert: true }
+  );
+}
+
+// Legacy save functions (now async and use MongoDB)
+async function saveUserData() {
+  const userPromises = Object.keys(userData).map(userId => saveUser(userId));
+  await Promise.all(userPromises);
+}
 
 // Rarity and artefact config
 const rarities = [
@@ -80,22 +182,22 @@ function getAllArtefacts() {
 }
 
 // Check and handle event system
-function checkAndHandleEvents() {
+async function checkAndHandleEvents() {
   const now = Date.now();
-  const eventData = userData.eventSystem;
+  const eventData = await getEventSystem();
 
   // Check if current event should end
   if (eventData.currentEvent && now >= eventData.currentEvent.endTime) {
-    endCurrentEvent();
+    await endCurrentEvent();
   }
 
   // Check if new event should start
   if (!eventData.currentEvent && now >= eventData.nextEventTime) {
-    startNewEvent();
+    await startNewEvent();
   }
 }
 
-function startNewEvent() {
+async function startNewEvent() {
   const allArtefacts = getAllArtefacts();
   const now = Date.now();
 
@@ -113,26 +215,28 @@ function startNewEvent() {
     type: 'mine_collapse'
   };
 
-  userData.eventSystem.currentEvent = newEvent;
-  userData.eventSystem.lastEventStart = now;
-  userData.eventSystem.nextEventTime = now + (4 * 24 * 60 * 60 * 1000); // Next event in 4 days
-  userData.eventSystem.eventHistory.unshift(newEvent);
+  const eventData = await getEventSystem();
+  eventData.currentEvent = newEvent;
+  eventData.lastEventStart = now;
+  eventData.nextEventTime = now + (4 * 24 * 60 * 60 * 1000); // Next event in 4 days
+  eventData.eventHistory.unshift(newEvent);
 
   // Keep only last 10 events in history
-  if (userData.eventSystem.eventHistory.length > 10) {
-    userData.eventSystem.eventHistory = userData.eventSystem.eventHistory.slice(0, 10);
+  if (eventData.eventHistory.length > 10) {
+    eventData.eventHistory = eventData.eventHistory.slice(0, 10);
   }
 
-  saveUserData();
+  await saveEventSystem(eventData);
   broadcastEventStart(newEvent);
 }
 
-function endCurrentEvent() {
-  const event = userData.eventSystem.currentEvent;
+async function endCurrentEvent() {
+  const eventData = await getEventSystem();
+  const event = eventData.currentEvent;
   if (!event) return;
 
-  userData.eventSystem.currentEvent = null;
-  saveUserData();
+  eventData.currentEvent = null;
+  await saveEventSystem(eventData);
   broadcastEventEnd(event);
 }
 
@@ -226,8 +330,9 @@ async function broadcastEventEnd(event) {
 }
 
 // Modified scavenge function to account for events
-function getModifiedArtefactChances() {
-  const event = userData.eventSystem.currentEvent;
+async function getModifiedArtefactChances() {
+  const eventData = await getEventSystem();
+  const event = eventData.currentEvent;
   if (!event) return rarities; // No event active, return normal chances
 
   // Create modified rarities based on current event
@@ -310,6 +415,12 @@ client.on('messageCreate', async (message) => {
 
 client.once('clientReady', async () => {
   console.log(`Fortune Bot online as ${client.user.tag}`);
+
+  // Initialize MongoDB connection
+  await initializeDatabase();
+
+  // Load cooldowns from database
+  cooldowns = await getCooldowns();
 
   // Initialize event system checking
   checkAndHandleEvents();
@@ -1110,8 +1221,8 @@ async function handleLaborCommand(interaction, userId) {
 }
 
 async function handleInventoryCommand(interaction, userId) {
-  const user = userData[userId];
-  const userXpData = userData.xpData[userId] || { xp: 0, messageCount: 0, lastMessage: 0 };
+  const user = await getUser(userId);
+  const userXpData = await getXpData(userId);
 
   const totalValue = user.artefacts.reduce((sum, artefact) => {
     const rarity = getRarityByArtefact(artefact);
@@ -1334,11 +1445,11 @@ async function handleStoreCommand(interaction) {
     .setTitle('🏪 Server Store')
     .setDescription(`**Browse ${Object.keys(guildItems).length} available items** in this server.`)
     .addFields(
-      { name: '📋 Available Items', value: itemList, inline: false },
-      { name: '💳 How to Purchase', value: 'Contact **server administrators** to purchase items', inline: false }
+      { name: 'Available Items', value: itemList, inline: false },
+      { name: 'How to Purchase', value: 'Contact **server administrators** to purchase items', inline: false }
     )
     .setColor(0x9932CC)
-    .setFooter({ text: '🎆 Items shown are server-specific custom additions' })
+    .setFooter({ text: 'Items shown are server-specific custom additions' })
     .setTimestamp();
 
   await interaction.reply({ embeds: [storeEmbed] });
@@ -1411,12 +1522,12 @@ async function handleAddItemCommand(interaction) {
   saveUserData();
 
   const addEmbed = new EmbedBuilder()
-    .setTitle('✅ Item Added Successfully')
+    .setTitle('Item Added Successfully')
     .setDescription(`**Added "${itemName}"** to the server store.`)
     .addFields(
-      { name: '🏷️ Item Name', value: `**${itemName}**`, inline: true },
-      { name: '💰 Price', value: `**$${itemPrice.toLocaleString()}**`, inline: true },
-      { name: '📋 Description', value: itemDescription, inline: false }
+      { name: 'Item Name', value: `**${itemName}**`, inline: true },
+      { name: 'Price', value: `**$${itemPrice.toLocaleString()}**`, inline: true },
+      { name: 'Description', value: itemDescription, inline: false }
     )
     .setColor(0x00FF7F)
     .setTimestamp();
@@ -1603,7 +1714,7 @@ async function handleComponentInteraction(interaction) {
 
     // Game cancelled due to decline
     const declineEmbed = new EmbedBuilder()
-      .setTitle('🚫 Marble Game Cancelled')
+      .setTitle('Marble Game Cancelled')
       .setDescription(`**${declinedUser.displayName}** has declined the invitation. The marble game has been cancelled.`)
       .setColor(0xFF6B6B)
       .setTimestamp();
@@ -1994,16 +2105,16 @@ function createTradeEmbed(trade, initiatorId, recipientId) {
   const recipientOfferText = formatOffer(trade.recipientOffer);
 
   return new EmbedBuilder()
-    .setTitle('⚡ Interactive Trade Session')
+    .setTitle('Interactive Trade Session')
     .setDescription('**Both players can add items, cash, or artefacts to the trade**')
     .addFields(
-      { name: '👤 Initiator Offer', value: initiatorOfferText || '*Nothing offered yet*', inline: true },
-      { name: '🎯 Recipient Offer', value: recipientOfferText || '*Nothing offered yet*', inline: true },
-      { name: '📊 Trade Status', value: getTradeStatus(trade), inline: false },
-      { name: '📋 Instructions', value: 'Use the buttons below to **add/remove** items from your offer. Both players must click **Ready** to complete the trade.', inline: false }
+      { name: 'Initiator Offer', value: initiatorOfferText || '*Nothing offered yet*', inline: true },
+      { name: 'Recipient Offer', value: recipientOfferText || '*Nothing offered yet*', inline: true },
+      { name: 'Trade Status', value: getTradeStatus(trade), inline: false },
+      { name: 'Instructions', value: 'Use the buttons below to **add/remove** items from your offer. Both players must click **Ready** to complete the trade.', inline: false }
     )
     .setColor(trade.initiatorReady && trade.recipientReady ? 0x00FF7F : 0x4169E1)
-    .setFooter({ text: '⏰ Trade will expire after 10 minutes of inactivity' })
+    .setFooter({ text: 'Trade will expire after 10 minutes of inactivity' })
     .setTimestamp();
 }
 
@@ -2015,10 +2126,10 @@ function formatOffer(offer) {
 }
 
 function getTradeStatus(trade) {
-  if (trade.initiatorReady && trade.recipientReady) return '✅ **Both players ready** - Trade will complete automatically';
+  if (trade.initiatorReady && trade.recipientReady) return '**Both players ready** - Trade will complete automatically';
   if (trade.initiatorReady) return '⏳ **Initiator ready**, waiting for recipient';
   if (trade.recipientReady) return '⏳ **Recipient ready**, waiting for initiator';
-  return '⚒️ **Setting up offers...**';
+  return '**Setting up offers...**';
 }
 
 function createTradeComponents(tradeId, userId) {
@@ -2464,7 +2575,7 @@ async function startBettingPhase(interaction, gameId) {
   if (!game) return;
 
   const bettingEmbed = new EmbedBuilder()
-    .setTitle('💰 Betting Phase')
+    .setTitle('Betting Phase')
     .setDescription('**All players must place their bets now!** Each player can bet any amount they want, but all bets must match to proceed.')
     .addFields(
       { 
@@ -2526,7 +2637,7 @@ function createBettingEmbed(game, userId, betAmount) {
   }
 
   return new EmbedBuilder()
-    .setTitle('💰 Betting Phase')
+    .setTitle('Betting Phase')
     .setDescription(statusMessage)
     .addFields(
       { 
@@ -2765,16 +2876,16 @@ async function runRandomizer(interaction, gameId) {
   }
 
   const resultEmbed = new EmbedBuilder()
-    .setTitle('🎯 Randomiser Result!')
+    .setTitle('Randomiser Result!')
     .setDescription(`**Number ${randomNumber}** was chosen!\n**${winnerUser.displayName}** (Team ${winnerTeam}) wins this round!`)
     .addFields(
       { 
-        name: '🏆 Round Winner', 
+        name: 'Round Winner', 
         value: `**${winnerUser.displayName}** guessed **${randomNumber}**`, 
         inline: false 
       },
       { 
-        name: '📊 Current Scores', 
+        name: 'Current Scores', 
         value: `🔴 **Team A:** ${game.teamAMarbles} marbles\n🔵 **Team B:** ${game.teamBMarbles} marbles`, 
         inline: false 
       }
@@ -2831,26 +2942,26 @@ async function endGame(interaction, gameId) {
   saveUserData();
 
   const gameEndEmbed = new EmbedBuilder()
-    .setTitle('🏆 Marble Game Complete!')
+    .setTitle('Marble Game Complete!')
     .setDescription(`**Team ${winningTeam} Wins!**\n\nCongratulations to the victorious players!`)
     .addFields(
       { 
-        name: '🎉 Winners', 
+        name: 'Winners', 
         value: winningPlayers.map(p => `**${p.displayName}**`).join('\\n'), 
         inline: true 
       },
       { 
-        name: '🎯 Final Score', 
+        name: 'Final Score', 
         value: `🔴 **Team A:** ${finalScoreA} marbles\n🔵 **Team B:** ${finalScoreB} marbles`, 
         inline: true 
       },
       { 
-        name: '💰 Prize Distribution', 
+        name: 'Prize Distribution', 
         value: `**Each Winner Receives:** $${winningsPerPlayer.toLocaleString()}\n**Total Pot:** $${game.totalPot.toLocaleString()}`, 
         inline: false 
       },
       { 
-        name: '📊 Game Stats', 
+        name: 'Game Stats', 
         value: `**Rounds Played:** ${game.round}\n**Duration:** ${Math.round((Date.now() - game.createdAt) / 60000)} minutes`, 
         inline: false 
       }
@@ -3055,26 +3166,26 @@ async function handleMiningStatusCommand(interaction) {
     const minutesLeft = Math.floor((timeLeft % (60 * 60 * 1000)) / (60 * 1000));
 
     const eventEmbed = new EmbedBuilder()
-      .setTitle('🚨 ACTIVE MINING EVENT')
+      .setTitle('ACTIVE MINING EVENT')
       .setDescription('**A mining crisis is currently affecting exploration operations!**')
       .addFields(
         { 
-          name: '💥 Collapsed Mine', 
+          name: 'Collapsed Mine', 
           value: `**${event.negativeArtefact}** mine is currently **CLOSED** due to structural collapse`, 
           inline: false 
         },
         { 
-          name: '📈 Expanded Mine', 
+          name: 'Expanded Mine', 
           value: `**${event.positiveArtefact}** mine has **DOUBLED** discovery rates due to geological expansion`, 
           inline: false 
         },
         { 
-          name: '⏰ Time Remaining', 
+          name: 'Time Remaining', 
           value: `**${hoursLeft}h ${minutesLeft}m** until mines return to normal`, 
           inline: true 
         },
         { 
-          name: '🎯 Scavenging Impact', 
+          name: 'Scavenging Impact', 
           value: `• **${event.negativeArtefact}**: Cannot be found\n• **${event.positiveArtefact}**: 2x discovery chance\n• All other artefacts: Normal rates`, 
           inline: false 
         }
@@ -3092,7 +3203,7 @@ async function handleMiningStatusCommand(interaction) {
     const hoursUntilNext = Math.floor((timeUntilNext % (24 * 60 * 60 * 1000)) / (60 * 60 * 1000));
 
     const statusEmbed = new EmbedBuilder()
-      .setTitle('⛏️ MINING OPERATIONS STATUS')
+      .setTitle('MINING OPERATIONS STATUS')
       .setDescription('**All mining sectors are operating under normal conditions**')
       .addFields(
         { 
@@ -3101,17 +3212,17 @@ async function handleMiningStatusCommand(interaction) {
           inline: false 
         },
         { 
-          name: '📊 Discovery Rates', 
+          name: 'Discovery Rates', 
           value: 'Standard scavenging probabilities are in effect across all sectors', 
           inline: false 
         },
         { 
-          name: '⏰ Next Event', 
+          name: 'Next Event', 
           value: `Expected mining event in **${daysUntilNext}d ${hoursUntilNext}h**`, 
           inline: true 
         },
         { 
-          name: '🎯 Current Scavenging', 
+          name: 'Current Scavenging', 
           value: 'All artefacts available at normal discovery rates', 
           inline: false 
         }
@@ -3167,7 +3278,7 @@ async function handleGiveArtefactCommand(interaction) {
   saveUserData();
 
   const successEmbed = new EmbedBuilder()
-    .setTitle('🎁 Artefact Given')
+    .setTitle('Artefact Given')
     .setDescription(`Successfully gave **${artefactName}** to ${targetUser.displayName}!`)
     .addFields(
       { name: 'Recipient', value: `<@${targetId}>`, inline: true },
@@ -3207,7 +3318,7 @@ async function handleGiveCashCommand(interaction) {
   saveUserData();
 
   const successEmbed = new EmbedBuilder()
-    .setTitle('💰 Cash Given')
+    .setTitle('Cash Given')
     .setDescription(`Successfully gave **$${amount.toLocaleString()}** to ${targetUser.displayName}!`)
     .addFields(
       { name: 'Recipient', value: `<@${targetId}>`, inline: true },
@@ -3295,31 +3406,31 @@ async function handleSetEventCommand(interaction) {
   saveUserData();
 
   const eventEmbed = new EmbedBuilder()
-    .setTitle('🔧 Developer Event Triggered')
+    .setTitle('Developer Event Triggered')
     .setDescription(`**Mining event manually initiated by ${interaction.user.displayName}!**`)
     .addFields(
       { 
-        name: '💥 Mine Collapse', 
+        name: 'Mine Collapse', 
         value: `**${negativeArtefact}** mine has been forcibly closed`, 
         inline: false 
       },
       { 
-        name: '📈 Mine Expansion', 
+        name: 'Mine Expansion', 
         value: `**${positiveArtefact}** mine has been expanded (2x discovery rate)`, 
         inline: false 
       },
       { 
-        name: '⏰ Event Duration', 
+        name: 'Event Duration', 
         value: '24 hours', 
         inline: true 
       },
       { 
-        name: '🎯 Effect', 
+        name: 'Effect', 
         value: `• **${negativeArtefact}**: Cannot be found\n• **${positiveArtefact}**: 2x discovery chance`, 
         inline: false 
       },
       { 
-        name: '🔧 Developer', 
+        name: 'Developer', 
         value: `<@${interaction.user.id}>`, 
         inline: true 
       }
@@ -3407,32 +3518,58 @@ async function handleRemoveCashCommand(interaction) {
   // Initialize target user if needed
   if (!userData[targetId]) userData[targetId] = { cash: 0, artefacts: [], bankBalance: 0 };
 
-  // Check if user has enough cash
-  if (userData[targetId].cash < amount) {
+  const totalWealth = userData[targetId].cash + (userData[targetId].bankBalance || 0);
+
+  // Check if user has enough total money (cash + bank)
+  if (totalWealth < amount) {
     const insufficientEmbed = new EmbedBuilder()
-      .setTitle('Insufficient Cash')
-      .setDescription(`${targetUser.displayName} only has $${userData[targetId].cash.toLocaleString()}, cannot remove $${amount.toLocaleString()}.`)
+      .setTitle('Insufficient Funds')
+      .setDescription(`${targetUser.displayName} only has $${totalWealth.toLocaleString()} total wealth, cannot remove $${amount.toLocaleString()}.`)
+      .addFields(
+        { name: 'Available Cash', value: `$${userData[targetId].cash.toLocaleString()}`, inline: true },
+        { name: 'Bank Balance', value: `$${(userData[targetId].bankBalance || 0).toLocaleString()}`, inline: true },
+        { name: 'Total Wealth', value: `$${totalWealth.toLocaleString()}`, inline: true }
+      )
       .setColor(0xFF6B6B)
       .setTimestamp();
 
     return await interaction.reply({ embeds: [insufficientEmbed], ephemeral: true });
   }
 
-  // Remove cash from user
-  userData[targetId].cash -= amount;
+  let remainingToRemove = amount;
+  let removedFromCash = 0;
+  let removedFromBank = 0;
+
+  // First, remove from cash
+  if (userData[targetId].cash > 0) {
+    removedFromCash = Math.min(userData[targetId].cash, remainingToRemove);
+    userData[targetId].cash -= removedFromCash;
+    remainingToRemove -= removedFromCash;
+  }
+
+  // Then, remove remaining from bank if needed
+  if (remainingToRemove > 0 && userData[targetId].bankBalance > 0) {
+    removedFromBank = Math.min(userData[targetId].bankBalance, remainingToRemove);
+    userData[targetId].bankBalance -= removedFromBank;
+    remainingToRemove -= removedFromBank;
+  }
+
   saveUserData();
 
   const successEmbed = new EmbedBuilder()
-    .setTitle('Cash Removed')
+    .setTitle('Cash Removed (Bypassed Bank)')
     .setDescription(`Successfully removed **$${amount.toLocaleString()}** from ${targetUser.displayName}!`)
     .addFields(
       { name: 'Target User', value: `<@${targetId}>`, inline: true },
       { name: 'Amount Removed', value: `$${amount.toLocaleString()}`, inline: true },
+      { name: 'Removed from Cash', value: `$${removedFromCash.toLocaleString()}`, inline: true },
+      { name: 'Removed from Bank', value: `$${removedFromBank.toLocaleString()}`, inline: true },
       { name: 'New Cash Total', value: `$${userData[targetId].cash.toLocaleString()}`, inline: true },
-      { name: 'Developer', value: `<@${interaction.user.id}>`, inline: true }
+      { name: 'New Bank Balance', value: `$${(userData[targetId].bankBalance || 0).toLocaleString()}`, inline: true },
+      { name: 'Developer', value: `<@${interaction.user.id}>`, inline: false }
     )
     .setColor(0xFF6B6B)
-    .setFooter({ text: 'Developer Command Executed' })
+    .setFooter({ text: 'Developer Command Executed • Bank Protection Bypassed' })
     .setTimestamp();
 
   await interaction.reply({ embeds: [successEmbed] });
