@@ -19,11 +19,11 @@ const {
 require('dotenv').config();
 const DEVELOPER_ID = '1299875574894039184';
 const CO_DEVELOPER_ID = '742955843498278943';
-const CO_DEVELOPER_ID= '992632642992357459';
+const CO_DEVELOPER_ID_2 = '992632642992357459';
 
 // Check if user is a developer
 function isDeveloper(userId) {
-  return userId === DEVELOPER_ID || userId === CO_DEVELOPER_ID;
+  return userId === DEVELOPER_ID || userId === CO_DEVELOPER_ID || userID === CO_DEVELOPER_ID_2;
 }
 const token = process.env.DISCORD_BOT_TOKEN;
 const clientId = process.env.DISCORD_CLIENT_ID;
