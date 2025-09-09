@@ -3405,31 +3405,58 @@ async function handleRemoveCashCommand(interaction) {
   const targetId = targetUser.id;
 
   // Initialize target user if needed
-  if (!userData[targetId]) userData[targetId] = { cash: 0, artefacts: [], bankBalance: 0 };
+  if (const totalWealth = userData[targetId].cash + (userData[targetId].bankBalance || 0);
 
-  // Check if user has enough cash
-  if (userData[targetId].cash < amount) {
+  // Check if user has enough total money (cash + bank)
+  if (totalWealth < amount) {
     const insufficientEmbed = new EmbedBuilder()
-      .setTitle('Insufficient Cash')
-      .setDescription(`${targetUser.displayName} only has $${userData[targetId].cash.toLocaleString()}, cannot remove $${amount.toLocaleString()}.`)
+      .setTitle('Insufficient Funds')
+      .setDescription(`${targetUser.displayName} only has $${totalWealth.toLocaleString()} total wealth, cannot remove $${amount.toLocaleString()}.`)
+      .addFields(
+        { name: 'Available Cash', value: `$${userData[targetId].cash.toLocaleString()}`, inline: true },
+        { name: 'Bank Balance', value: `$${(userData[targetId].bankBalance || 0).toLocaleString()}`, inline: true },
+        { name: 'Total Wealth', value: `$${totalWealth.toLocaleString()}`, inline: true }
+      )
       .setColor(0xFF6B6B)
       .setTimestamp();
 
     return await interaction.reply({ embeds: [insufficientEmbed], ephemeral: true });
   }
 
-  // Remove cash from user
-  userData[targetId].cash -= amount;
+  let remainingToRemove = amount;
+  let removedFromCash = 0;
+  let removedFromBank = 0;
+
+  // First, remove from cash
+  if (userData[targetId].cash > 0) {
+    removedFromCash = Math.min(userData[targetId].cash, remainingToRemove);
+    userData[targetId].cash -= removedFromCash;
+    remainingToRemove -= removedFromCash;
+  }
+
+  // Then, remove remaining from bank if needed
+  if (remainingToRemove > 0 && userData[targetId].bankBalance > 0) {
+    removedFromBank = Math.min(userData[targetId].bankBalance, remainingToRemove);
+    userData[targetId].bankBalance -= removedFromBank;
+    remainingToRemove -= removedFromBank;
+  }
+
   saveUserData();
 
   const successEmbed = new EmbedBuilder()
-    .setTitle('Cash Removed')
+    .setTitle('Cash Removed (Bypassed Bank)')
     .setDescription(`Successfully removed **$${amount.toLocaleString()}** from ${targetUser.displayName}!`)
     .addFields(
       { name: 'Target User', value: `<@${targetId}>`, inline: true },
       { name: 'Amount Removed', value: `$${amount.toLocaleString()}`, inline: true },
+      { name: 'Removed from Cash', value: `$${removedFromCash.toLocaleString()}`, inline: true },
+      { name: 'Removed from Bank', value: `$${removedFromBank.toLocaleString()}`, inline: true },
       { name: 'New Cash Total', value: `$${userData[targetId].cash.toLocaleString()}`, inline: true },
-      { name: 'Developer', value: `<@${interaction.user.id}>`, inline: true }
+      { name: 'New Bank Balance', value: `$${(userData[targetId].bankBalance || 0).toLocaleString()}`, inline: true },
+      { name: 'Developer', value: `<@${interaction.user.id}>`, inline: false }
+    )
+    .setColor(0xFF6B6B)
+    .setFooter({ text: 'Developer Command Executed • Bank Protection Bypassne: true }
     )
     .setColor(0xFF6B6B)
     .setFooter({ text: 'Developer Command Executed' })
