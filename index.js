@@ -17,8 +17,9 @@ const {
   ComponentType
 } = require('discord.js');
 require('dotenv').config();
-const DEVELOPER_ID = '1299875574894039184', '992632642992357459';
+const DEVELOPER_ID = '1299875574894039184';
 const CO_DEVELOPER_ID = '742955843498278943';
+const CO_DEVELOPER_ID= '992632642992357459';
 
 // Check if user is a developer
 function isDeveloper(userId) {
