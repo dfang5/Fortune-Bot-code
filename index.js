@@ -19,11 +19,10 @@ const {
 require('dotenv').config();
 const DEVELOPER_ID = '1299875574894039184';
 const CO_DEVELOPER_ID = '742955843498278943';
-const CO_DEVELOPER_ID_2 = '992632642992357459';
 
 // Check if user is a developer
 function isDeveloper(userId) {
-  return userId === DEVELOPER_ID || userId === CO_DEVELOPER_ID || userID === CO_DEVELOPER_ID_2;
+  return userId === DEVELOPER_ID || userId === CO_DEVELOPER_ID;
 }
 const token = process.env.DISCORD_BOT_TOKEN;
 const clientId = process.env.DISCORD_CLIENT_ID;
@@ -45,7 +44,7 @@ const COOLDOWN_FILE = path.join(__dirname, 'cooldowns.json');
 let userData = fs.existsSync(DATA_FILE) ? JSON.parse(fs.readFileSync(DATA_FILE)) : {};
 let cooldowns = fs.existsSync(COOLDOWN_FILE) ? JSON.parse(fs.readFileSync(COOLDOWN_FILE)) : { scavenge: {}, labor: {} };
 
-if (!userData.guildItems) userData.guildItems = {}; // 🧠 Server-specific custom items
+if (!userData.guildItems) userData.guildItems = {}; // Server-specific custom items
 if (!userData.xpData) userData.xpData = {}; // XP tracking data
 if (!userData.eventSystem) userData.eventSystem = { // Event system data
   currentEvent: null,
@@ -53,7 +52,7 @@ if (!userData.eventSystem) userData.eventSystem = { // Event system data
   nextEventTime: Date.now() + (4 * 24 * 60 * 60 * 1000), // 4 days from now
   eventHistory: []
 };
-global.tempItems = {}; // 💾 Store items awaiting confirmation
+global.tempItems = {}; // Store items awaiting confirmation
 global.activeTrades = {}; // Store active trade sessions
 global.activeMarbleGames = {}; // Store active marble game sessions
 global.messageTracker = {}; // Track recent messages for conversation detection
@@ -99,7 +98,7 @@ function checkAndHandleEvents() {
 function startNewEvent() {
   const allArtefacts = getAllArtefacts();
   const now = Date.now();
-  
+
   // Randomly select two different artefacts
   const shuffledArtefacts = [...allArtefacts].sort(() => Math.random() - 0.5);
   const negativeArtefact = shuffledArtefacts[0];
@@ -141,36 +140,36 @@ async function broadcastEventStart(event) {
   try {
     // Create event start embed
     const eventEmbed = new EmbedBuilder()
-      .setTitle('🚨 MINING CRISIS ALERT!')
+      .setTitle('MINING CRISIS ALERT!')
       .setDescription(`**A catastrophic mine collapse has occurred in the ${event.negativeArtefact} mining sector!**`)
       .addFields(
         { 
-          name: '💥 Mine Collapse Report', 
+          name: 'Mine Collapse Report', 
           value: `The **${event.negativeArtefact}** mine has suffered a devastating collapse! Explorers cannot approach the mining site due to unstable conditions and falling debris.`, 
           inline: false 
         },
         { 
-          name: '🚫 Scavenging Restriction', 
+          name: 'Scavenging Restriction', 
           value: `**${event.negativeArtefact}** cannot be scavenged during this 24-hour emergency period while repair crews work to stabilize the site.`, 
           inline: false 
         },
         { 
-          name: '🎉 Unexpected Opportunity', 
+          name: 'Unexpected Opportunity', 
           value: `However, the nearby **${event.positiveArtefact}** mine has expanded due to shifting geological conditions, creating new accessible veins!`, 
           inline: false 
         },
         { 
-          name: '📈 Enhanced Discovery Rate', 
+          name: 'Enhanced Discovery Rate', 
           value: `**${event.positiveArtefact}** discovery chances have **doubled** during this event! Scavenge while this opportunity lasts!`, 
           inline: false 
         },
         { 
-          name: '⏰ Event Duration', 
+          name: 'Event Duration', 
           value: 'This mining crisis will last exactly **24 hours**', 
           inline: true 
         },
         { 
-          name: '🔧 Estimated Repair Time', 
+          name: 'Estimated Repair Time', 
           value: 'Mine restoration crews are working around the clock', 
           inline: true 
         }
@@ -181,8 +180,8 @@ async function broadcastEventStart(event) {
 
     // Send to all channels where the bot is active (this is a simplified approach)
     // In a real implementation, you'd want to store channel IDs to broadcast to
-    console.log('🚨 MINING EVENT STARTED:', event);
-    
+    console.log('MINING EVENT STARTED:', event);
+
   } catch (error) {
     console.error('Error broadcasting event start:', error);
   }
@@ -191,26 +190,26 @@ async function broadcastEventStart(event) {
 async function broadcastEventEnd(event) {
   try {
     const eventEmbed = new EmbedBuilder()
-      .setTitle('✅ MINING OPERATIONS RESTORED')
+      .setTitle('MINING OPERATIONS RESTORED')
       .setDescription('**The mining crisis has been resolved!**')
       .addFields(
         { 
-          name: '🔧 Restoration Complete', 
+          name: 'Restoration Complete', 
           value: `The **${event.negativeArtefact}** mine has been fully repaired and stabilized. Safety inspectors have cleared the site for normal operations.`, 
           inline: false 
         },
         { 
-          name: '📊 Mining Status', 
+          name: 'Mining Status', 
           value: `**${event.negativeArtefact}** is now available for scavenging again at normal rates.`, 
           inline: false 
         },
         { 
-          name: '🏗️ Geological Shift', 
+          name: 'Geological Shift', 
           value: `The **${event.positiveArtefact}** mine has returned to standard geological conditions and normal discovery rates.`, 
           inline: false 
         },
         { 
-          name: '📈 Operations Summary', 
+          name: 'Operations Summary', 
           value: 'All mining sectors have returned to baseline scavenging probabilities', 
           inline: false 
         }
@@ -219,7 +218,7 @@ async function broadcastEventEnd(event) {
       .setFooter({ text: 'Fortune Bot Mining Authority • All Clear Signal' })
       .setTimestamp();
 
-    console.log('✅ MINING EVENT ENDED:', event);
+    console.log('MINING EVENT ENDED:', event);
 
   } catch (error) {
     console.error('Error broadcasting event end:', error);
@@ -243,7 +242,7 @@ function getModifiedArtefactChances() {
 
     // If positive artefact is in this rarity, double its effective chance
     const hasPositiveArtefact = rarity.items.includes(event.positiveArtefact);
-    
+
     return {
       ...rarity,
       items: modifiedItems,
@@ -314,7 +313,7 @@ client.once('clientReady', async () => {
 
   // Initialize event system checking
   checkAndHandleEvents();
-  
+
   // Set up periodic event checking every 15 minutes
   setInterval(() => {
     checkAndHandleEvents();
@@ -493,20 +492,45 @@ client.once('clientReady', async () => {
       .addStringOption(option =>
         option.setName('negative_artefact')
           .setDescription('Artefact that will be unavailable')
+          .setRequired(true)),
+
+    new SlashCommandBuilder()
+      .setName('remove-artefact')
+      .setDescription('Remove an artefact from a user (Developer only)')
+      .addUserOption(option =>
+        option.setName('user')
+          .setDescription('User to remove artefact from')
           .setRequired(true))
+      .addStringOption(option =>
+        option.setName('artefact')
+          .setDescription('Name of the artefact to remove')
+          .setRequired(true)),
+
+    new SlashCommandBuilder()
+      .setName('remove-cash')
+      .setDescription('Remove cash from a user (Developer only)')
+      .addUserOption(option =>
+        option.setName('user')
+          .setDescription('User to remove cash from')
+          .setRequired(true))
+      .addIntegerOption(option =>
+        option.setName('amount')
+          .setDescription('Amount of cash to remove')
+          .setRequired(true)
+          .setMinValue(1))
   ];
 
   const rest = new REST({ version:'10' }).setToken(token);
 
   try {
     console.log('Started refreshing application (/) commands.');
-    
+
     // Register all commands globally (public + developer)
     // Developer commands will only work for authorized users due to permission checks
     await rest.put(Routes.applicationCommands(clientId), { 
       body: [...commands, ...devCommands].map(command => command.toJSON()) 
     });
-    
+
     // Register developer commands for specific users only
     // This creates guild-specific commands that only appear for developers
     const guilds = client.guilds.cache;
@@ -524,7 +548,7 @@ client.once('clientReady', async () => {
         // Check if developers are in this guild
         const hasDevelopers = guild.members.cache.has(DEVELOPER_ID) || 
                              guild.members.cache.has(CO_DEVELOPER_ID);
-        
+
         if (hasDevelopers) {
           console.log(`Registering developer commands for guild: ${guild.name} (${guildId})`);
           await rest.put(Routes.applicationGuildCommands(clientId, guildId), {
@@ -541,7 +565,7 @@ client.once('clientReady', async () => {
         console.error(`Error registering commands for guild ${guildId}:`, guildErr);
       }
     }
-    
+
     console.log('Successfully reloaded application (/) commands.');
   } catch (err) { 
     console.error('Error registering commands:', err); 
@@ -646,21 +670,29 @@ client.on('interactionCreate', async interaction => {
       case 'convert':
         await handleConvertCommand(interaction, userId);
         break;
-        
+
       case 'mining-status':
         await handleMiningStatusCommand(interaction);
         break;
-        
+
       case 'give-artefact':
         await handleGiveArtefactCommand(interaction);
         break;
-        
+
       case 'give-cash':
         await handleGiveCashCommand(interaction);
         break;
-        
+
       case 'setevent':
         await handleSetEventCommand(interaction);
+        break;
+
+      case 'remove-artefact':
+        await handleRemoveArtefactCommand(interaction);
+        break;
+
+      case 'remove-cash':
+        await handleRemoveCashCommand(interaction);
         break;
     }
   } catch (error) {
@@ -978,7 +1010,7 @@ async function handleScavengeCommand(interaction, userId) {
   // Get modified chances based on current events
   const currentRarities = getModifiedArtefactChances();
   const totalChance = currentRarities.reduce((sum, rarity) => sum + rarity.chance, 0);
-  
+
   // Random artefact generation with event modifications
   const random = Math.random() * totalChance;
   let selectedRarity = null;
@@ -3302,4 +3334,108 @@ async function handleSetEventCommand(interaction) {
   await broadcastEventStart(newEvent);
 }
 
-client.login(token);
+async function handleRemoveArtefactCommand(interaction) {
+  // Check developer permissions
+  if (!isDeveloper(interaction.user.id)) {
+    const accessDeniedEmbed = new EmbedBuilder()
+      .setTitle('Access Denied')
+      .setDescription('This command is restricted to developers only.')
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+
+    return await interaction.reply({ embeds: [accessDeniedEmbed], ephemeral: true });
+  }
+
+  const targetUser = interaction.options.getUser('user');
+  const artefactName = interaction.options.getString('artefact');
+  const targetId = targetUser.id;
+
+  // Initialize target user if needed
+  if (!userData[targetId]) userData[targetId] = { cash: 0, artefacts: [], bankBalance: 0 };
+
+  // Check if user has the artefact
+  const artefactIndex = userData[targetId].artefacts.findIndex(item => item === artefactName);
+  if (artefactIndex === -1) {
+    const notFoundEmbed = new EmbedBuilder()
+      .setTitle('Artefact Not Found')
+      .setDescription(`${targetUser.displayName} does not have an artefact named "${artefactName}".`)
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+
+    return await interaction.reply({ embeds: [notFoundEmbed], ephemeral: true });
+  }
+
+  const rarity = getRarityByArtefact(artefactName);
+
+  // Remove artefact from user
+  userData[targetId].artefacts.splice(artefactIndex, 1);
+  saveUserData();
+
+  const successEmbed = new EmbedBuilder()
+    .setTitle('Artefact Removed')
+    .setDescription(`Successfully removed **${artefactName}** from ${targetUser.displayName}!`)
+    .addFields(
+      { name: 'Target User', value: `<@${targetId}>`, inline: true },
+      { name: 'Artefact', value: artefactName, inline: true },
+      { name: 'Rarity', value: rarity ? rarity.name : 'Unknown', inline: true },
+      { name: 'Value', value: rarity ? `$${rarity.value.toLocaleString()}` : 'Unknown', inline: true },
+      { name: 'Developer', value: `<@${interaction.user.id}>`, inline: true }
+    )
+    .setColor(0xFF6B6B)
+    .setFooter({ text: 'Developer Command Executed' })
+    .setTimestamp();
+
+  await interaction.reply({ embeds: [successEmbed] });
+}
+
+async function handleRemoveCashCommand(interaction) {
+  // Check developer permissions
+  if (!isDeveloper(interaction.user.id)) {
+    const accessDeniedEmbed = new EmbedBuilder()
+      .setTitle('Access Denied')
+      .setDescription('This command is restricted to developers only.')
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+
+    return await interaction.reply({ embeds: [accessDeniedEmbed], ephemeral: true });
+  }
+
+  const targetUser = interaction.options.getUser('user');
+  const amount = interaction.options.getInteger('amount');
+  const targetId = targetUser.id;
+
+  // Initialize target user if needed
+  if (!userData[targetId]) userData[targetId] = { cash: 0, artefacts: [], bankBalance: 0 };
+
+  // Check if user has enough cash
+  if (userData[targetId].cash < amount) {
+    const insufficientEmbed = new EmbedBuilder()
+      .setTitle('Insufficient Cash')
+      .setDescription(`${targetUser.displayName} only has $${userData[targetId].cash.toLocaleString()}, cannot remove $${amount.toLocaleString()}.`)
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+
+    return await interaction.reply({ embeds: [insufficientEmbed], ephemeral: true });
+  }
+
+  // Remove cash from user
+  userData[targetId].cash -= amount;
+  saveUserData();
+
+  const successEmbed = new EmbedBuilder()
+    .setTitle('Cash Removed')
+    .setDescription(`Successfully removed **$${amount.toLocaleString()}** from ${targetUser.displayName}!`)
+    .addFields(
+      { name: 'Target User', value: `<@${targetId}>`, inline: true },
+      { name: 'Amount Removed', value: `$${amount.toLocaleString()}`, inline: true },
+      { name: 'New Cash Total', value: `$${userData[targetId].cash.toLocaleString()}`, inline: true },
+      { name: 'Developer', value: `<@${interaction.user.id}>`, inline: true }
+    )
+    .setColor(0xFF6B6B)
+    .setFooter({ text: 'Developer Command Executed' })
+    .setTimestamp();
+
+  await interaction.reply({ embeds: [successEmbed] });
+}
+
+client.login(token);[]
