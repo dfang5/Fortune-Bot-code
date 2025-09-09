@@ -107,6 +107,10 @@ async function getUser(userId) {
 }
 
 async function saveUser(userId) {
+  if (!usersCollection) {
+    console.warn('Users collection not ready, skipping save');
+    return;
+  }
   if (userData[userId]) {
     await usersCollection.replaceOne(
       { _id: userId },
@@ -122,6 +126,10 @@ async function getCooldowns() {
 }
 
 async function saveCooldowns() {
+  if (!cooldownsCollection) {
+    console.warn('Cooldowns collection not ready, skipping save');
+    return;
+  }
   await cooldownsCollection.replaceOne(
     { _id: 'main' },
     { _id: 'main', ...cooldowns },
@@ -165,6 +173,10 @@ async function saveGuildItems(guildId, items) {
 
 // Legacy save functions (now async and use MongoDB)
 async function saveUserData() {
+  if (!usersCollection) {
+    console.warn('Users collection not ready, skipping save');
+    return;
+  }
   const userPromises = Object.keys(userData).map(userId => saveUser(userId));
   await Promise.all(userPromises);
 }
@@ -381,7 +393,7 @@ client.on('messageCreate', async (message) => {
 
   // Initialize user data if needed
   if (!userData[userId]) userData[userId] = { cash: 0, artefacts: [], bankBalance: 0 };
-  if (!userData.xpData[userId]) userData.xpData[userId] = { xp: 0, messageCount: 0, lastMessage: 0 };
+  if (!userData[userId].xpData) userData[userId].xpData = { xp: 0, messageCount: 0, lastMessage: 0 };
 
   // Initialize channel tracking
   if (!global.messageTracker[channelId]) global.messageTracker[channelId] = [];
@@ -407,12 +419,12 @@ client.on('messageCreate', async (message) => {
 
   // Only award XP if there's a conversation (at least 2 different users)
   if (uniqueUsers.size >= 2) {
-    userData.xpData[userId].messageCount++;
+    userData[userId].xpData.messageCount++;
 
     // Award XP every 2 messages
-    if (userData.xpData[userId].messageCount % 2 === 0) {
-      userData.xpData[userId].xp++;
-      userData.xpData[userId].lastMessage = now;
+    if (userData[userId].xpData.messageCount % 2 === 0) {
+      userData[userId].xpData.xp++;
+      userData[userId].xpData.lastMessage = now;
       saveUserData();
     }
   }
@@ -1121,10 +1133,10 @@ async function handleScavengeCommand(interaction, userId) {
   }
 
   // Check for active events before scavenging
-  checkAndHandleEvents();
+  await checkAndHandleEvents();
 
   // Get modified chances based on current events
-  const currentRarities = getModifiedArtefactChances();
+  const currentRarities = await getModifiedArtefactChances();
   const totalChance = currentRarities.reduce((sum, rarity) => sum + rarity.chance, 0);
 
   // Random artefact generation with event modifications
@@ -1924,7 +1936,7 @@ async function handleComponentInteraction(interaction) {
       });
     }
 
-    const userXpData = userData.xpData[userId];
+    const userXpData = userData[userId].xpData;
     if (!userXpData || userXpData.xp === 0) {
       return await interaction.reply({ 
         content: '❌ You have no XP to convert!', 
@@ -1937,7 +1949,7 @@ async function handleComponentInteraction(interaction) {
 
     // Convert XP to cash
     userData[userId].cash += cashEarned;
-    userData.xpData[userId].xp = 0;
+    userData[userId].xpData.xp = 0;
     saveUserData();
 
     const successEmbed = new EmbedBuilder()
@@ -3104,11 +3116,11 @@ function createMassSellComponents(sessionId, allArtefacts) {
 
 async function handleConvertCommand(interaction, userId) {
   // Initialize user XP data if needed
-  if (!userData.xpData[userId]) {
-    userData.xpData[userId] = { xp: 0, messageCount: 0, lastMessage: 0 };
+  if (!userData[userId].xpData) {
+    userData[userId].xpData = { xp: 0, messageCount: 0, lastMessage: 0 };
   }
 
-  const userXpData = userData.xpData[userId];
+  const userXpData = userData[userId].xpData;
 
   if (userXpData.xp === 0) {
     const noXpEmbed = new EmbedBuilder()
@@ -3158,10 +3170,11 @@ async function handleConvertCommand(interaction, userId) {
 }
 
 async function handleMiningStatusCommand(interaction) {
-  checkAndHandleEvents(); // Ensure events are up to date
+  await checkAndHandleEvents(); // Ensure events are up to date
 
-  const event = userData.eventSystem.currentEvent;
-  const nextEventTime = userData.eventSystem.nextEventTime;
+  const eventData = await getEventSystem();
+  const event = eventData.currentEvent;
+  const nextEventTime = eventData.nextEventTime;
   const now = Date.now();
 
   if (event) {
