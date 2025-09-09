@@ -55,7 +55,12 @@ async function initializeDatabase() {
       process.exit(1);
     }
 
-    mongoClient = new MongoClient(mongoUri);
+    mongoClient = new MongoClient(mongoUri, {
+      ssl: true,
+      tlsAllowInvalidCertificates: true,
+      serverSelectionTimeoutMS: 5000,
+      socketTimeoutMS: 45000,
+    });
     await mongoClient.connect();
     console.log('Connected to MongoDB Atlas');
 
