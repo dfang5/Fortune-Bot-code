@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { MongoClient } = require('mongodb');
+const uri = "mongodb+srv://spiritlessentity_db_user:<db_password>@fortune-bot-cluster.xfulv0a.mongodb.net/?retryWrites=true&w=majority&appName=Fortune-bot-cluster";
 const {
   Client,
   GatewayIntentBits,
