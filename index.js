@@ -46,7 +46,7 @@ let cooldownsCollection;
 let eventSystemCollection;
 let guildItemsCollection;
 
-// Initialize MongoDB connection
+// Initialise MongoDB connection
 async function initializeDatabase() {
   try {
     const mongoUri = process.env.MONGODB_URI;
@@ -70,7 +70,7 @@ async function initializeDatabase() {
     eventSystemCollection = db.collection('eventSystem');
     guildItemsCollection = db.collection('guildItems');
 
-    // Initialize event system if it doesn't exist
+    // Initialise event system if it doesn't exist
     const eventSystem = await eventSystemCollection.findOne({ _id: 'main' });
     if (!eventSystem) {
       await eventSystemCollection.insertOne({
