@@ -1161,11 +1161,12 @@ async function handleScavengeCommand(interaction, userId) {
   userData[userId].artefacts.push(artefact);
   cooldowns.scavenge[userId] = now;
 
-  saveUserData();
-  saveCooldowns();
+  await saveUserData();
+  await saveCooldowns();
 
   // Check if this find was affected by events
-  const event = userData.eventSystem.currentEvent;
+  const eventData = await getEventSystem();
+  const event = eventData ? eventData.currentEvent : null;
   let eventText = '';
   let scavengeColor = selectedRarity.color;
 
@@ -1220,8 +1221,8 @@ async function handleLaborCommand(interaction, userId) {
   userData[userId].cash += earnings;
   cooldowns.labor[userId] = now;
 
-  saveUserData();
-  saveCooldowns();
+  await saveUserData();
+  await saveCooldowns();
 
   const laborEmbed = new EmbedBuilder()
     .setTitle('Work Complete')
@@ -1438,7 +1439,8 @@ async function handleLeaderboardCommand(interaction) {
 
 async function handleStoreCommand(interaction) {
   const guildId = interaction.guild.id;
-  const guildItems = userData.guildItems?.[guildId] || {};
+  const guildItemsDoc = await guildItemsCollection.findOne({ _id: guildId });
+  const guildItems = guildItemsDoc ? guildItemsDoc.items : {};
 
   if (Object.keys(guildItems).length === 0) {
     const emptyStoreEmbed = new EmbedBuilder()
@@ -1526,17 +1528,21 @@ async function handleAddItemCommand(interaction) {
   const itemDescription = interaction.options.getString('description') || 'Custom server item';
   const guildId = interaction.guild.id;
 
-  if (!userData.guildItems) userData.guildItems = {};
-  if (!userData.guildItems[guildId]) userData.guildItems[guildId] = {};
+  const guildItemsDoc = await guildItemsCollection.findOne({ _id: guildId });
+  const guildItems = guildItemsDoc ? guildItemsDoc.items : {};
 
-  userData.guildItems[guildId][itemName] = {
+  guildItems[itemName] = {
     price: itemPrice,
     description: itemDescription,
     addedBy: interaction.user.id,
     addedAt: Date.now()
   };
 
-  saveUserData();
+  await guildItemsCollection.replaceOne(
+    { _id: guildId },
+    { _id: guildId, items: guildItems },
+    { upsert: true }
+  );
 
   const addEmbed = new EmbedBuilder()
     .setTitle('Item Added Successfully')
@@ -1567,7 +1573,10 @@ async function handleRemoveItemCommand(interaction) {
   const itemName = interaction.options.getString('name');
   const guildId = interaction.guild.id;
 
-  if (!userData.guildItems || !userData.guildItems[guildId] || !userData.guildItems[guildId][itemName]) {
+  const guildItemsDoc = await guildItemsCollection.findOne({ _id: guildId });
+  const guildItems = guildItemsDoc ? guildItemsDoc.items : {};
+
+  if (!guildItems[itemName]) {
     const notFoundEmbed = new EmbedBuilder()
       .setTitle('Item Not Found')
       .setDescription(`No custom item named "${itemName}" exists in this server.`)
@@ -1577,8 +1586,12 @@ async function handleRemoveItemCommand(interaction) {
     return await interaction.reply({ embeds: [notFoundEmbed] });
   }
 
-  delete userData.guildItems[guildId][itemName];
-  saveUserData();
+  delete guildItems[itemName];
+  await guildItemsCollection.replaceOne(
+    { _id: guildId },
+    { _id: guildId, items: guildItems },
+    { upsert: true }
+  );
 
   const removeEmbed = new EmbedBuilder()
     .setTitle('Item Removed')
@@ -1602,7 +1615,8 @@ async function handleViewItemsCommand(interaction) {
   }
 
   const guildId = interaction.guild.id;
-  const guildItems = userData.guildItems?.[guildId] || {};
+  const guildItemsDoc = await guildItemsCollection.findOne({ _id: guildId });
+  const guildItems = guildItemsDoc ? guildItemsDoc.items : {};
 
   if (Object.keys(guildItems).length === 0) {
     const noItemsEmbed = new EmbedBuilder()
@@ -3396,8 +3410,9 @@ async function handleSetEventCommand(interaction) {
   }
 
   // End current event if one is active
-  if (userData.eventSystem.currentEvent) {
-    endCurrentEvent();
+  const eventData = await getEventSystem();
+  if (eventData && eventData.currentEvent) {
+    await endCurrentEvent();
   }
 
   // Create new event
@@ -3411,17 +3426,14 @@ async function handleSetEventCommand(interaction) {
     type: 'developer_triggered'
   };
 
-  userData.eventSystem.currentEvent = newEvent;
-  userData.eventSystem.lastEventStart = now;
-  userData.eventSystem.nextEventTime = now + (4 * 24 * 60 * 60 * 1000); // Next event in 4 days
-  userData.eventSystem.eventHistory.unshift(newEvent);
+  const updatedEventData = {
+    currentEvent: newEvent,
+    lastEventStart: now,
+    nextEventTime: now + (4 * 24 * 60 * 60 * 1000), // Next event in 4 days
+    eventHistory: [newEvent, ...(eventData?.eventHistory || [])].slice(0, 10)
+  };
 
-  // Keep only last 10 events in history
-  if (userData.eventSystem.eventHistory.length > 10) {
-    userData.eventSystem.eventHistory = userData.eventSystem.eventHistory.slice(0, 10);
-  }
-
-  saveUserData();
+  await saveEventSystem(updatedEventData);
 
   const eventEmbed = new EmbedBuilder()
     .setTitle('Developer Event Triggered')
