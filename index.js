@@ -271,7 +271,7 @@ async function broadcastEventStart(event) {
         },
         { 
           name: 'Scavenging Restriction', 
-          value: `**${event.negativeArtefact}** cannot be scavenged during this 24-hour emergency period while repair crews work to stabilize the site.`, 
+          value: `**${event.negativeArtefact}** cannot be scavenged during this 24-hour emergency period while repair crews work to stabilise the site.`, 
           inline: false 
         },
         { 
