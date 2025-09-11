@@ -1694,18 +1694,22 @@ async function handleStoreCommand(interaction) {
     return await interaction.reply({ embeds: [dmEmbed] });
   }
 
-  const guildId = interaction.guild.id;
-  const userId = interaction.user.id;
-  
-  // Ensure user is loaded
-  await getUser(userId);
-  
-  // Get both global and server items
-  const globalItems = await getGlobalItems();
-  const guildItemsDoc = await guildItemsCollection.findOne({ _id: guildId });
-  const guildItems = guildItemsDoc ? guildItemsDoc.items : {};
-  
-  const embeds = [];
+  // Acknowledge interaction immediately to prevent timeout
+  await interaction.deferReply();
+
+  try {
+    const guildId = interaction.guild.id;
+    const userId = interaction.user.id;
+    
+    // Run all database queries in parallel for speed
+    const [user, globalItems, guildItemsDoc] = await Promise.all([
+      getUser(userId),
+      getGlobalItems(),
+      guildItemsCollection.findOne({ _id: guildId })
+    ]);
+    
+    const guildItems = guildItemsDoc ? guildItemsDoc.items : {};
+    const embeds = [];
   
   // Global Store Embed
   if (Object.keys(globalItems).length > 0) {
@@ -1713,9 +1717,12 @@ async function handleStoreCommand(interaction) {
     
     for (const [name, item] of Object.entries(globalItems)) {
       if (item.type === 'bank_expansion') {
-        const currentPrice = await calculateExpansionPrice(userId);
+        // Calculate both price and capacity in parallel
+        const [currentPrice, currentCapacity] = await Promise.all([
+          calculateExpansionPrice(userId),
+          calculateBankCapacity(userId)
+        ]);
         const currentExpansions = userData[userId]?.bankExpansions || 0;
-        const currentCapacity = await calculateBankCapacity(userId);
         const nextCapacity = Math.floor(50000 * Math.pow(1.25, currentExpansions + 1));
         
         globalItemsList += `**${name}**\n`;
@@ -1772,67 +1779,93 @@ async function handleStoreCommand(interaction) {
     embeds.push(emptyServerEmbed);
   }
   
-  await interaction.reply({ embeds: embeds });
-}
-
-async function handleBuyCommand(interaction, userId) {
-  const itemName = interaction.options.getString('item').trim();
-  const globalItems = await getGlobalItems();
-  
-  // Check if item exists in global store
-  const item = globalItems[itemName];
-  if (!item) {
-    const notFoundEmbed = new EmbedBuilder()
-      .setTitle('Item Not Found')
-      .setDescription(`"${itemName}" is not available in the global store.`)
-      .addFields({
-        name: 'Available Items',
-        value: Object.keys(globalItems).join(', ') || 'No items available',
-        inline: false
-      })
+    await interaction.editReply({ embeds: embeds });
+  } catch (error) {
+    console.error('❌ Store command error:', error);
+    
+    const errorEmbed = new EmbedBuilder()
+      .setTitle('Store Error')
+      .setDescription('An error occurred while loading the store. Please try again.')
       .setColor(0xFF6B6B)
       .setTimestamp();
       
-    return await interaction.reply({ embeds: [notFoundEmbed] });
+    await interaction.editReply({ embeds: [errorEmbed] });
   }
-  
-  // Handle bank expansion purchase
-  if (item.type === 'bank_expansion') {
-    const result = await purchaseBankExpansion(userId);
+}
+
+async function handleBuyCommand(interaction, userId) {
+  // Acknowledge interaction immediately to prevent timeout
+  await interaction.deferReply();
+
+  try {
+    const itemName = interaction.options.getString('item').trim();
+    const globalItems = await getGlobalItems();
     
-    if (!result.success) {
-      if (result.error === 'insufficient_funds') {
-        const insufficientEmbed = new EmbedBuilder()
-          .setTitle('Insufficient Funds')
-          .setDescription(`You don't have enough cash to purchase the ${itemName}.`)
-          .addFields(
-            { name: 'Required Cash', value: `$${result.price.toLocaleString()}`, inline: true },
-            { name: 'Your Cash', value: `$${result.cash.toLocaleString()}`, inline: true },
-            { name: 'Shortfall', value: `$${(result.price - result.cash).toLocaleString()}`, inline: true }
-          )
-          .setColor(0xFF6B6B)
-          .setTimestamp();
-          
-        return await interaction.reply({ embeds: [insufficientEmbed] });
-      }
+    // Check if item exists in global store
+    const item = globalItems[itemName];
+    if (!item) {
+      const notFoundEmbed = new EmbedBuilder()
+        .setTitle('Item Not Found')
+        .setDescription(`"${itemName}" is not available in the global store.`)
+        .addFields({
+          name: 'Available Items',
+          value: Object.keys(globalItems).join(', ') || 'No items available',
+          inline: false
+        })
+        .setColor(0xFF6B6B)
+        .setTimestamp();
+        
+      return await interaction.editReply({ embeds: [notFoundEmbed] });
     }
+  
+    // Handle bank expansion purchase
+    if (item.type === 'bank_expansion') {
+      const result = await purchaseBankExpansion(userId);
+      
+      if (!result.success) {
+        if (result.error === 'insufficient_funds') {
+          const insufficientEmbed = new EmbedBuilder()
+            .setTitle('Insufficient Funds')
+            .setDescription(`You don't have enough cash to purchase the ${itemName}.`)
+            .addFields(
+              { name: 'Required Cash', value: `$${result.price.toLocaleString()}`, inline: true },
+              { name: 'Your Cash', value: `$${result.cash.toLocaleString()}`, inline: true },
+              { name: 'Shortfall', value: `$${(result.price - result.cash).toLocaleString()}`, inline: true }
+            )
+            .setColor(0xFF6B6B)
+            .setTimestamp();
+            
+          return await interaction.editReply({ embeds: [insufficientEmbed] });
+        }
+      }
+      
+      const successEmbed = new EmbedBuilder()
+        .setTitle('Bank Expansion Purchased')
+        .setDescription(`Successfully purchased ${itemName} for $${result.price.toLocaleString()}!`)
+        .addFields(
+          { name: 'Bank Capacity Increased', value: `$${result.newCapacity.toLocaleString()}`, inline: true },
+          { name: 'Total Expansions', value: `${result.newExpansions}`, inline: true },
+          { name: 'Remaining Cash', value: `$${userData[userId].cash.toLocaleString()}`, inline: true },
+          { name: 'Next Expansion Price', value: `$${(await calculateExpansionPrice(userId)).toLocaleString()}`, inline: true },
+          { name: 'Capacity Increase', value: '+25%', inline: true },
+          { name: 'Investment Status', value: 'Permanent Upgrade', inline: true }
+        )
+        .setColor(0x00FF7F)
+        .setFooter({ text: 'Bank expansion permanently increases your storage capacity' })
+        .setTimestamp();
+        
+      await interaction.editReply({ embeds: [successEmbed] });
+    }
+  } catch (error) {
+    console.error('❌ Buy command error:', error);
     
-    const successEmbed = new EmbedBuilder()
-      .setTitle('Bank Expansion Purchased')
-      .setDescription(`Successfully purchased ${itemName} for $${result.price.toLocaleString()}!`)
-      .addFields(
-        { name: 'Bank Capacity Increased', value: `$${result.newCapacity.toLocaleString()}`, inline: true },
-        { name: 'Total Expansions', value: `${result.newExpansions}`, inline: true },
-        { name: 'Remaining Cash', value: `$${userData[userId].cash.toLocaleString()}`, inline: true },
-        { name: 'Next Expansion Price', value: `$${(await calculateExpansionPrice(userId)).toLocaleString()}`, inline: true },
-        { name: 'Capacity Increase', value: '+25%', inline: true },
-        { name: 'Investment Status', value: 'Permanent Upgrade', inline: true }
-      )
-      .setColor(0x00FF7F)
-      .setFooter({ text: 'Bank expansion permanently increases your storage capacity' })
+    const errorEmbed = new EmbedBuilder()
+      .setTitle('Purchase Error')
+      .setDescription('An error occurred while processing your purchase. Please try again.')
+      .setColor(0xFF6B6B)
       .setTimestamp();
       
-    await interaction.reply({ embeds: [successEmbed] });
+    await interaction.editReply({ embeds: [errorEmbed] });
   }
 }
 
