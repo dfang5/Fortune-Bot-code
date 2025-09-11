@@ -735,7 +735,8 @@ client.once('clientReady', async () => {
 
     new SlashCommandBuilder()
       .setName('store')
-      .setDescription('View available items in global and server stores'),
+      .setDescription('View available items in global and server stores')
+      .setDMPermission(false),
 
     new SlashCommandBuilder()
       .setName('buy')
@@ -764,7 +765,8 @@ client.once('clientReady', async () => {
       .addStringOption(option =>
         option.setName('description')
           .setDescription('Description of the item')
-          .setRequired(false)),
+          .setRequired(false))
+      .setDMPermission(false),
 
     new SlashCommandBuilder()
       .setName('remove-item')
@@ -772,11 +774,13 @@ client.once('clientReady', async () => {
       .addStringOption(option =>
         option.setName('name')
           .setDescription('Name of the item to remove')
-          .setRequired(true)),
+          .setRequired(true))
+      .setDMPermission(false),
 
     new SlashCommandBuilder()
       .setName('view-items')
-      .setDescription('View all custom server items (Admin only)'),
+      .setDescription('View all custom server items (Admin only)')
+      .setDMPermission(false),
 
     new SlashCommandBuilder()
       .setName('marble-game')
@@ -795,7 +799,8 @@ client.once('clientReady', async () => {
         option.setName('player4')
           .setDescription('Fourth player to invite')
           .setRequired(true)
-      ),
+      )
+      .setDMPermission(false),
 
     new SlashCommandBuilder()
       .setName('convert')
@@ -1673,6 +1678,22 @@ async function handleLeaderboardCommand(interaction) {
 }
 
 async function handleStoreCommand(interaction) {
+  // Check if command is used in a server (not DMs)
+  if (!interaction.guild) {
+    const dmEmbed = new EmbedBuilder()
+      .setTitle('Server Required')
+      .setDescription('The `/store` command can only be used in servers, not in direct messages.')
+      .addFields({
+        name: 'Why?',
+        value: 'The store shows server-specific items that are only available in guild channels.',
+        inline: false
+      })
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+      
+    return await interaction.reply({ embeds: [dmEmbed] });
+  }
+
   const guildId = interaction.guild.id;
   const userId = interaction.user.id;
   
