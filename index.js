@@ -45,6 +45,7 @@ let usersCollection;
 let cooldownsCollection;
 let eventSystemCollection;
 let guildItemsCollection;
+let globalItemsCollection;
 
 // Initialize MongoDB connection
 async function initializeDatabase() {
@@ -68,6 +69,7 @@ async function initializeDatabase() {
     cooldownsCollection = db.collection('cooldowns');
     eventSystemCollection = db.collection('eventSystem');
     guildItemsCollection = db.collection('guildItems');
+    globalItemsCollection = db.collection('globalItems');
 
     // Initialize event system if it doesn't exist
     const eventSystem = await eventSystemCollection.findOne({ _id: 'main' });
@@ -86,6 +88,9 @@ async function initializeDatabase() {
 
     // Add database connection diagnostics
     await logDatabaseDiagnostics();
+
+    // Initialize global items if they don't exist
+    await initializeGlobalItems();
 
   } catch (error) {
     console.error('Failed to connect to MongoDB:', error);
@@ -226,6 +231,89 @@ async function saveGuildItems(guildId, items) {
   } catch (error) {
     console.error(`❌ Failed to save guild items for ${guildId}:`, error.message);
     throw error;
+  }
+}
+
+// Global Items System
+async function initializeGlobalItems() {
+  try {
+    const globalItems = await globalItemsCollection.findOne({ _id: 'main' });
+    if (!globalItems) {
+      await globalItemsCollection.insertOne({
+        _id: 'main',
+        items: {
+          'Bank Expansion Ticket': {
+            name: 'Bank Expansion Ticket',
+            basePrice: 25000,
+            description: 'Increases your bank capacity by 25%. Price increases exponentially with each purchase.',
+            type: 'bank_expansion',
+            multiplier: 2.5
+          }
+        }
+      });
+      console.log('✅ Global items initialized with Bank Expansion Ticket');
+    }
+  } catch (error) {
+    console.error('❌ Failed to initialize global items:', error.message);
+    throw error;
+  }
+}
+
+async function getGlobalItems() {
+  const globalDoc = await globalItemsCollection.findOne({ _id: 'main' });
+  return globalDoc?.items || {};
+}
+
+// Bank Expansion System
+async function calculateBankCapacity(userId) {
+  const user = await getUser(userId);
+  const expansions = user.bankExpansions || 0;
+  const baseCapacity = 50000;
+  const expansionPercent = 0.25; // 25% per expansion
+  
+  return Math.floor(baseCapacity * Math.pow(1 + expansionPercent, expansions));
+}
+
+async function calculateExpansionPrice(userId) {
+  const user = await getUser(userId);
+  const expansions = user.bankExpansions || 0;
+  const basePrice = 25000;
+  const multiplier = 2.5;
+  
+  return Math.floor(basePrice * Math.pow(multiplier, expansions));
+}
+
+async function getUserBankExpansions(userId) {
+  const user = await getUser(userId);
+  return user.bankExpansions || 0;
+}
+
+async function purchaseBankExpansion(userId) {
+  try {
+    const user = await getUser(userId);
+    const currentExpansions = user.bankExpansions || 0;
+    const price = await calculateExpansionPrice(userId);
+    
+    if (user.cash < price) {
+      return { success: false, error: 'insufficient_funds', price, cash: user.cash };
+    }
+    
+    // Process purchase
+    user.cash -= price;
+    user.bankExpansions = currentExpansions + 1;
+    await saveUser(userId);
+    
+    const newCapacity = await calculateBankCapacity(userId);
+    
+    return { 
+      success: true, 
+      newExpansions: user.bankExpansions,
+      newCapacity: newCapacity,
+      price: price
+    };
+  } catch (error) {
+    console.error(`❌ Failed to purchase bank expansion for ${userId}:`, error.message);
+    return { success: false, error: 'system_error' };
   }
 }
 
@@ -647,7 +735,15 @@ client.once('clientReady', async () => {
 
     new SlashCommandBuilder()
       .setName('store')
-      .setDescription('View all the items that admins have added'),
+      .setDescription('View available items in global and server stores'),
+
+    new SlashCommandBuilder()
+      .setName('buy')
+      .setDescription('Purchase an item from the global store')
+      .addStringOption(option =>
+        option.setName('item')
+          .setDescription('Name of the item to purchase')
+          .setRequired(true)),
 
     new SlashCommandBuilder()
       .setName('mass-sell')
@@ -906,6 +1002,9 @@ client.on('interactionCreate', async interaction => {
       case 'store':
         await handleStoreCommand(interaction);
         break;
+      case 'buy':
+        await handleBuyCommand(interaction, userId);
+        break;
       case 'mass-sell':
         await handleMassSellCommand(interaction, userId);
         break;
@@ -1035,18 +1134,22 @@ async function handleBankCommand(interaction, userId) {
   const amount = interaction.options.getInteger('amount');
 
   const currentBank = userData[userId].bankBalance || 0;
-  const maxDeposit = 50000 - currentBank;
+  const bankCapacity = await calculateBankCapacity(userId);
+  const maxDeposit = bankCapacity - currentBank;
 
   // Check bank capacity
   if (amount > maxDeposit) {
+    const expansions = userData[userId].bankExpansions || 0;
     const capacityEmbed = new EmbedBuilder()
       .setTitle('Bank Capacity Exceeded')
       .setDescription('Your deposit would exceed the maximum bank capacity.')
       .addFields(
         { name: 'Maximum Deposit Available', value: `$${maxDeposit.toLocaleString()}`, inline: true },
         { name: 'Current Bank Balance', value: `$${currentBank.toLocaleString()}`, inline: true },
-        { name: 'Bank Limit', value: '$50,000', inline: true },
-        { name: 'Bank Usage', value: `${((currentBank / 50000) * 100).toFixed(1)}%`, inline: false }
+        { name: 'Bank Capacity', value: `$${bankCapacity.toLocaleString()}`, inline: true },
+        { name: 'Bank Usage', value: `${((currentBank / bankCapacity) * 100).toFixed(1)}%`, inline: true },
+        { name: 'Expansions Purchased', value: `${expansions}`, inline: true },
+        { name: 'Upgrade Available', value: 'Use `/store` to buy Bank Expansion Tickets', inline: true }
       )
       .setColor(0xFF9F43)
       .setTimestamp();
@@ -1075,6 +1178,8 @@ async function handleBankCommand(interaction, userId) {
   userData[userId].bankBalance = currentBank + amount;
   await saveUserData();
 
+  const finalCapacity = await calculateBankCapacity(userId);
+  const expansions = userData[userId].bankExpansions || 0;
   const successEmbed = new EmbedBuilder()
     .setTitle('Bank Deposit Completed')
     .setDescription(`Successfully deposited $${amount.toLocaleString()} into your secure bank account.`)
@@ -1082,9 +1187,9 @@ async function handleBankCommand(interaction, userId) {
       { name: 'Transaction Amount', value: `$${amount.toLocaleString()}`, inline: true },
       { name: 'Remaining Cash', value: `$${userData[userId].cash.toLocaleString()}`, inline: true },
       { name: 'New Bank Balance', value: `$${userData[userId].bankBalance.toLocaleString()}`, inline: true },
-      { name: 'Bank Capacity Used', value: `${((userData[userId].bankBalance / 50000) * 100).toFixed(1)}%`, inline: true },
-      { name: 'Available Space', value: `$${(50000 - userData[userId].bankBalance).toLocaleString()}`, inline: true },
-      { name: 'Security Status', value: 'Funds Protected', inline: true }
+      { name: 'Bank Capacity Used', value: `${((userData[userId].bankBalance / finalCapacity) * 100).toFixed(1)}%`, inline: true },
+      { name: 'Available Space', value: `$${(finalCapacity - userData[userId].bankBalance).toLocaleString()}`, inline: true },
+      { name: 'Expansions Owned', value: `${expansions}`, inline: true }
     )
     .setColor(0x00FF7F)
     .setFooter({ text: 'Your banked money is safe from theft attempts' })
@@ -1118,6 +1223,8 @@ async function handleWithdrawCommand(interaction, userId) {
   userData[userId].cash += amount;
   await saveUserData();
 
+  const finalCapacity = await calculateBankCapacity(userId);
+  const expansions = userData[userId].bankExpansions || 0;
   const successEmbed = new EmbedBuilder()
     .setTitle('Bank Withdrawal Completed')
     .setDescription(`Successfully withdrew $${amount.toLocaleString()} from your bank account.`)
@@ -1125,9 +1232,9 @@ async function handleWithdrawCommand(interaction, userId) {
       { name: 'Transaction Amount', value: `$${amount.toLocaleString()}`, inline: true },
       { name: 'New Cash Balance', value: `$${userData[userId].cash.toLocaleString()}`, inline: true },
       { name: 'Remaining Bank Funds', value: `$${userData[userId].bankBalance.toLocaleString()}`, inline: true },
-      { name: 'Bank Capacity Used', value: `${((userData[userId].bankBalance / 50000) * 100).toFixed(1)}%`, inline: true },
-      { name: 'Available Space', value: `$${(50000 - userData[userId].bankBalance).toLocaleString()}`, inline: true },
-      { name: 'Risk Status', value: 'Cash Vulnerable to Theft', inline: true }
+      { name: 'Bank Capacity Used', value: `${((userData[userId].bankBalance / finalCapacity) * 100).toFixed(1)}%`, inline: true },
+      { name: 'Available Space', value: `$${(finalCapacity - userData[userId].bankBalance).toLocaleString()}`, inline: true },
+      { name: 'Expansions Owned', value: `${expansions}`, inline: true }
     )
     .setColor(0x339AF0)
     .setFooter({ text: 'Warning: Cash on hand can be stolen by other players' })
@@ -1567,11 +1674,71 @@ async function handleLeaderboardCommand(interaction) {
 
 async function handleStoreCommand(interaction) {
   const guildId = interaction.guild.id;
+  const userId = interaction.user.id;
+  
+  // Ensure user is loaded
+  await getUser(userId);
+  
+  // Get both global and server items
+  const globalItems = await getGlobalItems();
   const guildItemsDoc = await guildItemsCollection.findOne({ _id: guildId });
   const guildItems = guildItemsDoc ? guildItemsDoc.items : {};
+  
+  const embeds = [];
+  
+  // Global Store Embed
+  if (Object.keys(globalItems).length > 0) {
+    let globalItemsList = '';
+    
+    for (const [name, item] of Object.entries(globalItems)) {
+      if (item.type === 'bank_expansion') {
+        const currentPrice = await calculateExpansionPrice(userId);
+        const currentExpansions = userData[userId]?.bankExpansions || 0;
+        const currentCapacity = await calculateBankCapacity(userId);
+        const nextCapacity = Math.floor(50000 * Math.pow(1.25, currentExpansions + 1));
+        
+        globalItemsList += `**${name}**\n`;
+        globalItemsList += `Current Price: $${currentPrice.toLocaleString()}\n`;
+        globalItemsList += `${item.description}\n`;
+        globalItemsList += `Your Bank: $${currentCapacity.toLocaleString()} capacity (${currentExpansions} expansions)\n`;
+        globalItemsList += `Next Expansion: $${nextCapacity.toLocaleString()} capacity\n\n`;
+      }
+    }
+    
+    const globalEmbed = new EmbedBuilder()
+      .setTitle('Global Store')
+      .setDescription('**Cross-server items available to all players**')
+      .addFields(
+        { name: 'Available Items', value: globalItemsList || 'No items available', inline: false },
+        { name: 'How to Purchase', value: 'Use `/buy <item_name>` to purchase global items', inline: false }
+      )
+      .setColor(0xFFD700)
+      .setFooter({ text: 'Global items • Available across all servers' })
+      .setTimestamp();
+      
+    embeds.push(globalEmbed);
+  }
+  
+  // Server Store Embed
+  if (Object.keys(guildItems).length > 0) {
+    const serverItemsList = Object.entries(guildItems)
+      .map(([name, data]) => `**${name}**\nPrice: $${data.price.toLocaleString()}\n${data.description}`)
+      .join('\n\n');
 
-  if (Object.keys(guildItems).length === 0) {
-    const emptyStoreEmbed = new EmbedBuilder()
+    const serverEmbed = new EmbedBuilder()
+      .setTitle('Server Store')
+      .setDescription(`**Server-specific items for ${interaction.guild.name}**`)
+      .addFields(
+        { name: 'Available Items', value: serverItemsList, inline: false },
+        { name: 'How to Purchase', value: 'Contact **server administrators** to purchase items', inline: false }
+      )
+      .setColor(0x9932CC)
+      .setFooter({ text: 'Server items • Custom additions by administrators' })
+      .setTimestamp();
+      
+    embeds.push(serverEmbed);
+  } else {
+    const emptyServerEmbed = new EmbedBuilder()
       .setTitle('Server Store')
       .setDescription('This server currently has no custom items available for purchase.')
       .addFields(
@@ -1580,26 +1747,72 @@ async function handleStoreCommand(interaction) {
       )
       .setColor(0x6C7B7F)
       .setTimestamp();
-
-    return await interaction.reply({ embeds: [emptyStoreEmbed] });
+      
+    embeds.push(emptyServerEmbed);
   }
+  
+  await interaction.reply({ embeds: embeds });
+}
 
-  const itemList = Object.entries(guildItems)
-    .map(([name, data]) => `**${name}**\nPrice: $${data.price.toLocaleString()}\n${data.description}`)
-    .join('\n\n');
-
-  const storeEmbed = new EmbedBuilder()
-    .setTitle('🏪 Server Store')
-    .setDescription(`**Browse ${Object.keys(guildItems).length} available items** in this server.`)
-    .addFields(
-      { name: 'Available Items', value: itemList, inline: false },
-      { name: 'How to Purchase', value: 'Contact **server administrators** to purchase items', inline: false }
-    )
-    .setColor(0x9932CC)
-    .setFooter({ text: 'Items shown are server-specific custom additions' })
-    .setTimestamp();
-
-  await interaction.reply({ embeds: [storeEmbed] });
+async function handleBuyCommand(interaction, userId) {
+  const itemName = interaction.options.getString('item').trim();
+  const globalItems = await getGlobalItems();
+  
+  // Check if item exists in global store
+  const item = globalItems[itemName];
+  if (!item) {
+    const notFoundEmbed = new EmbedBuilder()
+      .setTitle('Item Not Found')
+      .setDescription(`"${itemName}" is not available in the global store.`)
+      .addFields({
+        name: 'Available Items',
+        value: Object.keys(globalItems).join(', ') || 'No items available',
+        inline: false
+      })
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+      
+    return await interaction.reply({ embeds: [notFoundEmbed] });
+  }
+  
+  // Handle bank expansion purchase
+  if (item.type === 'bank_expansion') {
+    const result = await purchaseBankExpansion(userId);
+    
+    if (!result.success) {
+      if (result.error === 'insufficient_funds') {
+        const insufficientEmbed = new EmbedBuilder()
+          .setTitle('Insufficient Funds')
+          .setDescription(`You don't have enough cash to purchase the ${itemName}.`)
+          .addFields(
+            { name: 'Required Cash', value: `$${result.price.toLocaleString()}`, inline: true },
+            { name: 'Your Cash', value: `$${result.cash.toLocaleString()}`, inline: true },
+            { name: 'Shortfall', value: `$${(result.price - result.cash).toLocaleString()}`, inline: true }
+          )
+          .setColor(0xFF6B6B)
+          .setTimestamp();
+          
+        return await interaction.reply({ embeds: [insufficientEmbed] });
+      }
+    }
+    
+    const successEmbed = new EmbedBuilder()
+      .setTitle('Bank Expansion Purchased')
+      .setDescription(`Successfully purchased ${itemName} for $${result.price.toLocaleString()}!`)
+      .addFields(
+        { name: 'Bank Capacity Increased', value: `$${result.newCapacity.toLocaleString()}`, inline: true },
+        { name: 'Total Expansions', value: `${result.newExpansions}`, inline: true },
+        { name: 'Remaining Cash', value: `$${userData[userId].cash.toLocaleString()}`, inline: true },
+        { name: 'Next Expansion Price', value: `$${(await calculateExpansionPrice(userId)).toLocaleString()}`, inline: true },
+        { name: 'Capacity Increase', value: '+25%', inline: true },
+        { name: 'Investment Status', value: 'Permanent Upgrade', inline: true }
+      )
+      .setColor(0x00FF7F)
+      .setFooter({ text: 'Bank expansion permanently increases your storage capacity' })
+      .setTimestamp();
+      
+    await interaction.reply({ embeds: [successEmbed] });
+  }
 }
 
 // New command handlers
