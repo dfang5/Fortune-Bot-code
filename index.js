@@ -46,7 +46,7 @@ let cooldownsCollection;
 let eventSystemCollection;
 let guildItemsCollection;
 
-// Initialise MongoDB connection
+// Initialize MongoDB connection
 async function initializeDatabase() {
   try {
     const mongoUri = process.env.MONGODB_URI;
@@ -57,7 +57,6 @@ async function initializeDatabase() {
 
     mongoClient = new MongoClient(mongoUri, {
       ssl: true,
-      tlsAllowInvalidCertificates: true,
       serverSelectionTimeoutMS: 5000,
       socketTimeoutMS: 45000,
     });
@@ -70,7 +69,7 @@ async function initializeDatabase() {
     eventSystemCollection = db.collection('eventSystem');
     guildItemsCollection = db.collection('guildItems');
 
-    // Initialise event system if it doesn't exist
+    // Initialize event system if it doesn't exist
     const eventSystem = await eventSystemCollection.findOne({ _id: 'main' });
     if (!eventSystem) {
       await eventSystemCollection.insertOne({
@@ -81,6 +80,12 @@ async function initializeDatabase() {
         eventHistory: []
       });
     }
+
+    // Health check: Test write and read permissions
+    await performDatabaseHealthCheck();
+
+    // Add database connection diagnostics
+    await logDatabaseDiagnostics();
 
   } catch (error) {
     console.error('Failed to connect to MongoDB:', error);
@@ -97,6 +102,35 @@ global.activeMarbleGames = {};
 global.messageTracker = {};
 global.massSellSessions = {};
 
+// Graceful shutdown handler for Railway deployment
+async function gracefulShutdown(signal) {
+  console.log(`🔄 Received ${signal}, performing graceful shutdown...`);
+  
+  try {
+    // Save all pending data
+    console.log('💾 Saving all user data before shutdown...');
+    await saveUserData();
+    await saveCooldowns();
+    
+    // Close MongoDB connection
+    if (mongoClient) {
+      console.log('🔌 Closing MongoDB connection...');
+      await mongoClient.close();
+    }
+    
+    console.log('✅ Graceful shutdown completed');
+    process.exit(0);
+  } catch (error) {
+    console.error('❌ Error during graceful shutdown:', error);
+    process.exit(1);
+  }
+}
+
+// Set up process handlers for Railway
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGUSR2', () => gracefulShutdown('SIGUSR2')); // Nodemon restart
+
 // Database helper functions
 async function getUser(userId) {
   if (!userData[userId]) {
@@ -112,11 +146,17 @@ async function saveUser(userId) {
     return;
   }
   if (userData[userId]) {
-    await usersCollection.replaceOne(
-      { _id: userId },
-      { _id: userId, ...userData[userId] },
-      { upsert: true }
-    );
+    try {
+      const result = await usersCollection.replaceOne(
+        { _id: userId },
+        { _id: userId, ...userData[userId] },
+        { upsert: true }
+      );
+      console.log(`💾 User ${userId}: Matched=${result.matchedCount}, Upserted=${result.upsertedCount}`);
+    } catch (error) {
+      console.error(`❌ Failed to save user ${userId}:`, error.message);
+      throw error;
+    }
   }
 }
 
@@ -130,11 +170,17 @@ async function saveCooldowns() {
     console.warn('Cooldowns collection not ready, skipping save');
     return;
   }
-  await cooldownsCollection.replaceOne(
-    { _id: 'main' },
-    { _id: 'main', ...cooldowns },
-    { upsert: true }
-  );
+  try {
+    const result = await cooldownsCollection.replaceOne(
+      { _id: 'main' },
+      { _id: 'main', ...cooldowns },
+      { upsert: true }
+    );
+    console.log(`💾 Cooldowns: Matched=${result.matchedCount}, Upserted=${result.upsertedCount}`);
+  } catch (error) {
+    console.error('❌ Failed to save cooldowns:', error.message);
+    throw error;
+  }
 }
 
 async function getEventSystem() {
@@ -142,11 +188,17 @@ async function getEventSystem() {
 }
 
 async function saveEventSystem(eventData) {
-  await eventSystemCollection.replaceOne(
-    { _id: 'main' },
-    { _id: 'main', ...eventData },
-    { upsert: true }
-  );
+  try {
+    const result = await eventSystemCollection.replaceOne(
+      { _id: 'main' },
+      { _id: 'main', ...eventData },
+      { upsert: true }
+    );
+    console.log(`💾 Event System: Matched=${result.matchedCount}, Upserted=${result.upsertedCount}`);
+  } catch (error) {
+    console.error('❌ Failed to save event system:', error.message);
+    throw error;
+  }
 }
 
 async function getXpData(userId) {
@@ -164,11 +216,81 @@ async function getGuildItems(guildId) {
 }
 
 async function saveGuildItems(guildId, items) {
-  await guildItemsCollection.replaceOne(
-    { _id: guildId },
-    { _id: guildId, items },
-    { upsert: true }
-  );
+  try {
+    const result = await guildItemsCollection.replaceOne(
+      { _id: guildId },
+      { _id: guildId, items },
+      { upsert: true }
+    );
+    console.log(`💾 Guild Items [${guildId}]: Matched=${result.matchedCount}, Upserted=${result.upsertedCount}`);
+  } catch (error) {
+    console.error(`❌ Failed to save guild items for ${guildId}:`, error.message);
+    throw error;
+  }
+}
+
+// Database connection diagnostics
+async function logDatabaseDiagnostics() {
+  try {
+    console.log('📊 MongoDB Connection Diagnostics:');
+    console.log(`   Database: ${db.databaseName}`);
+    
+    const userCount = await usersCollection.countDocuments();
+    console.log(`   Users collection: ${userCount} documents`);
+    
+    // Check connection status and authentication
+    const connStatus = await db.admin().command({ connectionStatus: 1 });
+    if (connStatus.authInfo && connStatus.authInfo.authenticatedUsers) {
+      const users = connStatus.authInfo.authenticatedUsers;
+      console.log(`   Authenticated as: ${JSON.stringify(users)}`);
+    }
+    
+    const mongoUri = process.env.MONGODB_URI;
+    const hostMatch = mongoUri.match(/@([^/]+)/);
+    if (hostMatch) {
+      console.log(`   MongoDB Host: ${hostMatch[1]}`);
+    }
+    
+    console.log('📊 Database diagnostics completed');
+  } catch (error) {
+    console.error('❌ Database diagnostics failed:', error.message);
+  }
+}
+
+// Database health check function
+async function performDatabaseHealthCheck() {
+  try {
+    console.log('🏥 Performing MongoDB health check...');
+    
+    // Test write permission
+    const testDoc = { _id: 'health_check', timestamp: Date.now(), test: 'write_read_test' };
+    const writeResult = await usersCollection.replaceOne(
+      { _id: 'health_check' },
+      testDoc,
+      { upsert: true }
+    );
+    
+    console.log(`✅ Write test - Matched: ${writeResult.matchedCount}, Upserted: ${writeResult.upsertedCount}`);
+    
+    // Test read permission
+    const readResult = await usersCollection.findOne({ _id: 'health_check' });
+    
+    if (readResult && readResult.test === 'write_read_test') {
+      console.log('✅ Read test - SUCCESS');
+      
+      // Clean up test document
+      await usersCollection.deleteOne({ _id: 'health_check' });
+      console.log('✅ Database health check PASSED - Read/Write permissions confirmed');
+    } else {
+      console.error('❌ Read test FAILED - Could not read back test document');
+      throw new Error('Database read test failed');
+    }
+    
+  } catch (error) {
+    console.error('❌ DATABASE HEALTH CHECK FAILED:', error.message);
+    console.error('This explains why data is not persisting!');
+    throw error;
+  }
 }
 
 // Legacy save functions (now async and use MongoDB)
@@ -177,8 +299,14 @@ async function saveUserData() {
     console.warn('Users collection not ready, skipping save');
     return;
   }
-  const userPromises = Object.keys(userData).map(userId => saveUser(userId));
-  await Promise.all(userPromises);
+  try {
+    const userPromises = Object.keys(userData).map(userId => saveUser(userId));
+    await Promise.all(userPromises);
+    console.log(`💾 Saved data for ${Object.keys(userData).length} users to MongoDB`);
+  } catch (error) {
+    console.error('❌ SAVE FAILED:', error.message);
+    throw error;
+  }
 }
 
 // Rarity and artefact config
@@ -271,7 +399,7 @@ async function broadcastEventStart(event) {
         },
         { 
           name: 'Scavenging Restriction', 
-          value: `**${event.negativeArtefact}** cannot be scavenged during this 24-hour emergency period while repair crews work to stabilise the site.`, 
+          value: `**${event.negativeArtefact}** cannot be scavenged during this 24-hour emergency period while repair crews work to stabilize the site.`, 
           inline: false 
         },
         { 
@@ -425,7 +553,7 @@ client.on('messageCreate', async (message) => {
     if (userData[userId].xpData.messageCount % 2 === 0) {
       userData[userId].xpData.xp++;
       userData[userId].xpData.lastMessage = now;
-      saveUserData();
+      await saveUserData();
     }
   }
 });
@@ -945,7 +1073,7 @@ async function handleBankCommand(interaction, userId) {
   // Process deposit
   userData[userId].cash -= amount;
   userData[userId].bankBalance = currentBank + amount;
-  saveUserData();
+  await saveUserData();
 
   const successEmbed = new EmbedBuilder()
     .setTitle('Bank Deposit Completed')
@@ -988,7 +1116,7 @@ async function handleWithdrawCommand(interaction, userId) {
   // Process withdrawal
   userData[userId].bankBalance = currentBank - amount;
   userData[userId].cash += amount;
-  saveUserData();
+  await saveUserData();
 
   const successEmbed = new EmbedBuilder()
     .setTitle('Bank Withdrawal Completed')
@@ -1053,7 +1181,7 @@ async function handleStealCommand(interaction, userId) {
     // Process successful theft
     userData[targetId].cash -= amount;
     userData[userId].cash += amount;
-    saveUserData();
+    await saveUserData();
 
     const successEmbed = new EmbedBuilder()
       .setTitle('Theft Successful')
@@ -1307,7 +1435,7 @@ async function handleSellCommand(interaction, userId) {
 
   userData[userId].cash += sellValue;
   userData[userId].artefacts.splice(artefactIndex, 1);
-  saveUserData();
+  await saveUserData();
 
   const sellEmbed = new EmbedBuilder()
     .setTitle('Artefact Sold')
@@ -1964,7 +2092,7 @@ async function handleComponentInteraction(interaction) {
     // Convert XP to cash
     userData[userId].cash += cashEarned;
     userData[userId].xpData.xp = 0;
-    saveUserData();
+    await saveUserData();
 
     const successEmbed = new EmbedBuilder()
       .setTitle('XP Conversion Successful')
@@ -2068,7 +2196,7 @@ async function handleComponentInteraction(interaction) {
 
     // Add earnings to user's cash
     userData[session.userId].cash += totalEarnings;
-    saveUserData();
+    await saveUserData();
 
     const successEmbed = new EmbedBuilder()
       .setTitle('Selected Artefacts Sold')
@@ -2426,7 +2554,7 @@ async function executeTrade(interaction, trade, tradeId) {
       }
     });
 
-    saveUserData();
+    await saveUserData();
     delete global.activeTrades[tradeId];
 
     const successEmbed = new EmbedBuilder()
@@ -2700,7 +2828,7 @@ async function collectBets(game) {
   }
 
   game.betsCollected = true;
-  saveUserData();
+  await saveUserData();
 }
 
 async function startMarbleGame(interaction, gameId) {
@@ -2970,7 +3098,7 @@ async function endGame(interaction, gameId) {
   for (const player of winningPlayers) {
     userData[player.id].cash += winningsPerPlayer;
   }
-  saveUserData();
+  await saveUserData();
 
   const gameEndEmbed = new EmbedBuilder()
     .setTitle('Marble Game Complete!')
@@ -3307,7 +3435,7 @@ async function handleGiveArtefactCommand(interaction) {
 
   // Give artefact to user
   userData[targetId].artefacts.push(artefactName);
-  saveUserData();
+  await saveUserData();
 
   const successEmbed = new EmbedBuilder()
     .setTitle('Artefact Given')
@@ -3347,7 +3475,7 @@ async function handleGiveCashCommand(interaction) {
 
   // Give cash to user
   userData[targetId].cash += amount;
-  saveUserData();
+  await saveUserData();
 
   const successEmbed = new EmbedBuilder()
     .setTitle('Cash Given')
@@ -3510,7 +3638,7 @@ async function handleRemoveArtefactCommand(interaction) {
 
   // Remove artefact from user
   userData[targetId].artefacts.splice(artefactIndex, 1);
-  saveUserData();
+  await saveUserData();
 
   const successEmbed = new EmbedBuilder()
     .setTitle('Artefact Removed')
@@ -3584,7 +3712,7 @@ async function handleRemoveCashCommand(interaction) {
     remainingToRemove -= removedFromBank;
   }
 
-  saveUserData();
+  await saveUserData();
 
   const successEmbed = new EmbedBuilder()
     .setTitle('Cash Removed (Bypassed Bank)')
