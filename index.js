@@ -139,8 +139,11 @@ process.on('SIGUSR2', () => gracefulShutdown('SIGUSR2')); // Nodemon restart
 // Database helper functions
 async function getUser(userId) {
   if (!userData[userId]) {
+    console.log(`🔍 Loading user ${userId} from database...`);
     const user = await usersCollection.findOne({ _id: userId });
+    console.log(`🔍 Database returned for ${userId}:`, JSON.stringify(user, null, 2));
     userData[userId] = user || { cash: 0, artefacts: [], bankBalance: 0 };
+    console.log(`🔍 Final userData for ${userId}:`, JSON.stringify(userData[userId], null, 2));
   }
   return userData[userId];
 }
@@ -152,16 +155,23 @@ async function saveUser(userId) {
   }
   if (userData[userId]) {
     try {
+      console.log(`💾 Attempting to save user ${userId} with data:`, JSON.stringify(userData[userId], null, 2));
       const result = await usersCollection.replaceOne(
         { _id: userId },
         { _id: userId, ...userData[userId] },
         { upsert: true }
       );
-      console.log(`💾 User ${userId}: Matched=${result.matchedCount}, Upserted=${result.upsertedCount}`);
+      console.log(`💾 Save result for ${userId}: Matched=${result.matchedCount}, Upserted=${result.upsertedCount}`);
+      
+      // Verify the save worked
+      const verification = await usersCollection.findOne({ _id: userId });
+      console.log(`🔍 Verification read for ${userId}:`, JSON.stringify(verification, null, 2));
     } catch (error) {
       console.error(`❌ Failed to save user ${userId}:`, error.message);
       throw error;
     }
+  } else {
+    console.warn(`⚠️  No data to save for user ${userId}`);
   }
 }
 
@@ -969,6 +979,11 @@ client.on('interactionCreate', async interaction => {
 
   if (!interaction.isChatInputCommand()) return;
 
+  // Acknowledge ALL commands immediately to prevent timeout
+  if (interaction.commandName === 'store' || interaction.commandName === 'buy' || interaction.commandName === 'add-item') {
+    await interaction.deferReply();
+  }
+
   const userId = interaction.user.id;
   if (!userData[userId]) userData[userId] = { cash: 0, artefacts: [], bankBalance: 0 };
 
@@ -1678,27 +1693,23 @@ async function handleLeaderboardCommand(interaction) {
 }
 
 async function handleStoreCommand(interaction) {
-  // Check if command is used in a server (not DMs)
-  if (!interaction.guild) {
+  // Interaction already deferred in main handler to prevent timeout
+
+  // Use guildId directly (always available) instead of guild object
+  const guildId = interaction.guildId;
+  
+  // Additional safety check - commands should only work in servers
+  if (!guildId) {
     const dmEmbed = new EmbedBuilder()
       .setTitle('Server Required')
-      .setDescription('The `/store` command can only be used in servers, not in direct messages.')
-      .addFields({
-        name: 'Why?',
-        value: 'The store shows server-specific items that are only available in guild channels.',
-        inline: false
-      })
+      .setDescription('This command requires server context.')
       .setColor(0xFF6B6B)
       .setTimestamp();
       
-    return await interaction.reply({ embeds: [dmEmbed] });
+    return await interaction.editReply({ embeds: [dmEmbed] });
   }
 
-  // Acknowledge interaction immediately to prevent timeout
-  await interaction.deferReply();
-
   try {
-    const guildId = interaction.guild.id;
     const userId = interaction.user.id;
     
     // Run all database queries in parallel for speed
@@ -1755,7 +1766,7 @@ async function handleStoreCommand(interaction) {
 
     const serverEmbed = new EmbedBuilder()
       .setTitle('Server Store')
-      .setDescription(`**Server-specific items for ${interaction.guild.name}**`)
+      .setDescription(`**Server-specific items for this server**`)
       .addFields(
         { name: 'Available Items', value: serverItemsList, inline: false },
         { name: 'How to Purchase', value: 'Contact **server administrators** to purchase items', inline: false }
@@ -1794,8 +1805,7 @@ async function handleStoreCommand(interaction) {
 }
 
 async function handleBuyCommand(interaction, userId) {
-  // Acknowledge interaction immediately to prevent timeout
-  await interaction.deferReply();
+  // Interaction already deferred in main handler to prevent timeout
 
   try {
     const itemName = interaction.options.getString('item').trim();
@@ -1907,21 +1917,33 @@ async function handleMassSellCommand(interaction, userId) {
 }
 
 async function handleAddItemCommand(interaction) {
+  // Use guildId directly (always available) instead of guild object
+  const guildId = interaction.guildId;
+  
+  if (!guildId) {
+    const dmEmbed = new EmbedBuilder()
+      .setTitle('Server Required')
+      .setDescription('This command requires server context.')
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+      
+    return await interaction.editReply({ embeds: [dmEmbed] });
+  }
+
   // Check if user is admin
-  if (interaction.user.id !== DEVELOPER_ID && !interaction.member.permissions.has('Administrator')) {
+  if (interaction.user.id !== DEVELOPER_ID && !interaction.member?.permissions.has('Administrator')) {
     const noPermEmbed = new EmbedBuilder()
       .setTitle('Access Denied')
       .setDescription('Only administrators can add custom server items.')
       .setColor(0xFF6B6B)
       .setTimestamp();
 
-    return await interaction.reply({ embeds: [noPermEmbed] });
+    return await interaction.editReply({ embeds: [noPermEmbed] });
   }
 
   const itemName = interaction.options.getString('name');
   const itemPrice = interaction.options.getInteger('price');
   const itemDescription = interaction.options.getString('description') || 'Custom server item';
-  const guildId = interaction.guild.id;
 
   const guildItemsDoc = await guildItemsCollection.findOne({ _id: guildId });
   const guildItems = guildItemsDoc ? guildItemsDoc.items : {};
@@ -1950,7 +1972,7 @@ async function handleAddItemCommand(interaction) {
     .setColor(0x00FF7F)
     .setTimestamp();
 
-  await interaction.reply({ embeds: [addEmbed] });
+  await interaction.editReply({ embeds: [addEmbed] });
 }
 
 async function handleRemoveItemCommand(interaction) {
