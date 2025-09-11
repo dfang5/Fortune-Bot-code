@@ -100,7 +100,7 @@ async function initializeDatabase() {
 
 // Global data objects (loaded from MongoDB)
 let userData = {};
-let cooldowns = { scavenge: {}, labor: {} };
+let cooldowns = { scavenge: {}, labor: {}, steal: {} };
 global.tempItems = {};
 global.activeTrades = {};
 global.activeMarbleGames = {};
@@ -177,7 +177,18 @@ async function saveUser(userId) {
 
 async function getCooldowns() {
   const cooldownDoc = await cooldownsCollection.findOne({ _id: 'main' });
-  return cooldownDoc || { scavenge: {}, labor: {} };
+  const defaults = { scavenge: {}, labor: {}, steal: {} };
+  
+  if (!cooldownDoc) {
+    return defaults;
+  }
+  
+  // Merge with defaults to ensure all keys exist, even in old documents
+  return {
+    scavenge: cooldownDoc.scavenge || {},
+    labor: cooldownDoc.labor || {},
+    steal: cooldownDoc.steal || {}
+  };
 }
 
 async function saveCooldowns() {
@@ -884,7 +895,15 @@ client.once('clientReady', async () => {
         option.setName('amount')
           .setDescription('Amount of cash to remove')
           .setRequired(true)
-          .setMinValue(1))
+          .setMinValue(1)),
+
+    new SlashCommandBuilder()
+      .setName('reset-cooldowns')
+      .setDescription('Reset cooldowns for a user or all users (Developer only)')
+      .addUserOption(option =>
+        option.setName('user')
+          .setDescription('User to reset cooldowns for (leave empty for ALL users)')
+          .setRequired(false))
   ];
 
   const rest = new REST({ version:'10' }).setToken(token);
@@ -979,9 +998,14 @@ client.on('interactionCreate', async interaction => {
 
   if (!interaction.isChatInputCommand()) return;
 
-  // Acknowledge ALL commands immediately to prevent timeout
+  // Acknowledge ALL commands immediately to prevent timeout  
   if (interaction.commandName === 'store' || interaction.commandName === 'buy' || interaction.commandName === 'add-item') {
     await interaction.deferReply();
+  }
+  
+  // Developer commands get ephemeral replies
+  if (interaction.commandName === 'reset-cooldowns') {
+    await interaction.deferReply({ ephemeral: true });
   }
 
   const userId = interaction.user.id;
@@ -1068,6 +1092,10 @@ client.on('interactionCreate', async interaction => {
 
       case 'remove-cash':
         await handleRemoveCashCommand(interaction);
+        break;
+
+      case 'reset-cooldowns':
+        await handleResetCooldownsCommand(interaction);
         break;
     }
   } catch (error) {
@@ -1264,6 +1292,28 @@ async function handleWithdrawCommand(interaction, userId) {
 }
 
 async function handleStealCommand(interaction, userId) {
+  const STEAL_COOLDOWN = 30 * 60 * 1000; // 30 minutes
+  const now = Date.now();
+
+  // Check cooldown
+  if (cooldowns.steal[userId] && (now - cooldowns.steal[userId]) < STEAL_COOLDOWN) {
+    const timeLeft = STEAL_COOLDOWN - (now - cooldowns.steal[userId]);
+    const minutes = Math.floor(timeLeft / (60 * 1000));
+    const seconds = Math.floor((timeLeft % (60 * 1000)) / 1000);
+
+    const cooldownEmbed = new EmbedBuilder()
+      .setTitle('Steal Cooldown Active')
+      .setDescription('You must wait before attempting another theft.')
+      .addFields(
+        { name: 'Time Remaining', value: `${minutes}m ${seconds}s`, inline: true },
+        { name: 'Cooldown Duration', value: '30 minutes', inline: true }
+      )
+      .setColor(0xFF9F43)
+      .setTimestamp();
+
+    return await interaction.reply({ embeds: [cooldownEmbed] });
+  }
+
   const target = interaction.options.getUser('target');
   const amount = interaction.options.getInteger('amount');
 
@@ -1308,7 +1358,9 @@ async function handleStealCommand(interaction, userId) {
     // Process successful theft
     userData[targetId].cash -= amount;
     userData[userId].cash += amount;
+    cooldowns.steal[userId] = now;
     await saveUserData();
+    await saveCooldowns();
 
     const successEmbed = new EmbedBuilder()
       .setTitle('Theft Successful')
@@ -1346,7 +1398,10 @@ async function handleStealCommand(interaction, userId) {
     }
 
   } else {
-    // Theft failed
+    // Theft failed - still set cooldown
+    cooldowns.steal[userId] = now;
+    await saveCooldowns();
+    
     const failureEmbed = new EmbedBuilder()
       .setTitle('Theft Failed')
       .setDescription(`Your theft attempt on ${target.username} was unsuccessful.`)
@@ -4020,6 +4075,68 @@ async function handleRemoveCashCommand(interaction) {
     .setTimestamp();
 
   await interaction.reply({ embeds: [successEmbed] });
+}
+
+async function handleResetCooldownsCommand(interaction) {
+  // Check developer permissions
+  if (!isDeveloper(interaction.user.id)) {
+    const accessDeniedEmbed = new EmbedBuilder()
+      .setTitle('Access Denied')
+      .setDescription('This command is restricted to developers only.')
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+
+    return await interaction.editReply({ embeds: [accessDeniedEmbed] });
+  }
+
+  const targetUser = interaction.options.getUser('user');
+
+  if (targetUser) {
+    // Reset cooldowns for specific user
+    const userId = targetUser.id;
+    
+    // Clear all cooldowns for this user (safe deletion from objects)
+    if (cooldowns.scavenge && cooldowns.scavenge[userId]) delete cooldowns.scavenge[userId];
+    if (cooldowns.labor && cooldowns.labor[userId]) delete cooldowns.labor[userId];
+    if (cooldowns.steal && cooldowns.steal[userId]) delete cooldowns.steal[userId];
+    
+    await saveCooldowns();
+
+    const successEmbed = new EmbedBuilder()
+      .setTitle('Cooldowns Reset')
+      .setDescription(`Successfully reset all cooldowns for ${targetUser.displayName}!`)
+      .addFields(
+        { name: 'Target User', value: `<@${userId}>`, inline: true },
+        { name: 'Cooldowns Reset', value: 'Scavenge, Labor, Steal', inline: true },
+        { name: 'Developer', value: `<@${interaction.user.id}>`, inline: true }
+      )
+      .setColor(0x51CF66)
+      .setFooter({ text: 'Developer Command Executed' })
+      .setTimestamp();
+
+    await interaction.editReply({ embeds: [successEmbed] });
+  } else {
+    // Reset cooldowns for ALL users globally
+    cooldowns.scavenge = {};
+    cooldowns.labor = {};
+    cooldowns.steal = {};
+    
+    await saveCooldowns();
+
+    const successEmbed = new EmbedBuilder()
+      .setTitle('Global Cooldown Reset')
+      .setDescription('Successfully reset ALL cooldowns for ALL users globally!')
+      .addFields(
+        { name: 'Scope', value: 'All Users Worldwide', inline: true },
+        { name: 'Cooldowns Reset', value: 'Scavenge, Labor, Steal', inline: true },
+        { name: 'Developer', value: `<@${interaction.user.id}>`, inline: true }
+      )
+      .setColor(0x51CF66)
+      .setFooter({ text: 'Developer Command Executed' })
+      .setTimestamp();
+
+    await interaction.editReply({ embeds: [successEmbed] });
+  }
 }
 
 client.login(token);[]
