@@ -110,19 +110,19 @@ global.massSellSessions = {};
 // Graceful shutdown handler for Railway deployment
 async function gracefulShutdown(signal) {
   console.log(`🔄 Received ${signal}, performing graceful shutdown...`);
-  
+
   try {
     // Save all pending data
     console.log('💾 Saving all user data before shutdown...');
     await saveUserData();
     await saveCooldowns();
-    
+
     // Close MongoDB connection
     if (mongoClient) {
       console.log('🔌 Closing MongoDB connection...');
       await mongoClient.close();
     }
-    
+
     console.log('✅ Graceful shutdown completed');
     process.exit(0);
   } catch (error) {
@@ -162,7 +162,7 @@ async function saveUser(userId) {
         { upsert: true }
       );
       console.log(`💾 Save result for ${userId}: Matched=${result.matchedCount}, Upserted=${result.upsertedCount}`);
-      
+
       // Verify the save worked
       const verification = await usersCollection.findOne({ _id: userId });
       console.log(`🔍 Verification read for ${userId}:`, JSON.stringify(verification, null, 2));
@@ -178,11 +178,11 @@ async function saveUser(userId) {
 async function getCooldowns() {
   const cooldownDoc = await cooldownsCollection.findOne({ _id: 'main' });
   const defaults = { scavenge: {}, labor: {}, steal: {} };
-  
+
   if (!cooldownDoc) {
     return defaults;
   }
-  
+
   // Merge with defaults to ensure all keys exist, even in old documents
   return {
     scavenge: cooldownDoc.scavenge || {},
@@ -291,7 +291,7 @@ async function calculateBankCapacity(userId) {
   const expansions = user.bankExpansions || 0;
   const baseCapacity = 50000;
   const expansionPercent = 0.25; // 25% per expansion
-  
+
   return Math.floor(baseCapacity * Math.pow(1 + expansionPercent, expansions));
 }
 
@@ -300,7 +300,7 @@ async function calculateExpansionPrice(userId) {
   const expansions = user.bankExpansions || 0;
   const basePrice = 25000;
   const multiplier = 2.5;
-  
+
   return Math.floor(basePrice * Math.pow(multiplier, expansions));
 }
 
@@ -314,18 +314,18 @@ async function purchaseBankExpansion(userId) {
     const user = await getUser(userId);
     const currentExpansions = user.bankExpansions || 0;
     const price = await calculateExpansionPrice(userId);
-    
+
     if (user.cash < price) {
       return { success: false, error: 'insufficient_funds', price, cash: user.cash };
     }
-    
+
     // Process purchase
     user.cash -= price;
     user.bankExpansions = currentExpansions + 1;
     await saveUser(userId);
-    
+
     const newCapacity = await calculateBankCapacity(userId);
-    
+
     return { 
       success: true, 
       newExpansions: user.bankExpansions,
@@ -343,23 +343,23 @@ async function logDatabaseDiagnostics() {
   try {
     console.log('📊 MongoDB Connection Diagnostics:');
     console.log(`   Database: ${db.databaseName}`);
-    
+
     const userCount = await usersCollection.countDocuments();
     console.log(`   Users collection: ${userCount} documents`);
-    
+
     // Check connection status and authentication
     const connStatus = await db.admin().command({ connectionStatus: 1 });
     if (connStatus.authInfo && connStatus.authInfo.authenticatedUsers) {
       const users = connStatus.authInfo.authenticatedUsers;
       console.log(`   Authenticated as: ${JSON.stringify(users)}`);
     }
-    
+
     const mongoUri = process.env.MONGODB_URI;
     const hostMatch = mongoUri.match(/@([^/]+)/);
     if (hostMatch) {
       console.log(`   MongoDB Host: ${hostMatch[1]}`);
     }
-    
+
     console.log('📊 Database diagnostics completed');
   } catch (error) {
     console.error('❌ Database diagnostics failed:', error.message);
@@ -370,7 +370,7 @@ async function logDatabaseDiagnostics() {
 async function performDatabaseHealthCheck() {
   try {
     console.log('🏥 Performing MongoDB health check...');
-    
+
     // Test write permission
     const testDoc = { _id: 'health_check', timestamp: Date.now(), test: 'write_read_test' };
     const writeResult = await usersCollection.replaceOne(
@@ -378,15 +378,15 @@ async function performDatabaseHealthCheck() {
       testDoc,
       { upsert: true }
     );
-    
+
     console.log(`✅ Write test - Matched: ${writeResult.matchedCount}, Upserted: ${writeResult.upsertedCount}`);
-    
+
     // Test read permission
     const readResult = await usersCollection.findOne({ _id: 'health_check' });
-    
+
     if (readResult && readResult.test === 'write_read_test') {
       console.log('✅ Read test - SUCCESS');
-      
+
       // Clean up test document
       await usersCollection.deleteOne({ _id: 'health_check' });
       console.log('✅ Database health check PASSED - Read/Write permissions confirmed');
@@ -394,7 +394,7 @@ async function performDatabaseHealthCheck() {
       console.error('❌ Read test FAILED - Could not read back test document');
       throw new Error('Database read test failed');
     }
-    
+
   } catch (error) {
     console.error('❌ DATABASE HEALTH CHECK FAILED:', error.message);
     console.error('This explains why data is not persisting!');
@@ -628,9 +628,9 @@ client.on('messageCreate', async (message) => {
   const channelId = message.channel.id;
   const now = Date.now();
 
-  // Initialize user data if needed
-  if (!userData[userId]) userData[userId] = { cash: 0, artefacts: [], bankBalance: 0 };
-  if (!userData[userId].xpData) userData[userId].xpData = { xp: 0, messageCount: 0, lastMessage: 0 };
+  // Load user data from database first
+  const user = await getUser(userId);
+  if (!user.xpData) user.xpData = { xp: 0, messageCount: 0, lastMessage: 0 };
 
   // Initialize channel tracking
   if (!global.messageTracker[channelId]) global.messageTracker[channelId] = [];
@@ -656,12 +656,12 @@ client.on('messageCreate', async (message) => {
 
   // Only award XP if there's a conversation (at least 2 different users)
   if (uniqueUsers.size >= 2) {
-    userData[userId].xpData.messageCount++;
+    user.xpData.messageCount++;
 
     // Award XP every 2 messages
-    if (userData[userId].xpData.messageCount % 2 === 0) {
-      userData[userId].xpData.xp++;
-      userData[userId].xpData.lastMessage = now;
+    if (user.xpData.messageCount % 2 === 0) {
+      user.xpData.xp++;
+      user.xpData.lastMessage = now;
       await saveUserData();
     }
   }
@@ -965,9 +965,9 @@ client.on('interactionCreate', async interaction => {
 
     if (commandName === 'sell' && focusedOption.name === 'artefact') {
       const userId = interaction.user.id;
-      if (!userData[userId]) userData[userId] = { cash: 0, artefacts: [], bankBalance: 0 };
+      const user = await getUser(userId);
 
-      const userArtefacts = userData[userId].artefacts || [];
+      const userArtefacts = user.artefacts || [];
       const focusedValue = focusedOption.value.toLowerCase();
 
       const filtered = userArtefacts
@@ -1002,14 +1002,15 @@ client.on('interactionCreate', async interaction => {
   if (interaction.commandName === 'store' || interaction.commandName === 'buy' || interaction.commandName === 'add-item') {
     await interaction.deferReply();
   }
-  
+
   // Developer commands get ephemeral replies
   if (interaction.commandName === 'reset-cooldowns') {
     await interaction.deferReply({ ephemeral: true });
   }
 
   const userId = interaction.user.id;
-  if (!userData[userId]) userData[userId] = { cash: 0, artefacts: [], bankBalance: 0 };
+  // Load user data from database before processing any command
+  await getUser(userId);
 
   try {
     switch (interaction.commandName) {
@@ -1401,7 +1402,7 @@ async function handleStealCommand(interaction, userId) {
     // Theft failed - still set cooldown
     cooldowns.steal[userId] = now;
     await saveCooldowns();
-    
+
     const failureEmbed = new EmbedBuilder()
       .setTitle('Theft Failed')
       .setDescription(`Your theft attempt on ${target.username} was unsuccessful.`)
@@ -1752,7 +1753,7 @@ async function handleStoreCommand(interaction) {
 
   // Use guildId directly (always available) instead of guild object
   const guildId = interaction.guildId;
-  
+
   // Additional safety check - commands should only work in servers
   if (!guildId) {
     const dmEmbed = new EmbedBuilder()
@@ -1760,27 +1761,27 @@ async function handleStoreCommand(interaction) {
       .setDescription('This command requires server context.')
       .setColor(0xFF6B6B)
       .setTimestamp();
-      
+
     return await interaction.editReply({ embeds: [dmEmbed] });
   }
 
   try {
     const userId = interaction.user.id;
-    
+
     // Run all database queries in parallel for speed
     const [user, globalItems, guildItemsDoc] = await Promise.all([
       getUser(userId),
       getGlobalItems(),
       guildItemsCollection.findOne({ _id: guildId })
     ]);
-    
+
     const guildItems = guildItemsDoc ? guildItemsDoc.items : {};
     const embeds = [];
-  
+
   // Global Store Embed
   if (Object.keys(globalItems).length > 0) {
     let globalItemsList = '';
-    
+
     for (const [name, item] of Object.entries(globalItems)) {
       if (item.type === 'bank_expansion') {
         // Calculate both price and capacity in parallel
@@ -1790,7 +1791,7 @@ async function handleStoreCommand(interaction) {
         ]);
         const currentExpansions = userData[userId]?.bankExpansions || 0;
         const nextCapacity = Math.floor(50000 * Math.pow(1.25, currentExpansions + 1));
-        
+
         globalItemsList += `**${name}**\n`;
         globalItemsList += `Current Price: $${currentPrice.toLocaleString()}\n`;
         globalItemsList += `${item.description}\n`;
@@ -1798,7 +1799,7 @@ async function handleStoreCommand(interaction) {
         globalItemsList += `Next Expansion: $${nextCapacity.toLocaleString()} capacity\n\n`;
       }
     }
-    
+
     const globalEmbed = new EmbedBuilder()
       .setTitle('Global Store')
       .setDescription('**Cross-server items available to all players**')
@@ -1809,10 +1810,10 @@ async function handleStoreCommand(interaction) {
       .setColor(0xFFD700)
       .setFooter({ text: 'Global items • Available across all servers' })
       .setTimestamp();
-      
+
     embeds.push(globalEmbed);
   }
-  
+
   // Server Store Embed
   if (Object.keys(guildItems).length > 0) {
     const serverItemsList = Object.entries(guildItems)
@@ -1824,12 +1825,12 @@ async function handleStoreCommand(interaction) {
       .setDescription(`**Server-specific items for this server**`)
       .addFields(
         { name: 'Available Items', value: serverItemsList, inline: false },
-        { name: 'How to Purchase', value: 'Contact **server administrators** to purchase items', inline: false }
+        { name: 'How to Purchase', value: 'Use `/buy <item_name>` to purchase server items', inline: false }
       )
       .setColor(0x9932CC)
       .setFooter({ text: 'Server items • Custom additions by administrators' })
       .setTimestamp();
-      
+
     embeds.push(serverEmbed);
   } else {
     const emptyServerEmbed = new EmbedBuilder()
@@ -1841,76 +1842,107 @@ async function handleStoreCommand(interaction) {
       )
       .setColor(0x6C7B7F)
       .setTimestamp();
-      
+
     embeds.push(emptyServerEmbed);
   }
-  
+
     await interaction.editReply({ embeds: embeds });
   } catch (error) {
     console.error('❌ Store command error:', error);
-    
+
     const errorEmbed = new EmbedBuilder()
       .setTitle('Store Error')
       .setDescription('An error occurred while loading the store. Please try again.')
       .setColor(0xFF6B6B)
       .setTimestamp();
-      
+
     await interaction.editReply({ embeds: [errorEmbed] });
   }
 }
 
 async function handleBuyCommand(interaction, userId) {
-  // Interaction already deferred in main handler to prevent timeout
-
   try {
     const itemName = interaction.options.getString('item').trim();
-    const globalItems = await getGlobalItems();
-    
-    // Check if item exists in global store
-    const item = globalItems[itemName];
+    const guildId = interaction.guildId;
+    const user = await getUser(userId);
+
+    const [globalItems, guildItemsDoc] = await Promise.all([
+      getGlobalItems(),
+      guildId ? guildItemsCollection.findOne({ _id: guildId }) : null
+    ]);
+
+    const guildItems = guildItemsDoc ? guildItemsDoc.items : {};
+
+    let item = null;
+    let itemType = null;
+    let itemPrice = 0;
+
+    if (globalItems[itemName]) {
+      item = globalItems[itemName];
+      itemType = 'global';
+      
+      if (item.type === 'bank_expansion') {
+        itemPrice = await calculateExpansionPrice(userId);
+      } else {
+        itemPrice = item.basePrice || item.price || 0;
+      }
+    } else if (guildItems[itemName]) {
+      item = guildItems[itemName];
+      itemType = 'server';
+      itemPrice = item.price;
+    }
+
     if (!item) {
+      const availableItems = [...Object.keys(globalItems), ...Object.keys(guildItems)];
       const notFoundEmbed = new EmbedBuilder()
         .setTitle('Item Not Found')
-        .setDescription(`"${itemName}" is not available in the global store.`)
+        .setDescription(`"${itemName}" is not available in any store.`)
         .addFields({
           name: 'Available Items',
-          value: Object.keys(globalItems).join(', ') || 'No items available',
+          value: availableItems.length > 0 ? availableItems.join(', ') : 'No items available',
           inline: false
         })
         .setColor(0xFF6B6B)
         .setTimestamp();
-        
+
       return await interaction.editReply({ embeds: [notFoundEmbed] });
     }
-  
-    // Handle bank expansion purchase
-    if (item.type === 'bank_expansion') {
+
+    if (user.cash < itemPrice) {
+      const insufficientEmbed = new EmbedBuilder()
+        .setTitle('Insufficient Funds')
+        .setDescription(`You don't have enough cash to purchase ${itemName}.`)
+        .addFields(
+          { name: 'Required Cash', value: `$${itemPrice.toLocaleString()}`, inline: true },
+          { name: 'Your Cash', value: `$${user.cash.toLocaleString()}`, inline: true },
+          { name: 'Shortfall', value: `$${(itemPrice - user.cash).toLocaleString()}`, inline: true }
+        )
+        .setColor(0xFF6B6B)
+        .setTimestamp();
+
+      return await interaction.editReply({ embeds: [insufficientEmbed] });
+    }
+
+    if (itemType === 'global' && item.type === 'bank_expansion') {
       const result = await purchaseBankExpansion(userId);
-      
+
       if (!result.success) {
-        if (result.error === 'insufficient_funds') {
-          const insufficientEmbed = new EmbedBuilder()
-            .setTitle('Insufficient Funds')
-            .setDescription(`You don't have enough cash to purchase the ${itemName}.`)
-            .addFields(
-              { name: 'Required Cash', value: `$${result.price.toLocaleString()}`, inline: true },
-              { name: 'Your Cash', value: `$${result.cash.toLocaleString()}`, inline: true },
-              { name: 'Shortfall', value: `$${(result.price - result.cash).toLocaleString()}`, inline: true }
-            )
-            .setColor(0xFF6B6B)
-            .setTimestamp();
-            
-          return await interaction.editReply({ embeds: [insufficientEmbed] });
-        }
+        const errorEmbed = new EmbedBuilder()
+          .setTitle('Purchase Failed')
+          .setDescription('An error occurred while processing your purchase.')
+          .setColor(0xFF6B6B)
+          .setTimestamp();
+
+        return await interaction.editReply({ embeds: [errorEmbed] });
       }
-      
+
       const successEmbed = new EmbedBuilder()
         .setTitle('Bank Expansion Purchased')
         .setDescription(`Successfully purchased ${itemName} for $${result.price.toLocaleString()}!`)
         .addFields(
           { name: 'Bank Capacity Increased', value: `$${result.newCapacity.toLocaleString()}`, inline: true },
           { name: 'Total Expansions', value: `${result.newExpansions}`, inline: true },
-          { name: 'Remaining Cash', value: `$${userData[userId].cash.toLocaleString()}`, inline: true },
+          { name: 'Remaining Cash', value: `$${user.cash.toLocaleString()}`, inline: true },
           { name: 'Next Expansion Price', value: `$${(await calculateExpansionPrice(userId)).toLocaleString()}`, inline: true },
           { name: 'Capacity Increase', value: '+25%', inline: true },
           { name: 'Investment Status', value: 'Permanent Upgrade', inline: true }
@@ -1918,18 +1950,46 @@ async function handleBuyCommand(interaction, userId) {
         .setColor(0x00FF7F)
         .setFooter({ text: 'Bank expansion permanently increases your storage capacity' })
         .setTimestamp();
-        
+
+      await interaction.editReply({ embeds: [successEmbed] });
+    } else {
+      user.cash -= itemPrice;
+      
+      if (!user.inventory) user.inventory = [];
+      user.inventory.push({
+        name: itemName,
+        purchasedAt: Date.now(),
+        price: itemPrice,
+        type: itemType,
+        description: item.description || 'No description'
+      });
+
+      await saveUser(userId);
+
+      const successEmbed = new EmbedBuilder()
+        .setTitle('Purchase Successful')
+        .setDescription(`Successfully purchased **${itemName}** for $${itemPrice.toLocaleString()}!`)
+        .addFields(
+          { name: 'Item', value: itemName, inline: true },
+          { name: 'Price Paid', value: `$${itemPrice.toLocaleString()}`, inline: true },
+          { name: 'Remaining Cash', value: `$${user.cash.toLocaleString()}`, inline: true },
+          { name: 'Description', value: item.description || 'No description', inline: false },
+          { name: 'Added to Inventory', value: 'View your items with `/inventory`', inline: false }
+        )
+        .setColor(0x00FF7F)
+        .setTimestamp();
+
       await interaction.editReply({ embeds: [successEmbed] });
     }
   } catch (error) {
     console.error('❌ Buy command error:', error);
-    
+
     const errorEmbed = new EmbedBuilder()
       .setTitle('Purchase Error')
       .setDescription('An error occurred while processing your purchase. Please try again.')
       .setColor(0xFF6B6B)
       .setTimestamp();
-      
+
     await interaction.editReply({ embeds: [errorEmbed] });
   }
 }
@@ -1974,14 +2034,14 @@ async function handleMassSellCommand(interaction, userId) {
 async function handleAddItemCommand(interaction) {
   // Use guildId directly (always available) instead of guild object
   const guildId = interaction.guildId;
-  
+
   if (!guildId) {
     const dmEmbed = new EmbedBuilder()
       .setTitle('Server Required')
       .setDescription('This command requires server context.')
       .setColor(0xFF6B6B)
       .setTimestamp();
-      
+
     return await interaction.editReply({ embeds: [dmEmbed] });
   }
 
@@ -4094,12 +4154,12 @@ async function handleResetCooldownsCommand(interaction) {
   if (targetUser) {
     // Reset cooldowns for specific user
     const userId = targetUser.id;
-    
+
     // Clear all cooldowns for this user (safe deletion from objects)
     if (cooldowns.scavenge && cooldowns.scavenge[userId]) delete cooldowns.scavenge[userId];
     if (cooldowns.labor && cooldowns.labor[userId]) delete cooldowns.labor[userId];
     if (cooldowns.steal && cooldowns.steal[userId]) delete cooldowns.steal[userId];
-    
+
     await saveCooldowns();
 
     const successEmbed = new EmbedBuilder()
@@ -4120,7 +4180,7 @@ async function handleResetCooldownsCommand(interaction) {
     cooldowns.scavenge = {};
     cooldowns.labor = {};
     cooldowns.steal = {};
-    
+
     await saveCooldowns();
 
     const successEmbed = new EmbedBuilder()
