@@ -1511,7 +1511,7 @@ async function handleScavengeCommand(interaction, userId) {
     const inviteEmbed = new EmbedBuilder()
       .setTitle('✨ Join the Fortune Bot Community! ✨')
       .setDescription('We really appreciate your support! It would be even better if you joined our official server. Come hang out, get updates, and meet other players!')
-      .addFields({ name: '🔗 Official Server Invite', value: '[Click here to join the community!](https://discord.gg/1414929046080327732)' })
+      .addFields({ name: '🔗 Official Server Invite', value: '[Click here to join the community!](https://discord.gg/Ez9kqVre)' })
       .setColor(0x5865F2)
       .setFooter({ text: 'Thank you for playing Fortune Bot!' })
       .setThumbnail(client.user.displayAvatarURL())
