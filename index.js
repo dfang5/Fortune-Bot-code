@@ -1505,6 +1505,18 @@ async function handleScavengeCommand(interaction, userId) {
   }
 
   await interaction.reply({ embeds: [scavengeEmbed] });
+
+  // 20% chance to show server invite
+  if (Math.random() < 0.20) {
+    const inviteEmbed = new EmbedBuilder()
+      .setTitle('Support Fortune Bot')
+      .setDescription('Hi. We appreciate your current support, but it would be even better if you would join our server! here is the invite link Thank you in advance!')
+      .addFields({ name: 'Join Our Server', value: 'https://discord.gg/1414929046080327732' })
+      .setColor(0x5865F2)
+      .setTimestamp();
+    
+    await interaction.followUp({ embeds: [inviteEmbed], ephemeral: true });
+  }
 }
 
 async function handleLaborCommand(interaction, userId) {
@@ -1547,6 +1559,18 @@ async function handleLaborCommand(interaction, userId) {
     .setTimestamp();
 
   await interaction.reply({ embeds: [laborEmbed] });
+
+  // 20% chance to show server invite
+  if (Math.random() < 0.20) {
+    const inviteEmbed = new EmbedBuilder()
+      .setTitle('Support Fortune Bot')
+      .setDescription('Hi. We appreciate your current support, but it would be even better if you would join our server! here is the invite link Thank you in advance!')
+      .addFields({ name: 'Join Our Server', value: 'https://discord.gg/1414929046080327732' })
+      .setColor(0x5865F2)
+      .setTimestamp();
+    
+    await interaction.followUp({ embeds: [inviteEmbed], ephemeral: true });
+  }
 }
 
 async function handleInventoryCommand(interaction, userId) {
@@ -1880,7 +1904,7 @@ async function handleBuyCommand(interaction, userId) {
     if (globalItems[itemName]) {
       item = globalItems[itemName];
       itemType = 'global';
-      
+
       if (item.type === 'bank_expansion') {
         itemPrice = await calculateExpansionPrice(userId);
       } else {
@@ -1954,7 +1978,7 @@ async function handleBuyCommand(interaction, userId) {
       await interaction.editReply({ embeds: [successEmbed] });
     } else {
       user.cash -= itemPrice;
-      
+
       if (!user.inventory) user.inventory = [];
       user.inventory.push({
         name: itemName,
