@@ -1509,10 +1509,12 @@ async function handleScavengeCommand(interaction, userId) {
   // 20% chance to show server invite
   if (Math.random() < 0.20) {
     const inviteEmbed = new EmbedBuilder()
-      .setTitle('Support Fortune Bot')
-      .setDescription('Hi. We appreciate your current support, but it would be even better if you would join our server! here is the invite link Thank you in advance!')
-      .addFields({ name: 'Join Our Server', value: 'https://discord.gg/1414929046080327732' })
+      .setTitle('✨ Join the Fortune Bot Community! ✨')
+      .setDescription('We really appreciate your support! It would be even better if you joined our official server. Come hang out, get updates, and meet other players!')
+      .addFields({ name: '🔗 Official Server Invite', value: '[Click here to join the community!](https://discord.gg/1414929046080327732)' })
       .setColor(0x5865F2)
+      .setFooter({ text: 'Thank you for playing Fortune Bot!' })
+      .setThumbnail(client.user.displayAvatarURL())
       .setTimestamp();
     
     await interaction.followUp({ embeds: [inviteEmbed], ephemeral: true });
@@ -1563,10 +1565,12 @@ async function handleLaborCommand(interaction, userId) {
   // 20% chance to show server invite
   if (Math.random() < 0.20) {
     const inviteEmbed = new EmbedBuilder()
-      .setTitle('Support Fortune Bot')
-      .setDescription('Hi. We appreciate your current support, but it would be even better if you would join our server! here is the invite link Thank you in advance!')
-      .addFields({ name: 'Join Our Server', value: 'https://discord.gg/1414929046080327732' })
+      .setTitle('✨ Join the Fortune Bot Community! ✨')
+      .setDescription('We really appreciate your support! It would be even better if you joined our official server. Come hang out, get updates, and meet other players!')
+      .addFields({ name: '🔗 Official Server Invite', value: '[Click here to join the community!](https://discord.gg/1414929046080327732)' })
       .setColor(0x5865F2)
+      .setFooter({ text: 'Thank you for playing Fortune Bot!' })
+      .setThumbnail(client.user.displayAvatarURL())
       .setTimestamp();
     
     await interaction.followUp({ embeds: [inviteEmbed], ephemeral: true });
