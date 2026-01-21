@@ -426,7 +426,10 @@ const rarities = [
   { name:'Legendary', chance:4, color:0xFFD700, value:5000, sell:5000, items:['Watch of Scandium','Statue of Bastnasite','Allanite'] },
   { name:'Unknown', chance:1, color:0x000000, value:15000, sell:15000, items:['Gem of Diamond','Kyawthuite'] }
 ];
-function getRarityByArtefact(name) { return rarities.find(r => r.items.includes(name)); }
+function getRarityByArtefact(name) { 
+  const cleanName = name.startsWith('✨ SHINY ') && name.endsWith(' ✨') ? name.replace('✨ SHINY ', '').replace(' ✨', '') : name;
+  return rarities.find(r => r.items.includes(cleanName)); 
+}
 
 // === EVENT SYSTEM ===
 
@@ -1469,7 +1472,12 @@ async function handleScavengeCommand(interaction, userId) {
   }
 
   const artefact = selectedRarity.items[Math.floor(Math.random() * selectedRarity.items.length)];
-  userData[userId].artefacts.push(artefact);
+  
+  // 0.5% chance for shiny version
+  const isShiny = Math.random() < 0.005;
+  const finalArtefactName = isShiny ? `✨ SHINY ${artefact} ✨` : artefact;
+  
+  userData[userId].artefacts.push(finalArtefactName);
   cooldowns.scavenge[userId] = now;
 
   await saveUserData();
@@ -1479,22 +1487,26 @@ async function handleScavengeCommand(interaction, userId) {
   const eventData = await getEventSystem();
   const event = eventData ? eventData.currentEvent : null;
   let eventText = '';
-  let scavengeColor = selectedRarity.color;
+  let scavengeColor = isShiny ? 0xFFFFFF : selectedRarity.color;
 
-  if (event && artefact === event.positiveArtefact) {
+  if (isShiny) {
+    eventText = '✨ **AMAZING LUCK!** You discovered a super rare shiny version! ✨';
+  } else if (event && artefact === event.positiveArtefact) {
     eventText = `⚡ **EVENT BONUS:** Found in the expanded ${event.positiveArtefact} mine!`;
     scavengeColor = 0xFFD700; // Gold color for event bonus
   }
 
   const scavengeEmbed = new EmbedBuilder()
-    .setTitle(event && artefact === event.positiveArtefact ? '🌟 Enhanced Scavenge Complete!' : 'Scavenge Complete')
-    .setDescription(event && artefact === event.positiveArtefact ? 
+    .setTitle(isShiny ? '✨ SHINY ARTEFACT DISCOVERED! ✨' : (event && artefact === event.positiveArtefact ? '🌟 Enhanced Scavenge Complete!' : 'Scavenge Complete'))
+    .setDescription(isShiny ? 
+      `Holy cow! You found a **SHINY ${artefact}**! This is incredibly rare and worth 20 times more!` :
+      (event && artefact === event.positiveArtefact ? 
       'You discovered a valuable artefact in the expanded mine sector!' : 
-      'You discovered a valuable artefact during your search!')
+      'You discovered a valuable artefact during your search!'))
     .addFields(
-      { name: 'Artefact Found', value: `${artefact}`, inline: true },
+      { name: 'Artefact Found', value: `${finalArtefactName}`, inline: true },
       { name: 'Rarity', value: `${selectedRarity.name}`, inline: true },
-      { name: 'Estimated Value', value: `$${selectedRarity.value.toLocaleString()}`, inline: true },
+      { name: 'Estimated Value', value: `$${(isShiny ? selectedRarity.value * 20 : selectedRarity.value).toLocaleString()}`, inline: true },
       { name: 'Next Scavenge', value: 'Available in 2 hours', inline: false }
     )
     .setColor(scavengeColor)
@@ -1581,9 +1593,12 @@ async function handleInventoryCommand(interaction, userId) {
   const user = await getUser(userId);
   const userXpData = await getXpData(userId);
 
-  const totalValue = user.artefacts.reduce((sum, artefact) => {
-    const rarity = getRarityByArtefact(artefact);
-    return sum + (rarity ? rarity.value : 0);
+  const totalValue = user.artefacts.reduce((sum, artefactName) => {
+    const isShiny = artefactName.startsWith('✨ SHINY ') && artefactName.endsWith(' ✨');
+    const baseName = isShiny ? artefactName.replace('✨ SHINY ', '').replace(' ✨', '') : artefactName;
+    const rarity = getRarityByArtefact(baseName);
+    const value = rarity ? rarity.value : 0;
+    return sum + (isShiny ? value * 20 : value);
   }, 0);
 
   const artefactCounts = user.artefacts.reduce((counts, artefact) => {
@@ -1592,10 +1607,12 @@ async function handleInventoryCommand(interaction, userId) {
   }, {});
 
   const artefactList = Object.keys(artefactCounts).length ? 
-    Object.entries(artefactCounts).map(([artefact, count]) => {
-      const rarity = getRarityByArtefact(artefact);
+    Object.entries(artefactCounts).map(([artefactName, count]) => {
+      const isShiny = artefactName.startsWith('✨ SHINY ') && artefactName.endsWith(' ✨');
+      const baseName = isShiny ? artefactName.replace('✨ SHINY ', '').replace(' ✨', '') : artefactName;
+      const rarity = getRarityByArtefact(baseName);
       const countSuffix = count > 1 ? ` [${count}]` : '';
-      return `${artefact} (${rarity ? rarity.name : 'Unknown'})${countSuffix}`;
+      return `${artefactName} (${rarity ? rarity.name : 'Unknown'})${countSuffix}`;
     }).join('\n') : 'No artefacts';
 
   const inventoryEmbed = new EmbedBuilder()
@@ -1648,7 +1665,9 @@ async function handleSellCommand(interaction, userId) {
   }
 
   const rarity = getRarityByArtefact(artefactName);
-  const sellValue = rarity ? rarity.sell : 100;
+  const isShiny = artefactName.startsWith('✨ SHINY ') && artefactName.endsWith(' ✨');
+  let sellValue = rarity ? rarity.sell : 100;
+  if (isShiny) sellValue *= 20;
 
   userData[userId].cash += sellValue;
   userData[userId].artefacts.splice(artefactIndex, 1);
