@@ -1528,7 +1528,7 @@ async function handleScavengeCommand(interaction, userId) {
       .setThumbnail(client.user.displayAvatarURL())
       .setTimestamp();
     
-    await interaction.followUp({ content: 'https://discord.gg/1414929046080327732', embeds: [inviteEmbed], ephemeral: false });
+    await interaction.followUp({ content: 'https://discord.gg/NZtnJbj4QA', embeds: [inviteEmbed], ephemeral: false });
   }
 }
 
@@ -1583,7 +1583,7 @@ async function handleLaborCommand(interaction, userId) {
       .setThumbnail(client.user.displayAvatarURL())
       .setTimestamp();
     
-    await interaction.followUp({ content: 'https://discord.gg/1414929046080327732', embeds: [inviteEmbed], ephemeral: false });
+    await interaction.followUp({ content: 'https://discord.gg/NZtnJbj4QA', embeds: [inviteEmbed], ephemeral: false });
   }
 }
 
