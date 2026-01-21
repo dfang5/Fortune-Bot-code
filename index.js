@@ -1511,7 +1511,7 @@ async function handleScavengeCommand(interaction, userId) {
     const inviteEmbed = new EmbedBuilder()
       .setTitle('✨ Join the Fortune Bot Community! ✨')
       .setDescription('We really appreciate your support! It would be even better if you joined our official server. Come hang out, get updates, and meet other players!')
-      .addFields({ name: '🔗 Official Server Invite', value: '[Click here to join the community!](https://discord.gg/Ez9kqVre)' })
+      .addFields({ name: '🔗 Official Server Invite', value: '[Click here to join the community!](https://discord.gg/1414929046080327732)' })
       .setColor(0x5865F2)
       .setFooter({ text: 'Thank you for playing Fortune Bot!' })
       .setThumbnail(client.user.displayAvatarURL())
@@ -1586,10 +1586,16 @@ async function handleInventoryCommand(interaction, userId) {
     return sum + (rarity ? rarity.value : 0);
   }, 0);
 
-  const artefactList = user.artefacts.length ? 
-    user.artefacts.map(artefact => {
+  const artefactCounts = user.artefacts.reduce((counts, artefact) => {
+    counts[artefact] = (counts[artefact] || 0) + 1;
+    return counts;
+  }, {});
+
+  const artefactList = Object.keys(artefactCounts).length ? 
+    Object.entries(artefactCounts).map(([artefact, count]) => {
       const rarity = getRarityByArtefact(artefact);
-      return `${artefact} (${rarity ? rarity.name : 'Unknown'})`;
+      const countSuffix = count > 1 ? ` [${count}]` : '';
+      return `${artefact} (${rarity ? rarity.name : 'Unknown'})${countSuffix}`;
     }).join('\n') : 'No artefacts';
 
   const inventoryEmbed = new EmbedBuilder()
