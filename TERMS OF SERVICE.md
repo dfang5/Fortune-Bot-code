@@ -7,11 +7,14 @@ By using Fortune Bot (“the Bot”), you agree to these Terms of Service. If yo
 You must comply with Discord’s Terms of Service and Community Guidelines to use the Bot.
 
 3. Usage Rules
+   
 	•	Do not use the Bot for illegal activities.
+
 	•	Do not exploit bugs or glitches for unfair advantage.
+
 	•	Do not spam commands or abuse the Bot’s features.
 
-4. Data Collection
+6. Data Collection
 
 The Bot may store user IDs, usernames, and in-game data such as inventory and currency to provide its features.
 For details, see our Privacy Policy.
@@ -24,32 +27,4 @@ We reserve the right to restrict or terminate your access to the Bot at any time
 
 We may update these Terms at any time. Continued use of the Bot after changes means you accept the revised Terms.
 
-⸻
 
-🔒 Privacy Policy — Fortune Bot
-
-Last Updated: August 9, 2025
-
-1. Information We Collect
-	•	Discord User ID (to identify and save your progress)
-	•	Username & Tag (for display purposes)
-	•	Game Data (inventory items, in-game currency, leaderboards)
-
-2. How We Use Your Information
-
-We use this information to:
-	•	Save your progress across sessions.
-	•	Provide in-game features such as leaderboards and inventories.
-	•	Improve gameplay experience and troubleshoot issues.
-
-3. Data Storage
-	•	Data is stored in secured server files or a database.
-	•	We do not sell or share your data with third parties.
-
-4. Data Deletion
-
-You can request to have your data removed by messaging the bot owner directly on Discord.
-
-5. Changes to This Policy
-
-We may update this Privacy Policy at any time. Continued use of the Bot means you accept the revised policy.
