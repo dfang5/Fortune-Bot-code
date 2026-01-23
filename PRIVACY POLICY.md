@@ -3,6 +3,7 @@ Privacy Policy — Fortune Bot
 Last Updated: August 9, 2025
 
 1. Information We Collect
+	
 	•	Discord User ID (to identify and save your progress)
 
 	•	Username & Tag (for display purposes)
@@ -12,6 +13,7 @@ Last Updated: August 9, 2025
 3. How We Use Your Information
 
 We use this information to:
+	
 	•	Save your progress across sessions.
 	
 	•	Provide in-game features such as leaderboards and inventories.
@@ -19,6 +21,7 @@ We use this information to:
 	•	Improve gameplay experience and troubleshoot issues.
 	
 3. Data Storage
+	
 	•	Data is stored in secured server files or a database.
 
 	•	We do not sell or share your data with third parties.
