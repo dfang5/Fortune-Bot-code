@@ -142,7 +142,7 @@ async function getUser(userId) {
     console.log(`🔍 Loading user ${userId} from database...`);
     const user = await usersCollection.findOne({ _id: userId });
     console.log(`🔍 Database returned for ${userId}:`, JSON.stringify(user, null, 2));
-    userData[userId] = user || { cash: 0, artefacts: [], bankBalance: 0 };
+    userData[userId] = user || { cash: 0, artefacts: [], items: [], bankBalance: 0 };
     console.log(`🔍 Final userData for ${userId}:`, JSON.stringify(userData[userId], null, 2));
   }
   return userData[userId];
@@ -737,15 +737,6 @@ client.once('clientReady', async () => {
       .setDescription('View your cash, bank balance and artefacts'),
 
     new SlashCommandBuilder()
-      .setName('sell')
-      .setDescription('Sell a specific artefact for cash')
-      .addStringOption(option =>
-        option.setName('artefact')
-          .setDescription('Name of the artefact to sell')
-          .setRequired(true)
-          .setAutocomplete(true)),
-
-    new SlashCommandBuilder()
       .setName('trade')
       .setDescription('Start a trade with another user')
       .addUserOption(option =>
@@ -984,8 +975,86 @@ client.on('interactionCreate', async interaction => {
     }
   }
 
-  // Handle component interactions (buttons, select menus)
   if (interaction.isStringSelectMenu() || interaction.isButton()) {
+    const userId = interaction.user.id;
+    const [action, sessionId] = interaction.customId.split('_');
+    
+    // Check if it's a mass-sell interaction
+    if (interaction.customId.startsWith('mass_sell_')) {
+      const session = global.massSellSessions?.[sessionId];
+      if (!session || session.userId !== userId) {
+        return await interaction.reply({ content: 'This session is no longer active or is not yours.', ephemeral: true });
+      }
+
+      const user = await getUser(userId);
+
+      if (interaction.isStringSelectMenu()) {
+        if (action === 'mass_sell_add') {
+          session.selectedArtefacts.push(...interaction.values);
+        } else if (action === 'mass_sell_remove') {
+          interaction.values.forEach(val => {
+            const index = session.selectedArtefacts.indexOf(val);
+            if (index !== -1) session.selectedArtefacts.splice(index, 1);
+          });
+        }
+        const updatedEmbed = createMassSellEmbed(user.artefacts, session.selectedArtefacts);
+        const updatedComponents = createMassSellComponents(sessionId, user.artefacts);
+        return await interaction.update({ embeds: [updatedEmbed], components: updatedComponents });
+      }
+
+      if (interaction.isButton()) {
+        if (action === 'mass_sell_confirm') {
+          if (!session.selectedArtefacts.length) {
+            return await interaction.reply({ content: 'Please select at least one artefact to sell.', ephemeral: true });
+          }
+
+          let totalValue = 0;
+          const remainingArtefacts = [...user.artefacts];
+          
+          session.selectedArtefacts.forEach(artefactName => {
+            const index = remainingArtefacts.indexOf(artefactName);
+            if (index !== -1) {
+              const rarity = getRarityByArtefact(artefactName);
+              const isShiny = artefactName.startsWith('✨ SHINY ') && artefactName.endsWith(' ✨');
+              let sellValue = rarity ? rarity.sell : 100;
+              if (isShiny) sellValue *= 20;
+              
+              totalValue += sellValue;
+              remainingArtefacts.splice(index, 1);
+            }
+          });
+
+          user.cash += totalValue;
+          user.artefacts = remainingArtefacts;
+          await saveUser(userId);
+
+          const confirmEmbed = new EmbedBuilder()
+            .setTitle('Mass Sale Successful')
+            .setDescription(`Successfully sold ${session.selectedArtefacts.length} artefacts for **$${totalValue.toLocaleString()}**!`)
+            .setColor(0x51CF66)
+            .setTimestamp();
+
+          delete global.massSellSessions[sessionId];
+          return await interaction.update({ embeds: [confirmEmbed], components: [] });
+        } else if (action === 'mass_sell_select_all') {
+          session.selectedArtefacts = [...user.artefacts];
+          const updatedEmbed = createMassSellEmbed(user.artefacts, session.selectedArtefacts);
+          const updatedComponents = createMassSellComponents(sessionId, user.artefacts);
+          return await interaction.update({ embeds: [updatedEmbed], components: updatedComponents });
+        } else if (action === 'mass_sell_cancel') {
+          const cancelEmbed = new EmbedBuilder()
+            .setTitle('Mass Sale Cancelled')
+            .setDescription('No artefacts were sold.')
+            .setColor(0xFF6B6B)
+            .setTimestamp();
+
+          delete global.massSellSessions[sessionId];
+          return await interaction.update({ embeds: [cancelEmbed], components: [] });
+        }
+      }
+    }
+
+    // Existing component interaction handler
     return await handleComponentInteraction(interaction);
   }
 
@@ -1039,7 +1108,6 @@ client.on('interactionCreate', async interaction => {
         await handleInventoryCommand(interaction, userId);
         break;
       case 'sell':
-        await handleSellCommand(interaction, userId);
         break;
       case 'trade':
         await handleTradeCommand(interaction, userId);
@@ -1613,6 +1681,16 @@ async function handleInventoryCommand(interaction, userId) {
       return `${artefactName} (${rarity ? rarity.name : 'Unknown'})${countSuffix}`;
     }).join('\n') : 'No artefacts';
 
+  // Count purchased items
+  const itemsCount = {};
+  (user.items || []).forEach(item => {
+    itemsCount[item] = (itemsCount[item] || 0) + 1;
+  });
+
+  const itemsList = Object.entries(itemsCount)
+    .map(([name, count]) => `${name}${count > 1 ? ` [${count}]` : ''}`)
+    .join(', ') || 'No items';
+
   const inventoryEmbed = new EmbedBuilder()
     .setTitle('Your Inventory')
     .setDescription('Current financial status and artefact collection')
@@ -1626,7 +1704,8 @@ async function handleInventoryCommand(interaction, userId) {
       { name: 'Artefacts Owned', value: user.artefacts.length.toString(), inline: true },
       { name: 'Collection Value', value: `$${totalValue.toLocaleString()}`, inline: true },
       { name: 'Bank Capacity', value: `${(((user.bankBalance || 0) / 50000) * 100).toFixed(1)}%`, inline: true },
-      { name: 'Artefact Collection', value: artefactList, inline: false }
+      { name: 'Artefact Collection', value: artefactList, inline: false },
+      { name: 'Purchased Items', value: itemsList, inline: false }
     )
     .setColor(0x339AF0)
     .setFooter({ text: 'Use /convert to turn XP into cash (1 XP = $2)' })
@@ -1635,56 +1714,6 @@ async function handleInventoryCommand(interaction, userId) {
   await interaction.reply({ embeds: [inventoryEmbed] });
 }
 
-async function handleSellCommand(interaction, userId) {
-  const user = userData[userId];
-  const artefactName = interaction.options.getString('artefact');
-
-  if (!user.artefacts.length) {
-    const noArtefactsEmbed = new EmbedBuilder()
-      .setTitle('No Artefacts to Sell')
-      .setDescription('You need to find some artefacts first before you can sell them.')
-      .addFields({ name: 'How to Find Artefacts', value: 'Use `/scavenge` to search for rare artefacts', inline: false })
-      .setColor(0xFF6B6B)
-      .setTimestamp();
-
-    return await interaction.reply({ embeds: [noArtefactsEmbed] });
-  }
-
-  const artefactIndex = user.artefacts.findIndex(item => item === artefactName);
-  if (artefactIndex === -1) {
-    const notFoundEmbed = new EmbedBuilder()
-      .setTitle('Artefact Not Found')
-      .setDescription(`You don't have an artefact named "${artefactName}".`)
-      .addFields({ name: 'Check Your Inventory', value: 'Use `/inventory` to see what artefacts you own', inline: false })
-      .setColor(0xFF6B6B)
-      .setTimestamp();
-
-    return await interaction.reply({ embeds: [notFoundEmbed] });
-  }
-
-  const rarity = getRarityByArtefact(artefactName);
-  const isShiny = artefactName.startsWith('✨ SHINY ') && artefactName.endsWith(' ✨');
-  let sellValue = rarity ? rarity.sell : 100;
-  if (isShiny) sellValue *= 20;
-
-  userData[userId].cash += sellValue;
-  userData[userId].artefacts.splice(artefactIndex, 1);
-  await saveUserData();
-
-  const sellEmbed = new EmbedBuilder()
-    .setTitle('Artefact Sold')
-    .setDescription(`You successfully sold your ${artefactName}.`)
-    .addFields(
-      { name: 'Artefact', value: artefactName, inline: true },
-      { name: 'Rarity', value: rarity ? rarity.name : 'Unknown', inline: true },
-      { name: 'Sale Price', value: `$${sellValue.toLocaleString()}`, inline: true },
-      { name: 'New Cash Balance', value: `$${userData[userId].cash.toLocaleString()}`, inline: false }
-    )
-    .setColor(0x51CF66)
-    .setTimestamp();
-
-  await interaction.reply({ embeds: [sellEmbed] });
-}
 
 async function handleTradeCommand(interaction, userId) {
   const targetUser = interaction.options.getUser('user');
@@ -2006,14 +2035,8 @@ async function handleBuyCommand(interaction, userId) {
     } else {
       user.cash -= itemPrice;
 
-      if (!user.inventory) user.inventory = [];
-      user.inventory.push({
-        name: itemName,
-        purchasedAt: Date.now(),
-        price: itemPrice,
-        type: itemType,
-        description: item.description || 'No description'
-      });
+      if (!user.items) user.items = [];
+      user.items.push(itemName);
 
       await saveUser(userId);
 
