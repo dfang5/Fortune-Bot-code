@@ -975,84 +975,117 @@ client.on('interactionCreate', async interaction => {
     }
   }
 
-  if (interaction.isStringSelectMenu() || interaction.isButton()) {
-    const userId = interaction.user.id;
-    const [action, sessionId] = interaction.customId.split('_');
+  // Handle select menu interactions
+  if (interaction.isStringSelectMenu()) {
+    const customId = interaction.customId;
     
-    // Check if it's a mass-sell interaction
-    if (interaction.customId.startsWith('mass_sell_')) {
+    // Handle mass-sell select
+    if (customId.startsWith('mass_sell_add_')) {
+      const sessionId = customId.replace('mass_sell_add_', '');
       const session = global.massSellSessions?.[sessionId];
-      if (!session || session.userId !== userId) {
+      if (!session || session.userId !== interaction.user.id) {
         return await interaction.reply({ content: 'This session is no longer active or is not yours.', ephemeral: true });
       }
 
-      const user = await getUser(userId);
-
-      if (interaction.isStringSelectMenu()) {
-        if (action === 'mass_sell_add') {
-          session.selectedArtefacts.push(...interaction.values);
-        } else if (action === 'mass_sell_remove') {
-          interaction.values.forEach(val => {
-            const index = session.selectedArtefacts.indexOf(val);
-            if (index !== -1) session.selectedArtefacts.splice(index, 1);
-          });
-        }
-        const updatedEmbed = createMassSellEmbed(user.artefacts, session.selectedArtefacts);
-        const updatedComponents = createMassSellComponents(sessionId, user.artefacts);
-        return await interaction.update({ embeds: [updatedEmbed], components: updatedComponents });
-      }
-
-      if (interaction.isButton()) {
-        if (action === 'mass_sell_confirm') {
-          if (!session.selectedArtefacts.length) {
-            return await interaction.reply({ content: 'Please select at least one artefact to sell.', ephemeral: true });
-          }
-
-          let totalValue = 0;
-          const remainingArtefacts = [...user.artefacts];
-          
-          session.selectedArtefacts.forEach(artefactName => {
-            const index = remainingArtefacts.indexOf(artefactName);
-            if (index !== -1) {
-              const rarity = getRarityByArtefact(artefactName);
-              const isShiny = artefactName.startsWith('✨ SHINY ') && artefactName.endsWith(' ✨');
-              let sellValue = rarity ? rarity.sell : 100;
-              if (isShiny) sellValue *= 20;
-              
-              totalValue += sellValue;
-              remainingArtefacts.splice(index, 1);
-            }
-          });
-
-          user.cash += totalValue;
-          user.artefacts = remainingArtefacts;
-          await saveUser(userId);
-
-          const confirmEmbed = new EmbedBuilder()
-            .setTitle('Mass Sale Successful')
-            .setDescription(`Successfully sold ${session.selectedArtefacts.length} artefacts for **$${totalValue.toLocaleString()}**!`)
-            .setColor(0x51CF66)
-            .setTimestamp();
-
-          delete global.massSellSessions[sessionId];
-          return await interaction.update({ embeds: [confirmEmbed], components: [] });
-        } else if (action === 'mass_sell_select_all') {
-          session.selectedArtefacts = [...user.artefacts];
-          const updatedEmbed = createMassSellEmbed(user.artefacts, session.selectedArtefacts);
-          const updatedComponents = createMassSellComponents(sessionId, user.artefacts);
-          return await interaction.update({ embeds: [updatedEmbed], components: updatedComponents });
-        } else if (action === 'mass_sell_cancel') {
-          const cancelEmbed = new EmbedBuilder()
-            .setTitle('Mass Sale Cancelled')
-            .setDescription('No artefacts were sold.')
-            .setColor(0xFF6B6B)
-            .setTimestamp();
-
-          delete global.massSellSessions[sessionId];
-          return await interaction.update({ embeds: [cancelEmbed], components: [] });
-        }
-      }
+      session.selectedArtefacts = [...new Set([...session.selectedArtefacts, ...interaction.values])];
+      const user = await getUser(interaction.user.id);
+      const updatedEmbed = createMassSellEmbed(user.artefacts, session.selectedArtefacts);
+      const updatedComponents = createMassSellComponents(sessionId, user.artefacts);
+      return await interaction.update({ embeds: [updatedEmbed], components: updatedComponents });
     }
+
+    if (customId.startsWith('mass_sell_remove_')) {
+      const sessionId = customId.replace('mass_sell_remove_', '');
+      const session = global.massSellSessions?.[sessionId];
+      if (!session || session.userId !== interaction.user.id) {
+        return await interaction.reply({ content: 'This session is no longer active or is not yours.', ephemeral: true });
+      }
+
+      interaction.values.forEach(val => {
+        const index = session.selectedArtefacts.indexOf(val);
+        if (index !== -1) session.selectedArtefacts.splice(index, 1);
+      });
+
+      const user = await getUser(interaction.user.id);
+      const updatedEmbed = createMassSellEmbed(user.artefacts, session.selectedArtefacts);
+      const updatedComponents = createMassSellComponents(sessionId, user.artefacts);
+      return await interaction.update({ embeds: [updatedEmbed], components: updatedComponents });
+    }
+  }
+
+  // Handle button interactions
+  if (interaction.isButton()) {
+    const customId = interaction.customId;
+
+    if (customId.startsWith('mass_sell_confirm_')) {
+      const sessionId = customId.replace('mass_sell_confirm_', '');
+      const session = global.massSellSessions?.[sessionId];
+      if (!session || session.userId !== interaction.user.id) {
+        return await interaction.reply({ content: 'This session is no longer active or is not yours.', ephemeral: true });
+      }
+
+      if (!session.selectedArtefacts.length) {
+        return await interaction.reply({ content: 'Please select at least one artefact to sell.', ephemeral: true });
+      }
+
+      const user = await getUser(interaction.user.id);
+      let totalValue = 0;
+      const remainingArtefacts = [...user.artefacts];
+      
+      session.selectedArtefacts.forEach(artefactName => {
+        const index = remainingArtefacts.indexOf(artefactName);
+        if (index !== -1) {
+          const rarity = getRarityByArtefact(artefactName);
+          const isShiny = artefactName.startsWith('✨ SHINY ') && artefactName.endsWith(' ✨');
+          let sellValue = rarity ? rarity.sell : 100;
+          if (isShiny) sellValue *= 20;
+          
+          totalValue += sellValue;
+          remainingArtefacts.splice(index, 1);
+        }
+      });
+
+      user.cash += totalValue;
+      user.artefacts = remainingArtefacts;
+      await saveUser(interaction.user.id);
+
+      const confirmEmbed = new EmbedBuilder()
+        .setTitle('Mass Sale Successful')
+        .setDescription(`Successfully sold ${session.selectedArtefacts.length} artefacts for **$${totalValue.toLocaleString()}**!`)
+        .setColor(0x51CF66)
+        .setTimestamp();
+
+      delete global.massSellSessions[sessionId];
+      return await interaction.update({ embeds: [confirmEmbed], components: [] });
+    }
+
+    if (customId.startsWith('mass_sell_select_all_')) {
+      const sessionId = customId.replace('mass_sell_select_all_', '');
+      const session = global.massSellSessions?.[sessionId];
+      if (!session || session.userId !== interaction.user.id) {
+        return await interaction.reply({ content: 'This session is no longer active or is not yours.', ephemeral: true });
+      }
+
+      const user = await getUser(interaction.user.id);
+      session.selectedArtefacts = [...user.artefacts];
+      
+      const updatedEmbed = createMassSellEmbed(user.artefacts, session.selectedArtefacts);
+      const updatedComponents = createMassSellComponents(sessionId, user.artefacts);
+      return await interaction.update({ embeds: [updatedEmbed], components: updatedComponents });
+    }
+
+    if (customId.startsWith('mass_sell_cancel_')) {
+      const sessionId = customId.replace('mass_sell_cancel_', '');
+      const cancelEmbed = new EmbedBuilder()
+        .setTitle('Mass Sale Cancelled')
+        .setDescription('No artefacts were sold.')
+        .setColor(0xFF6B6B)
+        .setTimestamp();
+
+      delete global.massSellSessions[sessionId];
+      return await interaction.update({ embeds: [cancelEmbed], components: [] });
+    }
+  }
 
     // Existing component interaction handler
     return await handleComponentInteraction(interaction);
