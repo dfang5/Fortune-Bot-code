@@ -1,1848 +1,4276 @@
-const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, SlashCommandBuilder, REST, Routes, PermissionFlagsBits, ChannelType, StringSelectMenuBuilder, ModalBuilder, TextInputBuilder, TextInputStyle } = require('discord.js');
-const { calculateRisk } = require('./risks');
-const { makeCheckEmbed } = require('./embeds');
+const fs = require('fs');
+const path = require('path');
+const { MongoClient } = require('mongodb');
+const {
+  Client,
+  GatewayIntentBits,
+  REST,
+  Routes,
+  SlashCommandBuilder,
+  EmbedBuilder,
+  ActionRowBuilder,
+  StringSelectMenuBuilder,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
+  ButtonBuilder,
+  ButtonStyle,
+  ComponentType
+} = require('discord.js');
 require('dotenv').config();
+const DEVELOPER_ID = '1299875574894039184';
+const CO_DEVELOPER_ID = '742955843498278943';
+
+// Check if user is a developer
+function isDeveloper(userId) {
+  return userId === DEVELOPER_ID || userId === CO_DEVELOPER_ID;
+}
+const token = process.env.DISCORD_BOT_TOKEN;
+const clientId = process.env.DISCORD_CLIENT_ID;
+
+// Validate required environment variables
+if (!token) {
+  console.error('ERROR: DISCORD_BOT_TOKEN is not set in environment variables');
+  process.exit(1);
+}
+
+if (!clientId) {
+  console.error('ERROR: DISCORD_CLIENT_ID is not set in environment variables');
+  process.exit(1);
+}
+// MongoDB connection
+let mongoClient;
+let db;
+let usersCollection;
+let cooldownsCollection;
+let eventSystemCollection;
+let guildItemsCollection;
+let globalItemsCollection;
+
+// Initialize MongoDB connection
+async function initializeDatabase() {
+  try {
+    const mongoUri = process.env.MONGODB_URI;
+    if (!mongoUri) {
+      console.error('ERROR: MONGODB_URI is not set in environment variables');
+      process.exit(1);
+    }
+
+    mongoClient = new MongoClient(mongoUri, {
+      ssl: true,
+      serverSelectionTimeoutMS: 5000,
+      socketTimeoutMS: 45000,
+    });
+    await mongoClient.connect();
+    console.log('Connected to MongoDB Atlas');
+
+    db = mongoClient.db('fortunebot');
+    usersCollection = db.collection('users');
+    cooldownsCollection = db.collection('cooldowns');
+    eventSystemCollection = db.collection('eventSystem');
+    guildItemsCollection = db.collection('guildItems');
+    globalItemsCollection = db.collection('globalItems');
+
+    // Initialize event system if it doesn't exist
+    const eventSystem = await eventSystemCollection.findOne({ _id: 'main' });
+    if (!eventSystem) {
+      await eventSystemCollection.insertOne({
+        _id: 'main',
+        currentEvent: null,
+        lastEventStart: 0,
+        nextEventTime: Date.now() + (4 * 24 * 60 * 60 * 1000),
+        eventHistory: []
+      });
+    }
+
+    // Health check: Test write and read permissions
+    await performDatabaseHealthCheck();
+
+    // Add database connection diagnostics
+    await logDatabaseDiagnostics();
+
+    // Initialize global items if they don't exist
+    await initializeGlobalItems();
+
+  } catch (error) {
+    console.error('Failed to connect to MongoDB:', error);
+    process.exit(1);
+  }
+}
+
+// Global data objects (loaded from MongoDB)
+let userData = {};
+let cooldowns = { scavenge: {}, labor: {}, steal: {} };
+global.tempItems = {};
+global.activeTrades = {};
+global.activeMarbleGames = {};
+global.messageTracker = {};
+global.massSellSessions = {};
+
+// Graceful shutdown handler for Railway deployment
+async function gracefulShutdown(signal) {
+  console.log(`🔄 Received ${signal}, performing graceful shutdown...`);
+
+  try {
+    // Save all pending data
+    console.log('💾 Saving all user data before shutdown...');
+    await saveUserData();
+    await saveCooldowns();
+
+    // Close MongoDB connection
+    if (mongoClient) {
+      console.log('🔌 Closing MongoDB connection...');
+      await mongoClient.close();
+    }
+
+    console.log('✅ Graceful shutdown completed');
+    process.exit(0);
+  } catch (error) {
+    console.error('❌ Error during graceful shutdown:', error);
+    process.exit(1);
+  }
+}
+
+// Set up process handlers for Railway
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGUSR2', () => gracefulShutdown('SIGUSR2')); // Nodemon restart
+
+// Database helper functions
+async function getUser(userId) {
+  if (!userData[userId]) {
+    console.log(`🔍 Loading user ${userId} from database...`);
+    const user = await usersCollection.findOne({ _id: userId });
+    console.log(`🔍 Database returned for ${userId}:`, JSON.stringify(user, null, 2));
+    userData[userId] = user || { cash: 0, artefacts: [], items: [], bankBalance: 0 };
+    console.log(`🔍 Final userData for ${userId}:`, JSON.stringify(userData[userId], null, 2));
+  }
+  return userData[userId];
+}
+
+async function saveUser(userId) {
+  if (!usersCollection) {
+    console.warn('Users collection not ready, skipping save');
+    return;
+  }
+  if (userData[userId]) {
+    try {
+      console.log(`💾 Attempting to save user ${userId} with data:`, JSON.stringify(userData[userId], null, 2));
+      const result = await usersCollection.replaceOne(
+        { _id: userId },
+        { _id: userId, ...userData[userId] },
+        { upsert: true }
+      );
+      console.log(`💾 Save result for ${userId}: Matched=${result.matchedCount}, Upserted=${result.upsertedCount}`);
+
+      // Verify the save worked
+      const verification = await usersCollection.findOne({ _id: userId });
+      console.log(`🔍 Verification read for ${userId}:`, JSON.stringify(verification, null, 2));
+    } catch (error) {
+      console.error(`❌ Failed to save user ${userId}:`, error.message);
+      throw error;
+    }
+  } else {
+    console.warn(`⚠️  No data to save for user ${userId}`);
+  }
+}
+
+async function getCooldowns() {
+  const cooldownDoc = await cooldownsCollection.findOne({ _id: 'main' });
+  const defaults = { scavenge: {}, labor: {}, steal: {} };
+
+  if (!cooldownDoc) {
+    return defaults;
+  }
+
+  // Merge with defaults to ensure all keys exist, even in old documents
+  return {
+    scavenge: cooldownDoc.scavenge || {},
+    labor: cooldownDoc.labor || {},
+    steal: cooldownDoc.steal || {}
+  };
+}
+
+async function saveCooldowns() {
+  if (!cooldownsCollection) {
+    console.warn('Cooldowns collection not ready, skipping save');
+    return;
+  }
+  try {
+    const result = await cooldownsCollection.replaceOne(
+      { _id: 'main' },
+      { _id: 'main', ...cooldowns },
+      { upsert: true }
+    );
+    console.log(`💾 Cooldowns: Matched=${result.matchedCount}, Upserted=${result.upsertedCount}`);
+  } catch (error) {
+    console.error('❌ Failed to save cooldowns:', error.message);
+    throw error;
+  }
+}
+
+async function getEventSystem() {
+  return await eventSystemCollection.findOne({ _id: 'main' });
+}
+
+async function saveEventSystem(eventData) {
+  try {
+    const result = await eventSystemCollection.replaceOne(
+      { _id: 'main' },
+      { _id: 'main', ...eventData },
+      { upsert: true }
+    );
+    console.log(`💾 Event System: Matched=${result.matchedCount}, Upserted=${result.upsertedCount}`);
+  } catch (error) {
+    console.error('❌ Failed to save event system:', error.message);
+    throw error;
+  }
+}
+
+async function getXpData(userId) {
+  const user = await getUser(userId);
+  if (!user.xpData) {
+    user.xpData = { xp: 0, messageCount: 0, lastMessage: 0 };
+    await saveUser(userId);
+  }
+  return user.xpData;
+}
+
+async function getGuildItems(guildId) {
+  const guildDoc = await guildItemsCollection.findOne({ _id: guildId });
+  return guildDoc?.items || {};
+}
+
+async function saveGuildItems(guildId, items) {
+  try {
+    const result = await guildItemsCollection.replaceOne(
+      { _id: guildId },
+      { _id: guildId, items },
+      { upsert: true }
+    );
+    console.log(`💾 Guild Items [${guildId}]: Matched=${result.matchedCount}, Upserted=${result.upsertedCount}`);
+  } catch (error) {
+    console.error(`❌ Failed to save guild items for ${guildId}:`, error.message);
+    throw error;
+  }
+}
+
+// Global Items System
+async function initializeGlobalItems() {
+  try {
+    const globalItems = await globalItemsCollection.findOne({ _id: 'main' });
+    if (!globalItems) {
+      await globalItemsCollection.insertOne({
+        _id: 'main',
+        items: {
+          'Bank Expansion Ticket': {
+            name: 'Bank Expansion Ticket',
+            basePrice: 25000,
+            description: 'Increases your bank capacity by 25%. Price increases exponentially with each purchase.',
+            type: 'bank_expansion',
+            multiplier: 2.5
+          }
+        }
+      });
+      console.log('✅ Global items initialized with Bank Expansion Ticket');
+    }
+  } catch (error) {
+    console.error('❌ Failed to initialize global items:', error.message);
+    throw error;
+  }
+}
+
+async function getGlobalItems() {
+  const globalDoc = await globalItemsCollection.findOne({ _id: 'main' });
+  return globalDoc?.items || {};
+}
+
+// Bank Expansion System
+async function calculateBankCapacity(userId) {
+  const user = await getUser(userId);
+  const expansions = user.bankExpansions || 0;
+  const baseCapacity = 50000;
+  const expansionPercent = 0.25; // 25% per expansion
+
+  return Math.floor(baseCapacity * Math.pow(1 + expansionPercent, expansions));
+}
+
+async function calculateExpansionPrice(userId) {
+  const user = await getUser(userId);
+  const expansions = user.bankExpansions || 0;
+  const basePrice = 25000;
+  const multiplier = 2.5;
+
+  return Math.floor(basePrice * Math.pow(multiplier, expansions));
+}
+
+async function getUserBankExpansions(userId) {
+  const user = await getUser(userId);
+  return user.bankExpansions || 0;
+}
+
+async function purchaseBankExpansion(userId) {
+  try {
+    const user = await getUser(userId);
+    const currentExpansions = user.bankExpansions || 0;
+    const price = await calculateExpansionPrice(userId);
+
+    if (user.cash < price) {
+      return { success: false, error: 'insufficient_funds', price, cash: user.cash };
+    }
+
+    // Process purchase
+    user.cash -= price;
+    user.bankExpansions = currentExpansions + 1;
+    await saveUser(userId);
+
+    const newCapacity = await calculateBankCapacity(userId);
+
+    return { 
+      success: true, 
+      newExpansions: user.bankExpansions,
+      newCapacity: newCapacity,
+      price: price
+    };
+  } catch (error) {
+    console.error(`❌ Failed to purchase bank expansion for ${userId}:`, error.message);
+    return { success: false, error: 'system_error' };
+  }
+}
+
+// Database connection diagnostics
+async function logDatabaseDiagnostics() {
+  try {
+    console.log('📊 MongoDB Connection Diagnostics:');
+    console.log(`   Database: ${db.databaseName}`);
+
+    const userCount = await usersCollection.countDocuments();
+    console.log(`   Users collection: ${userCount} documents`);
+
+    // Check connection status and authentication
+    const connStatus = await db.admin().command({ connectionStatus: 1 });
+    if (connStatus.authInfo && connStatus.authInfo.authenticatedUsers) {
+      const users = connStatus.authInfo.authenticatedUsers;
+      console.log(`   Authenticated as: ${JSON.stringify(users)}`);
+    }
+
+    const mongoUri = process.env.MONGODB_URI;
+    const hostMatch = mongoUri.match(/@([^/]+)/);
+    if (hostMatch) {
+      console.log(`   MongoDB Host: ${hostMatch[1]}`);
+    }
+
+    console.log('📊 Database diagnostics completed');
+  } catch (error) {
+    console.error('❌ Database diagnostics failed:', error.message);
+  }
+}
+
+// Database health check function
+async function performDatabaseHealthCheck() {
+  try {
+    console.log('🏥 Performing MongoDB health check...');
+
+    // Test write permission
+    const testDoc = { _id: 'health_check', timestamp: Date.now(), test: 'write_read_test' };
+    const writeResult = await usersCollection.replaceOne(
+      { _id: 'health_check' },
+      testDoc,
+      { upsert: true }
+    );
+
+    console.log(`✅ Write test - Matched: ${writeResult.matchedCount}, Upserted: ${writeResult.upsertedCount}`);
+
+    // Test read permission
+    const readResult = await usersCollection.findOne({ _id: 'health_check' });
+
+    if (readResult && readResult.test === 'write_read_test') {
+      console.log('✅ Read test - SUCCESS');
+
+      // Clean up test document
+      await usersCollection.deleteOne({ _id: 'health_check' });
+      console.log('✅ Database health check PASSED - Read/Write permissions confirmed');
+    } else {
+      console.error('❌ Read test FAILED - Could not read back test document');
+      throw new Error('Database read test failed');
+    }
+
+  } catch (error) {
+    console.error('❌ DATABASE HEALTH CHECK FAILED:', error.message);
+    console.error('This explains why data is not persisting!');
+    throw error;
+  }
+}
+
+// Legacy save functions (now async and use MongoDB)
+async function saveUserData() {
+  if (!usersCollection) {
+    console.warn('Users collection not ready, skipping save');
+    return;
+  }
+  try {
+    const userPromises = Object.keys(userData).map(userId => saveUser(userId));
+    await Promise.all(userPromises);
+    console.log(`💾 Saved data for ${Object.keys(userData).length} users to MongoDB`);
+  } catch (error) {
+    console.error('❌ SAVE FAILED:', error.message);
+    throw error;
+  }
+}
+
+// Rarity and artefact config
+const rarities = [
+  { name:'Common', chance:65, color:0xAAAAAA, value:100, sell:150, items:['Quartz','Mica','Olivine'] },
+  { name:'Uncommon', chance:20, color:0x00FF00, value:500, sell:500, items:['Garnet','Talc','Magnetite'] },
+  { name:'Rare', chance:10, color:0x00008B, value:1500, sell:1500, items:['Eye of Monazite','Chest of Xenotime','Euxenite'] },
+  { name:'Legendary', chance:4, color:0xFFD700, value:5000, sell:5000, items:['Watch of Scandium','Statue of Bastnasite','Allanite'] },
+  { name:'Unknown', chance:1, color:0x000000, value:15000, sell:15000, items:['Gem of Diamond','Kyawthuite'] }
+];
+function getRarityByArtefact(name) { 
+  const cleanName = name.startsWith('✨ SHINY ') && name.endsWith(' ✨') ? name.replace('✨ SHINY ', '').replace(' ✨', '') : name;
+  return rarities.find(r => r.items.includes(cleanName)); 
+}
+
+// === EVENT SYSTEM ===
+
+// Get all possible artefacts from all rarities
+function getAllArtefacts() {
+  return rarities.flatMap(rarity => rarity.items);
+}
+
+// Check and handle event system
+async function checkAndHandleEvents() {
+  const now = Date.now();
+  const eventData = await getEventSystem();
+
+  // Check if current event should end
+  if (eventData.currentEvent && now >= eventData.currentEvent.endTime) {
+    await endCurrentEvent();
+  }
+
+  // Check if new event should start
+  if (!eventData.currentEvent && now >= eventData.nextEventTime) {
+    await startNewEvent();
+  }
+}
+
+async function startNewEvent() {
+  const allArtefacts = getAllArtefacts();
+  const now = Date.now();
+
+  // Randomly select two different artefacts
+  const shuffledArtefacts = [...allArtefacts].sort(() => Math.random() - 0.5);
+  const negativeArtefact = shuffledArtefacts[0];
+  const positiveArtefact = shuffledArtefacts[1];
+
+  const newEvent = {
+    id: `event_${now}`,
+    startTime: now,
+    endTime: now + (24 * 60 * 60 * 1000), // 24 hours
+    negativeArtefact,
+    positiveArtefact,
+    type: 'mine_collapse'
+  };
+
+  const eventData = await getEventSystem();
+  eventData.currentEvent = newEvent;
+  eventData.lastEventStart = now;
+  eventData.nextEventTime = now + (4 * 24 * 60 * 60 * 1000); // Next event in 4 days
+  eventData.eventHistory.unshift(newEvent);
+
+  // Keep only last 10 events in history
+  if (eventData.eventHistory.length > 10) {
+    eventData.eventHistory = eventData.eventHistory.slice(0, 10);
+  }
+
+  await saveEventSystem(eventData);
+  broadcastEventStart(newEvent);
+}
+
+async function endCurrentEvent() {
+  const eventData = await getEventSystem();
+  const event = eventData.currentEvent;
+  if (!event) return;
+
+  eventData.currentEvent = null;
+  await saveEventSystem(eventData);
+  broadcastEventEnd(event);
+}
+
+async function broadcastEventStart(event) {
+  try {
+    // Create event start embed
+    const eventEmbed = new EmbedBuilder()
+      .setTitle('MINING CRISIS ALERT!')
+      .setDescription(`**A catastrophic mine collapse has occurred in the ${event.negativeArtefact} mining sector!**`)
+      .addFields(
+        { 
+          name: 'Mine Collapse Report', 
+          value: `The **${event.negativeArtefact}** mine has suffered a devastating collapse! Explorers cannot approach the mining site due to unstable conditions and falling debris.`, 
+          inline: false 
+        },
+        { 
+          name: 'Scavenging Restriction', 
+          value: `**${event.negativeArtefact}** cannot be scavenged during this 24-hour emergency period while repair crews work to stabilize the site.`, 
+          inline: false 
+        },
+        { 
+          name: 'Unexpected Opportunity', 
+          value: `However, the nearby **${event.positiveArtefact}** mine has expanded due to shifting geological conditions, creating new accessible veins!`, 
+          inline: false 
+        },
+        { 
+          name: 'Enhanced Discovery Rate', 
+          value: `**${event.positiveArtefact}** discovery chances have **doubled** during this event! Scavenge while this opportunity lasts!`, 
+          inline: false 
+        },
+        { 
+          name: 'Event Duration', 
+          value: 'This mining crisis will last exactly **24 hours**', 
+          inline: true 
+        },
+        { 
+          name: 'Estimated Repair Time', 
+          value: 'Mine restoration crews are working around the clock', 
+          inline: true 
+        }
+      )
+      .setColor(0xFF4500)
+      .setFooter({ text: 'Fortune Bot Mining Authority • Emergency Broadcast System' })
+      .setTimestamp();
+
+    // Send to all channels where the bot is active (this is a simplified approach)
+    // In a real implementation, you'd want to store channel IDs to broadcast to
+    console.log('MINING EVENT STARTED:', event);
+
+  } catch (error) {
+    console.error('Error broadcasting event start:', error);
+  }
+}
+
+async function broadcastEventEnd(event) {
+  try {
+    const eventEmbed = new EmbedBuilder()
+      .setTitle('MINING OPERATIONS RESTORED')
+      .setDescription('**The mining crisis has been resolved!**')
+      .addFields(
+        { 
+          name: 'Restoration Complete', 
+          value: `The **${event.negativeArtefact}** mine has been fully repaired and stabilized. Safety inspectors have cleared the site for normal operations.`, 
+          inline: false 
+        },
+        { 
+          name: 'Mining Status', 
+          value: `**${event.negativeArtefact}** is now available for scavenging again at normal rates.`, 
+          inline: false 
+        },
+        { 
+          name: 'Geological Shift', 
+          value: `The **${event.positiveArtefact}** mine has returned to standard geological conditions and normal discovery rates.`, 
+          inline: false 
+        },
+        { 
+          name: 'Operations Summary', 
+          value: 'All mining sectors have returned to baseline scavenging probabilities', 
+          inline: false 
+        }
+      )
+      .setColor(0x00FF7F)
+      .setFooter({ text: 'Fortune Bot Mining Authority • All Clear Signal' })
+      .setTimestamp();
+
+    console.log('MINING EVENT ENDED:', event);
+
+  } catch (error) {
+    console.error('Error broadcasting event end:', error);
+  }
+}
+
+// Modified scavenge function to account for events
+async function getModifiedArtefactChances() {
+  const eventData = await getEventSystem();
+  const event = eventData.currentEvent;
+  if (!event) return rarities; // No event active, return normal chances
+
+  // Create modified rarities based on current event
+  return rarities.map(rarity => {
+    const modifiedItems = rarity.items.map(item => {
+      if (item === event.negativeArtefact) {
+        // This artefact cannot be found during the event
+        return null;
+      }
+      return item;
+    }).filter(item => item !== null);
+
+    // If positive artefact is in this rarity, double its effective chance
+    const hasPositiveArtefact = rarity.items.includes(event.positiveArtefact);
+
+    return {
+      ...rarity,
+      items: modifiedItems,
+      // If this rarity contains the positive artefact, increase its chance
+      chance: hasPositiveArtefact ? rarity.chance * 1.5 : rarity.chance
+    };
+  }).filter(rarity => rarity.items.length > 0); // Remove rarities with no items
+}
 
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.GuildMessageReactions,
-    GatewayIntentBits.GuildPresences
+    GatewayIntentBits.MessageContent
   ]
 });
 
-// Storage for server configurations (in production, use a database)
-const serverConfigs = new Map();
-const joinLog = new Map();
-const userFirstMessage = new Map();
-
-// Slash command definitions
-const commands = [
-  new SlashCommandBuilder()
-    .setName('check')
-    .setDescription('Check if a user is potentially an alt account')
-    .addUserOption(option => 
-      option.setName('user')
-        .setDescription('The user to check')
-        .setRequired(true)),
-
-  new SlashCommandBuilder()
-    .setName('configure')
-    .setDescription('Configure security settings')
-    .addSubcommand(subcommand =>
-      subcommand
-        .setName('quarantine')
-        .setDescription('Configure the quarantine system')),
-
-  new SlashCommandBuilder()
-    .setName('quarantine')
-    .setDescription('Manually quarantine a user')
-    .addUserOption(option =>
-      option.setName('user')
-        .setDescription('The user to quarantine')
-        .setRequired(true))
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-
-  new SlashCommandBuilder()
-    .setName('allow')
-    .setDescription('Allow a quarantined user')
-    .addUserOption(option =>
-      option.setName('user')
-        .setDescription('The user to allow')
-        .setRequired(true))
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-
-  new SlashCommandBuilder()
-    .setName('serverinfo')
-    .setDescription('Get information about the current server'),
-
-  new SlashCommandBuilder()
-    .setName('userinfo')
-    .setDescription('Get detailed information about a user')
-    .addUserOption(option => 
-      option.setName('user')
-        .setDescription('The user to get info about')
-        .setRequired(false)),
-
-  new SlashCommandBuilder()
-    .setName('althistory')
-    .setDescription('View recent alt account checks in this server')
-    .addIntegerOption(option =>
-      option.setName('limit')
-        .setDescription('Number of recent checks to show (1-10)')
-        .setMinValue(1)
-        .setMaxValue(10)),
-
-  new SlashCommandBuilder()
-    .setName('setreactionlogs')
-    .setDescription('Configure reaction logging channel (Admin only)')
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-
-  new SlashCommandBuilder()
-    .setName('setdeletedlogs')
-    .setDescription('Configure deleted message logging channel (Admin only)')
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-
-  new SlashCommandBuilder()
-    .setName('seteditlogs')
-    .setDescription('Configure message edit logging channel (Admin only)')
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-
-  new SlashCommandBuilder()
-    .setName('logstatus')
-    .setDescription('View current logging configuration (Moderator only)')
-    .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers),
-
-  new SlashCommandBuilder()
-    .setName('say')
-    .setDescription('Send a message to a specified channel (Admin only)')
-    .addChannelOption(option =>
-      option.setName('channel')
-        .setDescription('The channel to send the message to')
-        .addChannelTypes(ChannelType.GuildText)
-        .setRequired(true))
-    .addStringOption(option =>
-      option.setName('message')
-        .setDescription('The message to send')
-        .setRequired(true))
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-
-  new SlashCommandBuilder()
-    .setName('riskreport')
-    .setDescription('Generate a comprehensive server security and safety assessment')
-    .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers),
-
-  new SlashCommandBuilder()
-    .setName('behavioursummary')
-    .setDescription('Analyze a user\'s activity patterns and message history')
-    .addUserOption(option => 
-      option.setName('user')
-        .setDescription('The user to analyze')
-        .setRequired(true))
-    .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers),
-
-  new SlashCommandBuilder()
-    .setName('delete')
-    .setDescription('Moderation commands')
-    .addSubcommand(subcommand =>
-      subcommand
-        .setName('messages')
-        .setDescription('Delete all messages from a specific user in this channel')
-        .addUserOption(option => 
-          option.setName('user')
-            .setDescription('The user whose messages should be deleted')
-            .setRequired(false))
-        .addStringOption(option =>
-          option.setName('userid')
-            .setDescription('The user ID whose messages should be deleted')
-            .setRequired(false)))
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
-];
-
-// Helper functions for permissions
-function isAdmin(member) {
-  return member.permissions.has('Administrator') || member.permissions.has('ManageGuild');
-}
-
-function isModerator(member) {
-  return member.permissions.has('ModerateMembers') || member.permissions.has('BanMembers') || member.permissions.has('KickMembers') || isAdmin(member);
-}
-
-// Helper function to get server config
-function getServerConfig(guildId) {
-  if (!serverConfigs.has(guildId)) {
-    serverConfigs.set(guildId, {
-      reactionLogsChannel: null,
-      deletedLogsChannel: null,
-      editLogsChannel: null,
-      quarantine: {
-        enabled: false,
-        ageThreshold: 0,
-        ageEnabled: false,
-        massJoinEnabled: false,
-        massJoinTime: 5,
-        massJoinCount: 10,
-        profileCheckEnabled: false,
-        linkCheckEnabled: false
-      }
-    });
-  }
-  return serverConfigs.get(guildId);
-}
-
-async function quarantineUser(member, reason) {
-  const guild = member.guild;
-  let quarantineRole = guild.roles.cache.find(r => r.name === 'Quarantined');
-  if (!quarantineRole) {
-    try {
-      quarantineRole = await guild.roles.create({
-        name: 'Quarantined',
-        reason: 'Quarantine system setup'
-      });
-    } catch (e) {
-      console.error('Error creating quarantine role:', e);
-      return;
-    }
-  }
-
-  let quarantineChannel = guild.channels.cache.find(c => c.name === 'quarantine-room');
-  if (!quarantineChannel) {
-    try {
-      quarantineChannel = await guild.channels.create({
-        name: 'quarantine-room',
-        type: ChannelType.GuildText,
-        permissionOverwrites: [
-          {
-            id: guild.id,
-            deny: [PermissionFlagsBits.ViewChannel]
-          },
-          {
-            id: quarantineRole.id,
-            allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages]
-          },
-          {
-            id: client.user.id,
-            allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages]
-          }
-        ]
-      });
-    } catch (e) {
-      console.error('Error creating quarantine channel:', e);
-      return;
-    }
-  }
-
-  try {
-    await member.roles.add(quarantineRole);
-    await quarantineChannel.send(`⚠️ ${member} has been quarantined.\n**Reason:** ${reason}\nAn admin or moderator will review your account shortly.`);
-  } catch (e) {
-    console.error('Error adding role or sending message:', e);
-  }
-}
-
-// Helper function to create channel selection menu
-function createChannelSelectMenu(guildId, logType) {
-  const guild = client.guilds.cache.get(guildId);
-  const textChannels = guild.channels.cache
-    .filter(channel => channel.type === ChannelType.GuildText)
-    .first(25); // Discord limit
-
-  const options = textChannels.map(channel => ({
-    label: `#${channel.name}`,
-    value: channel.id,
-    description: `Set as ${logType} logs channel`
-  }));
-
-  if (options.length === 0) {
-    options.push({
-      label: 'No text channels available',
-      value: 'none',
-      description: 'Create a text channel first'
-    });
-  }
-
-  return new StringSelectMenuBuilder()
-    .setCustomId(`select_${logType}_logs_${guildId}`)
-    .setPlaceholder(`Choose a channel for ${logType} logs`)
-    .addOptions(options);
-}
-
-// Advanced mutual server analysis
-async function analyzeMutualConnections(targetUser, requestingUser, client) {
-  const mutualConnections = [];
-  const suspiciousPatterns = [];
-
-  try {
-    // Get mutual guilds (limited by Discord API)
-    const mutualGuilds = client.guilds.cache.filter(guild => {
-      try {
-        return guild.members.cache.has(targetUser.id) && guild.members.cache.has(requestingUser.id);
-      } catch {
-        return false;
-      }
-    });
-
-    for (const [guildId, guild] of mutualGuilds) {
-      try {
-        const targetMember = await guild.members.fetch(targetUser.id);
-        const requestingMember = await guild.members.fetch(requestingUser.id);
-
-        // Analyze join timing patterns
-        const joinTimeDiff = Math.abs(targetMember.joinedTimestamp - requestingMember.joinedTimestamp);
-        const joinDiffHours = joinTimeDiff / (1000 * 60 * 60);
-
-        const connectionData = {
-          guildName: guild.name,
-          guildId: guild.id,
-          targetJoined: targetMember.joinedTimestamp,
-          requestingUserJoined: requestingMember.joinedTimestamp,
-          joinTimeDifference: joinDiffHours,
-          targetRoles: targetMember.roles.cache.size - 1,
-          bothHaveRoles: (targetMember.roles.cache.size > 1) && (requestingMember.roles.cache.size > 1)
-        };
-
-        mutualConnections.push(connectionData);
-
-        // Detect suspicious patterns
-        if (joinDiffHours < 24) {
-          suspiciousPatterns.push(`⚠️ Joined ${guild.name} within 24 hours of each other`);
-        }
-
-        if (joinDiffHours < 1) {
-          suspiciousPatterns.push(`🚨 Joined ${guild.name} within 1 hour of each other`);
-        }
-
-      } catch (error) {
-        // Skip if can't fetch members
-      }
-    }
-
-    return {
-      mutualCount: mutualConnections.length,
-      connections: mutualConnections.slice(0, 5), // Limit to 5 for display
-      suspiciousPatterns: suspiciousPatterns,
-      hasCloseTimingPattern: suspiciousPatterns.some(p => p.includes('hour'))
-    };
-
-  } catch (error) {
-    return {
-      mutualCount: 0,
-      connections: [],
-      suspiciousPatterns: ['❓ Unable to analyze mutual connections'],
-      hasCloseTimingPattern: false
-    };
-  }
-}
-
-// ✅ Bot login and slash command registration
-client.once('ready', async () => {
-  console.log(`✅ Logged in as ${client.user.tag}`);
-
-  // Register slash commands
-  const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
-
-  try {
-    console.log('🔄 Registering slash commands...');
-    await rest.put(
-      Routes.applicationCommands(client.user.id),
-      { body: commands }
-    );
-    console.log('✅ Slash commands registered successfully!');
-  } catch (error) {
-    console.error('❌ Error registering slash commands:', error);
-  }
-});
-
-// ✅ Message command handler with loading reactions
-client.on('messageCreate', async message => {
+// XP System - Message tracking for conversation detection
+client.on('messageCreate', async (message) => {
+  // Ignore bot messages
   if (message.author.bot) return;
 
-  // Status auto-reply when the bot owner is mentioned
-  const ownerId = '1299875574894039184';
-  if (message.mentions.users.has(ownerId)) {
-    try {
-      // Ensure we have the member and their presence cached
-      let member = message.guild.members.cache.get(ownerId);
-      if (!member || !member.presence) {
-        member = await message.guild.members.fetch({ user: ownerId, withPresences: true }).catch(() => null);
-      }
-      
-      const status = member?.presence?.status || 'offline';
-      
-      if (status === 'online' || status === 'idle') return;
+  const userId = message.author.id;
+  const channelId = message.channel.id;
+  const now = Date.now();
 
-      let statusText = `is currently **${status}**`;
-      if (status === 'dnd') statusText = 'is in **Do Not Disturb** mode';
+  // Load user data from database first
+  const user = await getUser(userId);
+  if (!user.xpData) user.xpData = { xp: 0, messageCount: 0, lastMessage: 0 };
 
-      await message.reply(`Nya? My master ${statusText}!`).catch(console.error);
-    } catch (err) {
-      console.error('Error in owner mention reply:', err);
-    }
-  }
+  // Initialize channel tracking
+  if (!global.messageTracker[channelId]) global.messageTracker[channelId] = [];
 
-  // Handle !riskreport command
-  if (message.content.startsWith('!riskreport')) {
-    if (!isModerator(message.member)) {
-      return message.reply('You need moderator permissions to use this command.');
-    }
+  // Add this message to channel tracker
+  global.messageTracker[channelId].push({
+    userId: userId,
+    timestamp: now
+  });
 
-    // Add loading reactions
-    const loadingEmojis = ['🔍', '📊', '🛡️', '⚡', '📋'];
-    for (const emoji of loadingEmojis) {
-      await message.react(emoji).catch(() => {});
-    }
-
-    try {
-      const report = await generateServerRiskReport(message.guild, message.author);
-      const embed = await createRiskReportEmbed(report, message.guild);
-
-      // Remove loading reactions
-      for (const emoji of loadingEmojis) {
-        await message.reactions.cache.get(emoji)?.users.remove(client.user).catch(() => {});
-      }
-
-      return message.reply({ embeds: [embed] });
-    } catch (error) {
-      console.error('Error generating risk report:', error);
-      // Remove loading reactions
-      for (const emoji of loadingEmojis) {
-        await message.reactions.cache.get(emoji)?.users.remove(client.user).catch(() => {});
-      }
-      return message.reply('❌ Error generating server risk report. Please try again.');
-    }
-  }
-
-  // Handle !behavioursummary command
-  if (message.content.startsWith('!behavioursummary')) {
-    if (!isModerator(message.member)) {
-      return message.reply('You need moderator permissions to use this command.');
-    }
-
-    const args = message.content.split(' ').slice(1);
-    let target;
-
-    if (message.mentions.users.size > 0) {
-      target = message.mentions.users.first();
-    } else if (args[0]) {
-      try {
-        target = await client.users.fetch(args[0]);
-      } catch {
-        return message.reply('❌ Could not find a user with that ID.');
-      }
-    }
-
-    if (!target) {
-      return message.reply('Please mention a user or provide a valid user ID.');
-    }
-
-    // Add loading reactions
-    const loadingEmojis = ['📊', '📈', '🔍', '📋', '⏳'];
-    for (const emoji of loadingEmojis) {
-      await message.react(emoji).catch(() => {});
-    }
-
-    try {
-      const behaviorData = await analyzeBehaviorSummary(target, message.guild);
-      const embeds = await createBehaviorSummaryEmbeds(behaviorData, target, message.guild);
-
-      // Remove loading reactions
-      for (const emoji of loadingEmojis) {
-        await message.reactions.cache.get(emoji)?.users.remove(client.user).catch(() => {});
-      }
-
-      return message.reply({ embeds });
-    } catch (error) {
-      console.error('Error generating behavior summary:', error);
-      // Remove loading reactions
-      for (const emoji of loadingEmojis) {
-        await message.reactions.cache.get(emoji)?.users.remove(client.user).catch(() => {});
-      }
-      return message.reply('❌ Error generating behavior summary. Please try again.');
-    }
-  }
-
-  if (!message.content.startsWith('!check')) return;
-
-  if (!isModerator(message.member)) {
-    return message.reply('You need moderator permissions to use this command.');
-  }
-
-  // Add loading reactions
-  const loadingEmojis = ['🇱', '🇴', '🇦', '🇩', '🇮', '🇳', '🇬'];
-  for (const emoji of loadingEmojis) {
-    await message.react(emoji).catch(() => {});
-  }
-
-  const args = message.content.split(' ').slice(1);
-  let target;
-
-  if (message.mentions.users.size > 0) {
-    target = message.mentions.users.first();
-  } else if (args[0]) {
-    try {
-      target = await client.users.fetch(args[0]);
-    } catch {
-      // Remove loading reactions
-      for (const emoji of loadingEmojis) {
-        await message.reactions.cache.get(emoji)?.users.remove(client.user).catch(() => {});
-      }
-      return message.reply('❌ Could not find a user with that ID.');
-    }
-  }
-
-  if (!target) {
-    // Remove loading reactions
-    for (const emoji of loadingEmojis) {
-      await message.reactions.cache.get(emoji)?.users.remove(client.user).catch(() => {});
-    }
-    return message.reply('Please mention a user or provide a valid user ID.');
-  }
-
-  const risk = await calculateRisk(target, message.guild);
-
-  // Add mutual server analysis
-  const mutualAnalysis = await analyzeMutualConnections(target, message.author, client);
-  risk.mutualAnalysis = mutualAnalysis;
-
-  // Apply mutual server risk scoring
-  if (mutualAnalysis.hasCloseTimingPattern) {
-    risk.score += 25;
-    risk.factors.push('Suspicious mutual server timing patterns');
-  }
-  if (mutualAnalysis.mutualCount === 0) {
-    risk.score += 5;
-    risk.factors.push('No detectable mutual servers');
-  }
-
-  // Recalculate risk label after mutual analysis
-  risk.score = Math.max(0, Math.min(100, risk.score));
-  if (risk.score >= 80) risk.label = 'Critical';
-  else if (risk.score >= 60) risk.label = 'High';
-  else if (risk.score >= 35) risk.label = 'Medium';
-  else if (risk.score >= 15) risk.label = 'Low';
-  else risk.label = 'Minimal';
-
-  const embed = await makeCheckEmbed(target, risk, message.guild);
-
-  // Check if target is admin (immune to moderation)
-  const targetMember = await message.guild.members.fetch(target.id).catch(() => null);
-  const isTargetAdmin = targetMember && isAdmin(targetMember);
-
-  const buttons = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`allow_${target.id}`).setLabel('✅ Allow').setStyle(ButtonStyle.Success),
-    new ButtonBuilder()
-      .setCustomId(`kick_${target.id}`)
-      .setLabel(isTargetAdmin ? '❌ Kick (Admin Immune)' : '❌ Kick')
-      .setStyle(ButtonStyle.Danger)
-      .setDisabled(isTargetAdmin),
-    new ButtonBuilder()
-      .setCustomId(`ban_${target.id}`)
-      .setLabel(isTargetAdmin ? '🔨 Ban (Admin Immune)' : '🔨 Ban')
-      .setStyle(ButtonStyle.Danger)
-      .setDisabled(isTargetAdmin)
+  // Clean old messages (only keep last 5 minutes)
+  global.messageTracker[channelId] = global.messageTracker[channelId].filter(
+    msg => now - msg.timestamp < 300000 // 5 minutes
   );
 
-  // Remove loading reactions
-  for (const emoji of loadingEmojis) {
-    await message.reactions.cache.get(emoji)?.users.remove(client.user).catch(() => {});
-  }
+  // Check if this is part of a conversation
+  const recentMessages = global.messageTracker[channelId].filter(
+    msg => now - msg.timestamp < 120000 // 2 minutes
+  );
 
-  return message.reply({ embeds: [embed], components: [buttons] });
+  // Get unique users who have sent messages in the last 2 minutes
+  const uniqueUsers = new Set(recentMessages.map(msg => msg.userId));
+
+  // Only award XP if there's a conversation (at least 2 different users)
+  if (uniqueUsers.size >= 2) {
+    user.xpData.messageCount++;
+
+    // Award XP every 2 messages
+    if (user.xpData.messageCount % 2 === 0) {
+      user.xpData.xp++;
+      user.xpData.lastMessage = now;
+      await saveUserData();
+    }
+  }
 });
 
-// ✅ Slash command handler
-client.on('interactionCreate', async interaction => {
+client.once('clientReady', async () => {
+  console.log(`Fortune Bot online as ${client.user.tag}`);
+
+  // Initialize MongoDB connection
+  await initializeDatabase();
+
+  // Load cooldowns from database
+  cooldowns = await getCooldowns();
+
+  // Initialize event system checking
+  checkAndHandleEvents();
+
+  // Set up periodic event checking every 15 minutes
+  setInterval(() => {
+    checkAndHandleEvents();
+  }, 15 * 60 * 1000);
+
+  // Register all slash commands
+  const commands = [
+    new SlashCommandBuilder()
+      .setName('info')
+      .setDescription('Shows information about the bot'),
+
+    new SlashCommandBuilder()
+      .setName('bank')
+      .setDescription('Deposit money into your secure bank account')
+      .addIntegerOption(option =>
+        option.setName('amount')
+          .setDescription('Amount to deposit')
+          .setRequired(true)
+          .setMinValue(1)),
+
+    new SlashCommandBuilder()
+      .setName('withdraw')
+      .setDescription('Withdraw money from your bank account')
+      .addIntegerOption(option =>
+        option.setName('amount')
+          .setDescription('Amount to withdraw')
+          .setRequired(true)
+          .setMinValue(1)),
+
+    new SlashCommandBuilder()
+      .setName('steal')
+      .setDescription('Attempt to steal cash from another player')
+      .addUserOption(option =>
+        option.setName('target')
+          .setDescription('User to steal from')
+          .setRequired(true))
+      .addIntegerOption(option =>
+        option.setName('amount')
+          .setDescription('Amount to steal')
+          .setRequired(true)
+          .setMinValue(1)),
+
+    new SlashCommandBuilder()
+      .setName('scavenge')
+      .setDescription('Search for rare artefacts (2 hour cooldown)'),
+
+    new SlashCommandBuilder()
+      .setName('labor')
+      .setDescription('Work to earn money (40 minute cooldown)'),
+
+    new SlashCommandBuilder()
+      .setName('inventory')
+      .setDescription('View your cash, bank balance and artefacts'),
+
+    new SlashCommandBuilder()
+      .setName('trade')
+      .setDescription('Start a trade with another user')
+      .addUserOption(option =>
+        option.setName('user')
+          .setDescription('User to trade with')
+          .setRequired(true)),
+
+    new SlashCommandBuilder()
+      .setName('leaderboard')
+      .setDescription('View the leaderboard and your current rating'),
+
+    new SlashCommandBuilder()
+      .setName('store')
+      .setDescription('View available items in global and server stores')
+      .setDMPermission(false),
+
+    new SlashCommandBuilder()
+      .setName('buy')
+      .setDescription('Purchase an item from the global store')
+      .addStringOption(option =>
+        option.setName('item')
+          .setDescription('Name of the item to purchase')
+          .setRequired(true)),
+
+    new SlashCommandBuilder()
+      .setName('mass-sell')
+      .setDescription('Sell multiple artefacts at once'),
+
+    new SlashCommandBuilder()
+      .setName('add-item')
+      .setDescription('Add a custom server item (Admin only)')
+      .addStringOption(option =>
+        option.setName('name')
+          .setDescription('Name of the item')
+          .setRequired(true))
+      .addIntegerOption(option =>
+        option.setName('price')
+          .setDescription('Price of the item')
+          .setRequired(true)
+          .setMinValue(1))
+      .addStringOption(option =>
+        option.setName('description')
+          .setDescription('Description of the item')
+          .setRequired(false))
+      .setDMPermission(false),
+
+    new SlashCommandBuilder()
+      .setName('remove-item')
+      .setDescription('Remove a custom server item (Admin only)')
+      .addStringOption(option =>
+        option.setName('name')
+          .setDescription('Name of the item to remove')
+          .setRequired(true))
+      .setDMPermission(false),
+
+    new SlashCommandBuilder()
+      .setName('view-items')
+      .setDescription('View all custom server items (Admin only)')
+      .setDMPermission(false),
+
+    new SlashCommandBuilder()
+      .setName('marble-game')
+      .setDescription('Start a 4-player marble gambling game with cash betting')
+      .addUserOption(option => 
+        option.setName('player2')
+          .setDescription('Second player to invite')
+          .setRequired(true)
+      )
+      .addUserOption(option => 
+        option.setName('player3')
+          .setDescription('Third player to invite')
+          .setRequired(true)
+      )
+      .addUserOption(option => 
+        option.setName('player4')
+          .setDescription('Fourth player to invite')
+          .setRequired(true)
+      )
+      .setDMPermission(false),
+
+    new SlashCommandBuilder()
+      .setName('convert')
+      .setDescription('Convert your XP into cash (1 XP = $2)'),
+
+    new SlashCommandBuilder()
+      .setName('mining-status')
+      .setDescription('Check current mining events and sector status'),
+
+  ];
+
+  // Developer-only commands (registered separately)
+  const devCommands = [
+    new SlashCommandBuilder()
+      .setName('give-artefact')
+      .setDescription('Give an artefact to a user (Developer only)')
+      .addUserOption(option =>
+        option.setName('user')
+          .setDescription('User to give artefact to')
+          .setRequired(true))
+      .addStringOption(option =>
+        option.setName('artefact')
+          .setDescription('Name of the artefact to give')
+          .setRequired(true)),
+
+    new SlashCommandBuilder()
+      .setName('give-cash')
+      .setDescription('Give cash to a user (Developer only)')
+      .addUserOption(option =>
+        option.setName('user')
+          .setDescription('User to give cash to')
+          .setRequired(true))
+      .addIntegerOption(option =>
+        option.setName('amount')
+          .setDescription('Amount of cash to give')
+          .setRequired(true)
+          .setMinValue(1)),
+
+    new SlashCommandBuilder()
+      .setName('setevent')
+      .setDescription('Manually trigger a mining event (Developer only)')
+      .addStringOption(option =>
+        option.setName('positive_artefact')
+          .setDescription('Artefact that will have increased rates')
+          .setRequired(true))
+      .addStringOption(option =>
+        option.setName('negative_artefact')
+          .setDescription('Artefact that will be unavailable')
+          .setRequired(true)),
+
+    new SlashCommandBuilder()
+      .setName('remove-artefact')
+      .setDescription('Remove an artefact from a user (Developer only)')
+      .addUserOption(option =>
+        option.setName('user')
+          .setDescription('User to remove artefact from')
+          .setRequired(true))
+      .addStringOption(option =>
+        option.setName('artefact')
+          .setDescription('Name of the artefact to remove')
+          .setRequired(true)),
+
+    new SlashCommandBuilder()
+      .setName('remove-cash')
+      .setDescription('Remove cash from a user (Developer only)')
+      .addUserOption(option =>
+        option.setName('user')
+          .setDescription('User to remove cash from')
+          .setRequired(true))
+      .addIntegerOption(option =>
+        option.setName('amount')
+          .setDescription('Amount of cash to remove')
+          .setRequired(true)
+          .setMinValue(1)),
+
+    new SlashCommandBuilder()
+      .setName('reset-cooldowns')
+      .setDescription('Reset cooldowns for a user or all users (Developer only)')
+      .addUserOption(option =>
+        option.setName('user')
+          .setDescription('User to reset cooldowns for (leave empty for ALL users)')
+          .setRequired(false))
+  ];
+
+  const rest = new REST({ version:'10' }).setToken(token);
+
   try {
-    if (interaction.isChatInputCommand()) {
-    const { commandName } = interaction;
+    console.log('Started refreshing application (/) commands.');
 
-    if (commandName === 'check') {
-      if (!isModerator(interaction.member)) {
-        return interaction.reply({ content: '🚫 You need moderator permissions to use this command.', ephemeral: false });
+    // Register all commands globally (public + developer)
+    // Developer commands will only work for authorized users due to permission checks
+    await rest.put(Routes.applicationCommands(clientId), { 
+      body: [...commands, ...devCommands].map(command => command.toJSON()) 
+    });
+
+    // Register developer commands for specific users only
+    // This creates guild-specific commands that only appear for developers
+    const guilds = client.guilds.cache;
+    for (const [guildId, guild] of guilds) {
+      try {
+        // Fetch guild members if not cached
+        if (!guild.members.cache.has(DEVELOPER_ID) && !guild.members.cache.has(CO_DEVELOPER_ID)) {
+          try {
+            await guild.members.fetch();
+          } catch (fetchErr) {
+            console.log(`Could not fetch members for guild ${guildId}`);
+          }
+        }
+
+        // Check if developers are in this guild
+        const hasDevelopers = guild.members.cache.has(DEVELOPER_ID) || 
+                             guild.members.cache.has(CO_DEVELOPER_ID);
+
+        if (hasDevelopers) {
+          console.log(`Registering developer commands for guild: ${guild.name} (${guildId})`);
+          await rest.put(Routes.applicationGuildCommands(clientId, guildId), {
+            body: [...commands, ...devCommands].map(command => command.toJSON())
+          });
+        } else {
+          console.log(`No developers found in guild: ${guild.name} (${guildId})`);
+          // Register only public commands for this guild
+          await rest.put(Routes.applicationGuildCommands(clientId, guildId), {
+            body: commands.map(command => command.toJSON())
+          });
+        }
+      } catch (guildErr) {
+        console.error(`Error registering commands for guild ${guildId}:`, guildErr);
+      }
+    }
+
+    console.log('Successfully reloaded application (/) commands.');
+  } catch (err) { 
+    console.error('Error registering commands:', err); 
+  }
+});
+
+// Handle autocomplete interactions
+client.on('interactionCreate', async interaction => {
+  if (interaction.isAutocomplete()) {
+    const { commandName, focusedOption } = interaction;
+
+    if (commandName === 'sell' && focusedOption.name === 'artefact') {
+      const userId = interaction.user.id;
+      const user = await getUser(userId);
+
+      const userArtefacts = user.artefacts || [];
+      const focusedValue = focusedOption.value.toLowerCase();
+
+      const filtered = userArtefacts
+        .filter(artefact => artefact.toLowerCase().includes(focusedValue))
+        .slice(0, 25);
+
+      await interaction.respond(
+        filtered.map(artefact => ({ name: artefact, value: artefact }))
+      );
+      return;
+    }
+  }
+
+  if (interaction.isStringSelectMenu() || interaction.isButton()) {
+    const userId = interaction.user.id;
+    const [action, sessionId] = interaction.customId.split('_');
+    
+    // Check if it's a mass-sell interaction
+    if (interaction.customId.startsWith('mass_sell_')) {
+      const session = global.massSellSessions?.[sessionId];
+      if (!session || session.userId !== userId) {
+        return await interaction.reply({ content: 'This session is no longer active or is not yours.', ephemeral: true });
       }
 
-      await interaction.deferReply();
+      const user = await getUser(userId);
 
-      const target = interaction.options.getUser('user');
-      const risk = await calculateRisk(target, interaction.guild);
-
-      // Add mutual server analysis
-      const mutualAnalysis = await analyzeMutualConnections(target, interaction.user, client);
-      risk.mutualAnalysis = mutualAnalysis;
-
-      // Apply mutual server risk scoring
-      if (mutualAnalysis.hasCloseTimingPattern) {
-        risk.score += 25;
-        risk.factors.push('🚨 Suspicious mutual server timing patterns');
-      }
-      if (mutualAnalysis.mutualCount === 0) {
-        risk.score += 5;
-        risk.factors.push('🌐 No detectable mutual servers');
+      if (interaction.isStringSelectMenu()) {
+        if (action === 'mass_sell_add') {
+          session.selectedArtefacts.push(...interaction.values);
+        } else if (action === 'mass_sell_remove') {
+          interaction.values.forEach(val => {
+            const index = session.selectedArtefacts.indexOf(val);
+            if (index !== -1) session.selectedArtefacts.splice(index, 1);
+          });
+        }
+        const updatedEmbed = createMassSellEmbed(user.artefacts, session.selectedArtefacts);
+        const updatedComponents = createMassSellComponents(sessionId, user.artefacts);
+        return await interaction.update({ embeds: [updatedEmbed], components: updatedComponents });
       }
 
-      // Recalculate risk label after mutual analysis
-      risk.score = Math.max(0, Math.min(100, risk.score));
-      if (risk.score >= 80) risk.label = 'Critical';
-      else if (risk.score >= 60) risk.label = 'High';
-      else if (risk.score >= 35) risk.label = 'Medium';
-      else if (risk.score >= 15) risk.label = 'Low';
-      else risk.label = 'Minimal';
+      if (interaction.isButton()) {
+        if (action === 'mass_sell_confirm') {
+          if (!session.selectedArtefacts.length) {
+            return await interaction.reply({ content: 'Please select at least one artefact to sell.', ephemeral: true });
+          }
 
-      const embed = await makeCheckEmbed(target, risk, interaction.guild);
+          let totalValue = 0;
+          const remainingArtefacts = [...user.artefacts];
+          
+          session.selectedArtefacts.forEach(artefactName => {
+            const index = remainingArtefacts.indexOf(artefactName);
+            if (index !== -1) {
+              const rarity = getRarityByArtefact(artefactName);
+              const isShiny = artefactName.startsWith('✨ SHINY ') && artefactName.endsWith(' ✨');
+              let sellValue = rarity ? rarity.sell : 100;
+              if (isShiny) sellValue *= 20;
+              
+              totalValue += sellValue;
+              remainingArtefacts.splice(index, 1);
+            }
+          });
 
-      const targetMember = await interaction.guild.members.fetch(target.id).catch(() => null);
-      const isTargetAdmin = targetMember && isAdmin(targetMember);
+          user.cash += totalValue;
+          user.artefacts = remainingArtefacts;
+          await saveUser(userId);
 
-      const buttons = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId(`allow_${target.id}`).setLabel('✅ Allow').setStyle(ButtonStyle.Success),
-        new ButtonBuilder()
-          .setCustomId(`kick_${target.id}`)
-          .setLabel(isTargetAdmin ? '❌ Kick (Admin Immune)' : '❌ Kick')
-          .setStyle(ButtonStyle.Danger)
-          .setDisabled(isTargetAdmin),
-        new ButtonBuilder()
-          .setCustomId(`ban_${target.id}`)
-          .setLabel(isTargetAdmin ? '🔨 Ban (Admin Immune)' : '🔨 Ban')
-          .setStyle(ButtonStyle.Danger)
-          .setDisabled(isTargetAdmin)
+          const confirmEmbed = new EmbedBuilder()
+            .setTitle('Mass Sale Successful')
+            .setDescription(`Successfully sold ${session.selectedArtefacts.length} artefacts for **$${totalValue.toLocaleString()}**!`)
+            .setColor(0x51CF66)
+            .setTimestamp();
+
+          delete global.massSellSessions[sessionId];
+          return await interaction.update({ embeds: [confirmEmbed], components: [] });
+        } else if (action === 'mass_sell_select_all') {
+          session.selectedArtefacts = [...user.artefacts];
+          const updatedEmbed = createMassSellEmbed(user.artefacts, session.selectedArtefacts);
+          const updatedComponents = createMassSellComponents(sessionId, user.artefacts);
+          return await interaction.update({ embeds: [updatedEmbed], components: updatedComponents });
+        } else if (action === 'mass_sell_cancel') {
+          const cancelEmbed = new EmbedBuilder()
+            .setTitle('Mass Sale Cancelled')
+            .setDescription('No artefacts were sold.')
+            .setColor(0xFF6B6B)
+            .setTimestamp();
+
+          delete global.massSellSessions[sessionId];
+          return await interaction.update({ embeds: [cancelEmbed], components: [] });
+        }
+      }
+    }
+
+    // Existing component interaction handler
+    return await handleComponentInteraction(interaction);
+  }
+
+  if (interaction.isModalSubmit()) {
+    const { customId } = interaction;
+
+    if (customId.startsWith('number_modal_')) {
+      const gameId = customId.replace('number_modal_', '');
+      await processNumberGuess(interaction, gameId);
+      return;
+    }
+  }
+
+  if (!interaction.isChatInputCommand()) return;
+
+  // Acknowledge ALL commands immediately to prevent timeout  
+  if (interaction.commandName === 'store' || interaction.commandName === 'buy' || interaction.commandName === 'add-item') {
+    await interaction.deferReply();
+  }
+
+  // Developer commands get ephemeral replies
+  if (interaction.commandName === 'reset-cooldowns') {
+    await interaction.deferReply({ ephemeral: true });
+  }
+
+  const userId = interaction.user.id;
+  // Load user data from database before processing any command
+  await getUser(userId);
+
+  try {
+    switch (interaction.commandName) {
+      case 'info':
+        await handleInfoCommand(interaction);
+        break;
+      case 'bank':
+        await handleBankCommand(interaction, userId);
+        break;
+      case 'withdraw':
+        await handleWithdrawCommand(interaction, userId);
+        break;
+      case 'steal':
+        await handleStealCommand(interaction, userId);
+        break;
+      case 'scavenge':
+        await handleScavengeCommand(interaction, userId);
+        break;
+      case 'labor':
+        await handleLaborCommand(interaction, userId);
+        break;
+      case 'inventory':
+        await handleInventoryCommand(interaction, userId);
+        break;
+      case 'sell':
+        break;
+      case 'trade':
+        await handleTradeCommand(interaction, userId);
+        break;
+      case 'leaderboard':
+        await handleLeaderboardCommand(interaction);
+        break;
+      case 'store':
+        await handleStoreCommand(interaction);
+        break;
+      case 'buy':
+        await handleBuyCommand(interaction, userId);
+        break;
+      case 'mass-sell':
+        await handleMassSellCommand(interaction, userId);
+        break;
+      case 'add-item':
+        await handleAddItemCommand(interaction);
+        break;
+      case 'remove-item':
+        await handleRemoveItemCommand(interaction);
+        break;
+      case 'view-items':
+        await handleViewItemsCommand(interaction);
+        break;
+
+      case 'marble-game':
+        await handleMarbleGame(interaction);
+        break;
+
+      case 'convert':
+        await handleConvertCommand(interaction, userId);
+        break;
+
+      case 'mining-status':
+        await handleMiningStatusCommand(interaction);
+        break;
+
+      case 'give-artefact':
+        await handleGiveArtefactCommand(interaction);
+        break;
+
+      case 'give-cash':
+        await handleGiveCashCommand(interaction);
+        break;
+
+      case 'setevent':
+        await handleSetEventCommand(interaction);
+        break;
+
+      case 'remove-artefact':
+        await handleRemoveArtefactCommand(interaction);
+        break;
+
+      case 'remove-cash':
+        await handleRemoveCashCommand(interaction);
+        break;
+
+      case 'reset-cooldowns':
+        await handleResetCooldownsCommand(interaction);
+        break;
+    }
+  } catch (error) {
+    console.error('Error handling slash command:', error);
+
+    try {
+      const errorEmbed = new EmbedBuilder()
+        .setTitle('Command Error')
+        .setDescription('An error occurred while processing your command. Please try again.')
+        .setColor(0xFF6B6B)
+        .setTimestamp();
+
+      if (!interaction.replied && !interaction.deferred) {
+        await interaction.reply({ embeds: [errorEmbed], flags: 64 });
+      }
+    } catch (replyError) {
+      console.error('Failed to send error message:', replyError);
+    }
+  }
+});
+
+// Command handlers
+async function handleInfoCommand(interaction) {
+  const infoEmbed = new EmbedBuilder()
+    .setTitle('⚡ Fortune Bot - Build Your Empire')
+    .setDescription('**Welcome to Fortune Bot!** Build your fortune through virtual currency, collect rare artefacts, trade with players, and climb the leaderboards!')
+    .setColor(0x2F3136)
+    .setThumbnail('https://cdn.discordapp.com/emojis/1234567890123456789.png')
+    .addFields(
+      {
+        name: '⚒️ Core Commands',
+        value: [
+          '`/scavenge` - Search for rare artefacts (2h cooldown)',
+          '`/labor` - Work to earn money (40min cooldown)',
+          '`/inventory` - View your cash, bank balance and artefacts',
+          '`/sell [artefact]` - Sell a specific artefact for cash',
+          '`/mass-sell` - Sell all artefacts at once',
+          '`/trade [user]` - Interactive trading with other players',
+          '`/store` - View items available for purchase'
+        ].join('\n'),
+        inline: false
+      },
+      {
+        name: '🏦 Banking System',
+        value: [
+          '`/bank [amount]` - Deposit money (max $50,000 total)',
+          '`/withdraw [amount]` - Withdraw money from bank',
+          '`/steal [user] [amount]` - Steal cash from other players',
+          '**Note:** Only cash on hand can be stolen, bank money is protected'
+        ].join('\n'),
+        inline: false
+      },
+      {
+        name: '👥 Social & Admin Features',
+        value: [
+          '`/leaderboard` - View wealth rankings',
+          '`/store` - View custom server items',
+          '`/add-item [name] [price]` - Add custom server item (Admin)',
+          '`/remove-item [name]` - Remove server item (Admin)',
+          '`/view-items` - Manage server items (Admin)'
+        ].join('\n'),
+        inline: false
+      },
+      {
+        name: '💎 Rarity Levels',
+        value: [
+          '**Common** (65%) - $100-150',
+          '**Uncommon** (20%) - $550-700', 
+          '**Rare** (10%) - $1,500-2,500',
+          '**Legendary** (4%) - $5,000',
+          '**Unknown** (1%) - $15,000'
+        ].join('\n'),
+        inline: false
+      }
+    )
+    .setFooter({ text: '💡 Tip: Start with /scavenge to find your first artefact!' })
+    .setTimestamp();
+
+  await interaction.reply({ embeds: [infoEmbed] });
+}
+
+// Banking command handlers
+async function handleBankCommand(interaction, userId) {
+  const amount = interaction.options.getInteger('amount');
+
+  const currentBank = userData[userId].bankBalance || 0;
+  const bankCapacity = await calculateBankCapacity(userId);
+  const maxDeposit = bankCapacity - currentBank;
+
+  // Check bank capacity
+  if (amount > maxDeposit) {
+    const expansions = userData[userId].bankExpansions || 0;
+    const capacityEmbed = new EmbedBuilder()
+      .setTitle('Bank Capacity Exceeded')
+      .setDescription('Your deposit would exceed the maximum bank capacity.')
+      .addFields(
+        { name: 'Maximum Deposit Available', value: `$${maxDeposit.toLocaleString()}`, inline: true },
+        { name: 'Current Bank Balance', value: `$${currentBank.toLocaleString()}`, inline: true },
+        { name: 'Bank Capacity', value: `$${bankCapacity.toLocaleString()}`, inline: true },
+        { name: 'Bank Usage', value: `${((currentBank / bankCapacity) * 100).toFixed(1)}%`, inline: true },
+        { name: 'Expansions Purchased', value: `${expansions}`, inline: true },
+        { name: 'Upgrade Available', value: 'Use `/store` to buy Bank Expansion Tickets', inline: true }
+      )
+      .setColor(0xFF9F43)
+      .setTimestamp();
+
+    return await interaction.reply({ embeds: [capacityEmbed] });
+  }
+
+  // Check sufficient cash
+  if (userData[userId].cash < amount) {
+    const insufficientEmbed = new EmbedBuilder()
+      .setTitle('Insufficient Cash')
+      .setDescription('You do not have enough cash on hand for this deposit.')
+      .addFields(
+        { name: 'Available Cash', value: `$${userData[userId].cash.toLocaleString()}`, inline: true },
+        { name: 'Attempted Deposit', value: `$${amount.toLocaleString()}`, inline: true },
+        { name: 'Shortfall', value: `$${(amount - userData[userId].cash).toLocaleString()}`, inline: true }
+      )
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+
+    return await interaction.reply({ embeds: [insufficientEmbed] });
+  }
+
+  // Process deposit
+  userData[userId].cash -= amount;
+  userData[userId].bankBalance = currentBank + amount;
+  await saveUserData();
+
+  const finalCapacity = await calculateBankCapacity(userId);
+  const expansions = userData[userId].bankExpansions || 0;
+  const successEmbed = new EmbedBuilder()
+    .setTitle('Bank Deposit Completed')
+    .setDescription(`Successfully deposited $${amount.toLocaleString()} into your secure bank account.`)
+    .addFields(
+      { name: 'Transaction Amount', value: `$${amount.toLocaleString()}`, inline: true },
+      { name: 'Remaining Cash', value: `$${userData[userId].cash.toLocaleString()}`, inline: true },
+      { name: 'New Bank Balance', value: `$${userData[userId].bankBalance.toLocaleString()}`, inline: true },
+      { name: 'Bank Capacity Used', value: `${((userData[userId].bankBalance / finalCapacity) * 100).toFixed(1)}%`, inline: true },
+      { name: 'Available Space', value: `$${(finalCapacity - userData[userId].bankBalance).toLocaleString()}`, inline: true },
+      { name: 'Expansions Owned', value: `${expansions}`, inline: true }
+    )
+    .setColor(0x00FF7F)
+    .setFooter({ text: 'Your banked money is safe from theft attempts' })
+    .setTimestamp();
+
+  await interaction.reply({ embeds: [successEmbed] });
+}
+
+async function handleWithdrawCommand(interaction, userId) {
+  const amount = interaction.options.getInteger('amount');
+  const currentBank = userData[userId].bankBalance || 0;
+
+  // Check sufficient bank funds
+  if (amount > currentBank) {
+    const insufficientEmbed = new EmbedBuilder()
+      .setTitle('Insufficient Bank Funds')
+      .setDescription('You do not have enough money in your bank account for this withdrawal.')
+      .addFields(
+        { name: 'Available Bank Funds', value: `$${currentBank.toLocaleString()}`, inline: true },
+        { name: 'Attempted Withdrawal', value: `$${amount.toLocaleString()}`, inline: true },
+        { name: 'Shortfall', value: `$${(amount - currentBank).toLocaleString()}`, inline: true }
+      )
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+
+    return await interaction.reply({ embeds: [insufficientEmbed] });
+  }
+
+  // Process withdrawal
+  userData[userId].bankBalance = currentBank - amount;
+  userData[userId].cash += amount;
+  await saveUserData();
+
+  const finalCapacity = await calculateBankCapacity(userId);
+  const expansions = userData[userId].bankExpansions || 0;
+  const successEmbed = new EmbedBuilder()
+    .setTitle('Bank Withdrawal Completed')
+    .setDescription(`Successfully withdrew $${amount.toLocaleString()} from your bank account.`)
+    .addFields(
+      { name: 'Transaction Amount', value: `$${amount.toLocaleString()}`, inline: true },
+      { name: 'New Cash Balance', value: `$${userData[userId].cash.toLocaleString()}`, inline: true },
+      { name: 'Remaining Bank Funds', value: `$${userData[userId].bankBalance.toLocaleString()}`, inline: true },
+      { name: 'Bank Capacity Used', value: `${((userData[userId].bankBalance / finalCapacity) * 100).toFixed(1)}%`, inline: true },
+      { name: 'Available Space', value: `$${(finalCapacity - userData[userId].bankBalance).toLocaleString()}`, inline: true },
+      { name: 'Expansions Owned', value: `${expansions}`, inline: true }
+    )
+    .setColor(0x339AF0)
+    .setFooter({ text: 'Warning: Cash on hand can be stolen by other players' })
+    .setTimestamp();
+
+  await interaction.reply({ embeds: [successEmbed] });
+}
+
+async function handleStealCommand(interaction, userId) {
+  const STEAL_COOLDOWN = 30 * 60 * 1000; // 30 minutes
+  const now = Date.now();
+
+  // Check cooldown
+  if (cooldowns.steal[userId] && (now - cooldowns.steal[userId]) < STEAL_COOLDOWN) {
+    const timeLeft = STEAL_COOLDOWN - (now - cooldowns.steal[userId]);
+    const minutes = Math.floor(timeLeft / (60 * 1000));
+    const seconds = Math.floor((timeLeft % (60 * 1000)) / 1000);
+
+    const cooldownEmbed = new EmbedBuilder()
+      .setTitle('Steal Cooldown Active')
+      .setDescription('You must wait before attempting another theft.')
+      .addFields(
+        { name: 'Time Remaining', value: `${minutes}m ${seconds}s`, inline: true },
+        { name: 'Cooldown Duration', value: '30 minutes', inline: true }
+      )
+      .setColor(0xFF9F43)
+      .setTimestamp();
+
+    return await interaction.reply({ embeds: [cooldownEmbed] });
+  }
+
+  const target = interaction.options.getUser('target');
+  const amount = interaction.options.getInteger('amount');
+
+  if (target.id === userId) {
+    const selfEmbed = new EmbedBuilder()
+      .setTitle('Invalid Target')
+      .setDescription('You cannot steal from yourself.')
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+
+    return await interaction.reply({ embeds: [selfEmbed] });
+  }
+
+  const targetId = target.id;
+  if (!userData[targetId]) userData[targetId] = { cash: 0, artefacts: [], bankBalance: 0 };
+
+  const availableCash = userData[targetId].cash;
+
+  if (amount > availableCash) {
+    const unavailableEmbed = new EmbedBuilder()
+      .setTitle('Insufficient Target Funds')
+      .setDescription(`${target.username} does not have enough cash available for this theft attempt.`)
+      .addFields(
+        { name: 'Target Available Cash', value: `$${availableCash.toLocaleString()}`, inline: true },
+        { name: 'Attempted Theft', value: `$${amount.toLocaleString()}`, inline: true },
+        { name: 'Protected Funds', value: 'Bank money cannot be stolen', inline: false }
+      )
+      .setColor(0xFF9F43)
+      .setTimestamp();
+
+    return await interaction.reply({ embeds: [unavailableEmbed] });
+  }
+
+  // Calculate success rate
+  let successRate = Math.max(10, 80 - (amount / 20));
+  successRate = Math.min(80, successRate);
+
+  const randomRoll = Math.random() * 100;
+  const isSuccess = randomRoll <= successRate;
+
+  if (isSuccess) {
+    // Process successful theft
+    userData[targetId].cash -= amount;
+    userData[userId].cash += amount;
+    cooldowns.steal[userId] = now;
+    await saveUserData();
+    await saveCooldowns();
+
+    const successEmbed = new EmbedBuilder()
+      .setTitle('Theft Successful')
+      .setDescription(`You successfully stole $${amount.toLocaleString()} from ${target.username}.`)
+      .addFields(
+        { name: 'Stolen Amount', value: `$${amount.toLocaleString()}`, inline: true },
+        { name: 'Success Probability', value: `${successRate.toFixed(1)}%`, inline: true },
+        { name: 'Your Roll', value: `${randomRoll.toFixed(1)}%`, inline: true },
+        { name: 'Your New Cash Total', value: `$${userData[userId].cash.toLocaleString()}`, inline: true },
+        { name: 'Risk vs Reward', value: 'Higher amounts = Lower success rate', inline: false }
+      )
+      .setColor(0x51CF66)
+      .setFooter({ text: 'The victim has been notified of this theft' })
+      .setTimestamp();
+
+    await interaction.reply({ embeds: [successEmbed] });
+
+    // Notify victim
+    const victimEmbed = new EmbedBuilder()
+      .setTitle('Theft Alert')
+      .setDescription(`${interaction.user.username} has stolen $${amount.toLocaleString()} from your cash reserves.`)
+      .addFields(
+        { name: 'Amount Stolen', value: `$${amount.toLocaleString()}`, inline: true },
+        { name: 'Remaining Cash', value: `$${userData[targetId].cash.toLocaleString()}`, inline: true },
+        { name: 'Bank Balance', value: `$${userData[targetId].bankBalance || 0}`, inline: true },
+        { name: 'Protection Tip', value: 'Keep funds in your bank account to prevent future thefts', inline: false }
+      )
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+
+    try {
+      await target.send({ embeds: [victimEmbed] });
+    } catch (error) {
+      // User has DMs disabled
+    }
+
+  } else {
+    // Theft failed - still set cooldown
+    cooldowns.steal[userId] = now;
+    await saveCooldowns();
+
+    const failureEmbed = new EmbedBuilder()
+      .setTitle('Theft Failed')
+      .setDescription(`Your theft attempt on ${target.username} was unsuccessful.`)
+      .addFields(
+        { name: 'Attempted Amount', value: `$${amount.toLocaleString()}`, inline: true },
+        { name: 'Success Probability', value: `${successRate.toFixed(1)}%`, inline: true },
+        { name: 'Your Roll', value: `${randomRoll.toFixed(1)}%`, inline: true },
+        { name: 'Outcome', value: 'Mission Failed', inline: true },
+        { name: 'Strategy Tip', value: 'Smaller amounts have higher success rates', inline: false }
+      )
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+
+    await interaction.reply({ embeds: [failureEmbed] });
+  }
+}
+
+// Game command handlers
+async function handleScavengeCommand(interaction, userId) {
+  const now = Date.now();
+  const SCAVENGE_COOLDOWN = 2 * 60 * 60 * 1000; // 2 hours
+
+  if (cooldowns.scavenge[userId] && (now - cooldowns.scavenge[userId]) < SCAVENGE_COOLDOWN) {
+    const timeLeft = SCAVENGE_COOLDOWN - (now - cooldowns.scavenge[userId]);
+    const hours = Math.floor(timeLeft / (60 * 60 * 1000));
+    const minutes = Math.floor((timeLeft % (60 * 60 * 1000)) / (60 * 1000));
+
+    const cooldownEmbed = new EmbedBuilder()
+      .setTitle('Scavenge Cooldown Active')
+      .setDescription('You must wait before scavenging again.')
+      .addFields(
+        { name: 'Time Remaining', value: `${hours}h ${minutes}m`, inline: true },
+        { name: 'Cooldown Duration', value: '2 hours', inline: true }
+      )
+      .setColor(0xFF9F43)
+      .setTimestamp();
+
+    return await interaction.reply({ embeds: [cooldownEmbed] });
+  }
+
+  // Check for active events before scavenging
+  await checkAndHandleEvents();
+
+  // Get modified chances based on current events
+  const currentRarities = await getModifiedArtefactChances();
+  const totalChance = currentRarities.reduce((sum, rarity) => sum + rarity.chance, 0);
+
+  // Random artefact generation with event modifications
+  const random = Math.random() * totalChance;
+  let selectedRarity = null;
+  let cumulative = 0;
+
+  for (const rarity of currentRarities) {
+    cumulative += rarity.chance;
+    if (random <= cumulative) {
+      selectedRarity = rarity;
+      break;
+    }
+  }
+
+  if (!selectedRarity || selectedRarity.items.length === 0) {
+    // Fallback to common rarity if something goes wrong
+    selectedRarity = rarities[0];
+  }
+
+  const artefact = selectedRarity.items[Math.floor(Math.random() * selectedRarity.items.length)];
+  
+  // 0.5% chance for shiny version
+  const isShiny = Math.random() < 0.005;
+  const finalArtefactName = isShiny ? `✨ SHINY ${artefact} ✨` : artefact;
+  
+  userData[userId].artefacts.push(finalArtefactName);
+  cooldowns.scavenge[userId] = now;
+
+  await saveUserData();
+  await saveCooldowns();
+
+  // Check if this find was affected by events
+  const eventData = await getEventSystem();
+  const event = eventData ? eventData.currentEvent : null;
+  let eventText = '';
+  let scavengeColor = isShiny ? 0xFFFFFF : selectedRarity.color;
+
+  if (isShiny) {
+    eventText = '✨ **AMAZING LUCK!** You discovered a super rare shiny version! ✨';
+  } else if (event && artefact === event.positiveArtefact) {
+    eventText = `⚡ **EVENT BONUS:** Found in the expanded ${event.positiveArtefact} mine!`;
+    scavengeColor = 0xFFD700; // Gold color for event bonus
+  }
+
+  const scavengeEmbed = new EmbedBuilder()
+    .setTitle(isShiny ? '✨ SHINY ARTEFACT DISCOVERED! ✨' : (event && artefact === event.positiveArtefact ? '🌟 Enhanced Scavenge Complete!' : 'Scavenge Complete'))
+    .setDescription(isShiny ? 
+      `Holy cow! You found a **SHINY ${artefact}**! This is incredibly rare and worth 20 times more!` :
+      (event && artefact === event.positiveArtefact ? 
+      'You discovered a valuable artefact in the expanded mine sector!' : 
+      'You discovered a valuable artefact during your search!'))
+    .addFields(
+      { name: 'Artefact Found', value: `${finalArtefactName}`, inline: true },
+      { name: 'Rarity', value: `${selectedRarity.name}`, inline: true },
+      { name: 'Estimated Value', value: `$${(isShiny ? selectedRarity.value * 20 : selectedRarity.value).toLocaleString()}`, inline: true },
+      { name: 'Next Scavenge', value: 'Available in 2 hours', inline: false }
+    )
+    .setColor(scavengeColor)
+    .setTimestamp();
+
+  if (eventText) {
+    scavengeEmbed.addFields({ name: 'Mining Event', value: eventText, inline: false });
+  }
+
+  await interaction.reply({ embeds: [scavengeEmbed] });
+
+  // 20% chance to show server invite
+  if (Math.random() < 0.20) {
+    const inviteEmbed = new EmbedBuilder()
+      .setTitle('✨ Join the Fortune Bot Community! ✨')
+      .setDescription('We really appreciate your support! It would be even better if you joined our official server. Come hang out, get updates, and meet other players!')
+      .setColor(0x5865F2)
+      .setFooter({ text: 'Thank you for playing Fortune Bot!' })
+      .setThumbnail(client.user.displayAvatarURL())
+      .setTimestamp();
+    
+    await interaction.followUp({ content: 'https://discord.gg/NZtnJbj4QA', embeds: [inviteEmbed], ephemeral: false });
+  }
+}
+
+async function handleLaborCommand(interaction, userId) {
+  const now = Date.now();
+  const LABOR_COOLDOWN = 40 * 60 * 1000; // 40 minutes
+
+  if (cooldowns.labor[userId] && (now - cooldowns.labor[userId]) < LABOR_COOLDOWN) {
+    const timeLeft = LABOR_COOLDOWN - (now - cooldowns.labor[userId]);
+    const minutes = Math.floor(timeLeft / (60 * 1000));
+
+    const cooldownEmbed = new EmbedBuilder()
+      .setTitle('Labor Cooldown Active')
+      .setDescription('You must rest before working again.')
+      .addFields(
+        { name: 'Time Remaining', value: `${minutes} minutes`, inline: true },
+        { name: 'Cooldown Duration', value: '40 minutes', inline: true }
+      )
+      .setColor(0xFF9F43)
+      .setTimestamp();
+
+    return await interaction.reply({ embeds: [cooldownEmbed] });
+  }
+
+  const earnings = Math.floor(Math.random() * 500) + 100; // $100-600
+  userData[userId].cash += earnings;
+  cooldowns.labor[userId] = now;
+
+  await saveUserData();
+  await saveCooldowns();
+
+  const laborEmbed = new EmbedBuilder()
+    .setTitle('Work Complete')
+    .setDescription('You completed a day of honest work.')
+    .addFields(
+      { name: 'Earnings', value: `$${earnings.toLocaleString()}`, inline: true },
+      { name: 'New Cash Total', value: `$${userData[userId].cash.toLocaleString()}`, inline: true },
+      { name: 'Next Work', value: 'Available in 40 minutes', inline: false }
+    )
+    .setColor(0x51CF66)
+    .setTimestamp();
+
+  await interaction.reply({ embeds: [laborEmbed] });
+
+  // 20% chance to show server invite
+  if (Math.random() < 0.20) {
+    const inviteEmbed = new EmbedBuilder()
+      .setTitle('✨ Join the Fortune Bot Community! ✨')
+      .setDescription('We really appreciate your support! It would be even better if you joined our official server. Come hang out, get updates, and meet other players!')
+      .setColor(0x5865F2)
+      .setFooter({ text: 'Thank you for playing Fortune Bot!' })
+      .setThumbnail(client.user.displayAvatarURL())
+      .setTimestamp();
+    
+    await interaction.followUp({ content: 'https://discord.gg/NZtnJbj4QA', embeds: [inviteEmbed], ephemeral: false });
+  }
+}
+
+async function handleInventoryCommand(interaction, userId) {
+  const user = await getUser(userId);
+  const userXpData = await getXpData(userId);
+
+  const totalValue = user.artefacts.reduce((sum, artefactName) => {
+    const isShiny = artefactName.startsWith('✨ SHINY ') && artefactName.endsWith(' ✨');
+    const baseName = isShiny ? artefactName.replace('✨ SHINY ', '').replace(' ✨', '') : artefactName;
+    const rarity = getRarityByArtefact(baseName);
+    const value = rarity ? rarity.value : 0;
+    return sum + (isShiny ? value * 20 : value);
+  }, 0);
+
+  const artefactCounts = user.artefacts.reduce((counts, artefact) => {
+    counts[artefact] = (counts[artefact] || 0) + 1;
+    return counts;
+  }, {});
+
+  const artefactList = Object.keys(artefactCounts).length ? 
+    Object.entries(artefactCounts).map(([artefactName, count]) => {
+      const isShiny = artefactName.startsWith('✨ SHINY ') && artefactName.endsWith(' ✨');
+      const baseName = isShiny ? artefactName.replace('✨ SHINY ', '').replace(' ✨', '') : artefactName;
+      const rarity = getRarityByArtefact(baseName);
+      const countSuffix = count > 1 ? ` [${count}]` : '';
+      return `${artefactName} (${rarity ? rarity.name : 'Unknown'})${countSuffix}`;
+    }).join('\n') : 'No artefacts';
+
+  // Count purchased items
+  const itemsCount = {};
+  (user.items || []).forEach(item => {
+    itemsCount[item] = (itemsCount[item] || 0) + 1;
+  });
+
+  const itemsList = Object.entries(itemsCount)
+    .map(([name, count]) => `${name}${count > 1 ? ` [${count}]` : ''}`)
+    .join(', ') || 'No items';
+
+  const inventoryEmbed = new EmbedBuilder()
+    .setTitle('Your Inventory')
+    .setDescription('Current financial status and artefact collection')
+    .addFields(
+      { name: 'Cash on Hand', value: `$${user.cash.toLocaleString()}`, inline: true },
+      { name: 'Bank Balance', value: `$${(user.bankBalance || 0).toLocaleString()}`, inline: true },
+      { name: 'Total Wealth', value: `$${(user.cash + (user.bankBalance || 0)).toLocaleString()}`, inline: true },
+      { name: 'Experience Points', value: `${userXpData.xp.toLocaleString()} XP`, inline: true },
+      { name: 'XP Cash Value', value: `$${(userXpData.xp * 2).toLocaleString()}`, inline: true },
+      { name: 'Messages Sent', value: `${userXpData.messageCount.toLocaleString()}`, inline: true },
+      { name: 'Artefacts Owned', value: user.artefacts.length.toString(), inline: true },
+      { name: 'Collection Value', value: `$${totalValue.toLocaleString()}`, inline: true },
+      { name: 'Bank Capacity', value: `${(((user.bankBalance || 0) / 50000) * 100).toFixed(1)}%`, inline: true },
+      { name: 'Artefact Collection', value: artefactList, inline: false },
+      { name: 'Purchased Items', value: itemsList, inline: false }
+    )
+    .setColor(0x339AF0)
+    .setFooter({ text: 'Use /convert to turn XP into cash (1 XP = $2)' })
+    .setTimestamp();
+
+  await interaction.reply({ embeds: [inventoryEmbed] });
+}
+
+
+async function handleTradeCommand(interaction, userId) {
+  const targetUser = interaction.options.getUser('user');
+
+  if (targetUser.id === userId) {
+    const selfEmbed = new EmbedBuilder()
+      .setTitle('Invalid Trade Target')
+      .setDescription('You cannot trade with yourself.')
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+
+    return await interaction.reply({ embeds: [selfEmbed] });
+  }
+
+  if (targetUser.bot) {
+    const botEmbed = new EmbedBuilder()
+      .setTitle('Invalid Trade Target')
+      .setDescription('You cannot trade with bots.')
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+
+    return await interaction.reply({ embeds: [botEmbed] });
+  }
+
+  // Check if user is already in a trade
+  const existingTrade = Object.values(global.activeTrades).find(trade => 
+    trade.initiator === userId || trade.recipient === targetUser.id ||
+    trade.initiator === targetUser.id || trade.recipient === userId
+  );
+
+  if (existingTrade) {
+    const busyEmbed = new EmbedBuilder()
+      .setTitle('Trade Already Active')
+      .setDescription('You or the target user is already in an active trade.')
+      .setColor(0xFF9F43)
+      .setTimestamp();
+
+    return await interaction.reply({ embeds: [busyEmbed] });
+  }
+
+  // Initialize target user data if needed
+  if (!userData[targetUser.id]) userData[targetUser.id] = { cash: 0, artefacts: [], bankBalance: 0 };
+
+  // Create trade request for recipient to accept/decline
+  const acceptButton = new ButtonBuilder()
+    .setCustomId(`trade_accept_${userId}`)
+    .setLabel('Accept Trade')
+    .setStyle(ButtonStyle.Success);
+
+  const declineButton = new ButtonBuilder()
+    .setCustomId(`trade_decline_${userId}`)
+    .setLabel('Decline Trade')
+    .setStyle(ButtonStyle.Danger);
+
+  const row = new ActionRowBuilder().addComponents(acceptButton, declineButton);
+
+  const tradeRequestEmbed = new EmbedBuilder()
+    .setTitle('🤝 Trade Request')
+    .setDescription(`**${interaction.user.displayName}** wants to trade with you!`)
+    .addFields(
+      { name: '👤 Initiator', value: `<@${userId}>`, inline: true },
+      { name: '🎯 Recipient', value: `<@${targetUser.id}>`, inline: true },
+      { name: '📊 Status', value: '⏳ Waiting for response...', inline: false },
+      { name: '⚡ Action Required', value: 'Choose **Accept** or **Decline** below', inline: false }
+    )
+    .setColor(0x5865F2)
+    .setFooter({ text: '⏰ This request will expire after 2 minutes' })
+    .setTimestamp();
+
+  await interaction.reply({ 
+    content: `<@${targetUser.id}>`, 
+    embeds: [tradeRequestEmbed], 
+    components: [row] 
+  });
+
+  // Set timeout for trade request
+  setTimeout(() => {
+    if (global.activeTrades[`${userId}_${targetUser.id}`]) {
+      delete global.activeTrades[`${userId}_${targetUser.id}`];
+    }
+  }, 120000); // 2 minutes
+}
+
+async function handleLeaderboardCommand(interaction) {
+  const users = Object.entries(userData)
+    .filter(([id, data]) => data.cash !== undefined)
+    .sort((a, b) => (b[1].cash + (b[1].bankBalance || 0)) - (a[1].cash + (a[1].bankBalance || 0)))
+    .slice(0, 10);
+
+  if (!users.length) {
+    const emptyEmbed = new EmbedBuilder()
+      .setTitle('Leaderboard')
+      .setDescription('No players have earned money yet.')
+      .setColor(0x339AF0)
+      .setTimestamp();
+
+    return await interaction.reply({ embeds: [emptyEmbed] });
+  }
+
+  const leaderboardEmbed = new EmbedBuilder()
+    .setTitle('🏆 Top Fortune Holders')
+    .setDescription(users.map(([id, data], i) => {
+      const totalWealth = data.cash + (data.bankBalance || 0);
+      const medals = ['🥇', '🥈', '🥉'];
+      const medal = medals[i] || '🔸';
+      return `${medal} **${i + 1}.** <@${id}> - **$${totalWealth.toLocaleString()}**`;
+    }).join('\n'))
+    .setColor(0xFFD700)
+    .setFooter({ text: '💰 Rankings based on total wealth (cash + bank balance)' })
+    .setTimestamp();
+
+  await interaction.reply({ embeds: [leaderboardEmbed] });
+}
+
+async function handleStoreCommand(interaction) {
+  // Interaction already deferred in main handler to prevent timeout
+
+  // Use guildId directly (always available) instead of guild object
+  const guildId = interaction.guildId;
+
+  // Additional safety check - commands should only work in servers
+  if (!guildId) {
+    const dmEmbed = new EmbedBuilder()
+      .setTitle('Server Required')
+      .setDescription('This command requires server context.')
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+
+    return await interaction.editReply({ embeds: [dmEmbed] });
+  }
+
+  try {
+    const userId = interaction.user.id;
+
+    // Run all database queries in parallel for speed
+    const [user, globalItems, guildItemsDoc] = await Promise.all([
+      getUser(userId),
+      getGlobalItems(),
+      guildItemsCollection.findOne({ _id: guildId })
+    ]);
+
+    const guildItems = guildItemsDoc ? guildItemsDoc.items : {};
+    const embeds = [];
+
+  // Global Store Embed
+  if (Object.keys(globalItems).length > 0) {
+    let globalItemsList = '';
+
+    for (const [name, item] of Object.entries(globalItems)) {
+      if (item.type === 'bank_expansion') {
+        // Calculate both price and capacity in parallel
+        const [currentPrice, currentCapacity] = await Promise.all([
+          calculateExpansionPrice(userId),
+          calculateBankCapacity(userId)
+        ]);
+        const currentExpansions = userData[userId]?.bankExpansions || 0;
+        const nextCapacity = Math.floor(50000 * Math.pow(1.25, currentExpansions + 1));
+
+        globalItemsList += `**${name}**\n`;
+        globalItemsList += `Current Price: $${currentPrice.toLocaleString()}\n`;
+        globalItemsList += `${item.description}\n`;
+        globalItemsList += `Your Bank: $${currentCapacity.toLocaleString()} capacity (${currentExpansions} expansions)\n`;
+        globalItemsList += `Next Expansion: $${nextCapacity.toLocaleString()} capacity\n\n`;
+      }
+    }
+
+    const globalEmbed = new EmbedBuilder()
+      .setTitle('Global Store')
+      .setDescription('**Cross-server items available to all players**')
+      .addFields(
+        { name: 'Available Items', value: globalItemsList || 'No items available', inline: false },
+        { name: 'How to Purchase', value: 'Use `/buy <item_name>` to purchase global items', inline: false }
+      )
+      .setColor(0xFFD700)
+      .setFooter({ text: 'Global items • Available across all servers' })
+      .setTimestamp();
+
+    embeds.push(globalEmbed);
+  }
+
+  // Server Store Embed
+  if (Object.keys(guildItems).length > 0) {
+    const serverItemsList = Object.entries(guildItems)
+      .map(([name, data]) => `**${name}**\nPrice: $${data.price.toLocaleString()}\n${data.description}`)
+      .join('\n\n');
+
+    const serverEmbed = new EmbedBuilder()
+      .setTitle('Server Store')
+      .setDescription(`**Server-specific items for this server**`)
+      .addFields(
+        { name: 'Available Items', value: serverItemsList, inline: false },
+        { name: 'How to Purchase', value: 'Use `/buy <item_name>` to purchase server items', inline: false }
+      )
+      .setColor(0x9932CC)
+      .setFooter({ text: 'Server items • Custom additions by administrators' })
+      .setTimestamp();
+
+    embeds.push(serverEmbed);
+  } else {
+    const emptyServerEmbed = new EmbedBuilder()
+      .setTitle('Server Store')
+      .setDescription('This server currently has no custom items available for purchase.')
+      .addFields(
+        { name: 'Get Started', value: 'Ask an administrator to add items using `/add-item`', inline: false },
+        { name: 'Available Commands', value: '`/add-item` - Add new items (Admin only)\n`/view-items` - Manage items (Admin only)', inline: false }
+      )
+      .setColor(0x6C7B7F)
+      .setTimestamp();
+
+    embeds.push(emptyServerEmbed);
+  }
+
+    await interaction.editReply({ embeds: embeds });
+  } catch (error) {
+    console.error('❌ Store command error:', error);
+
+    const errorEmbed = new EmbedBuilder()
+      .setTitle('Store Error')
+      .setDescription('An error occurred while loading the store. Please try again.')
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+
+    await interaction.editReply({ embeds: [errorEmbed] });
+  }
+}
+
+async function handleBuyCommand(interaction, userId) {
+  try {
+    const itemName = interaction.options.getString('item').trim();
+    const guildId = interaction.guildId;
+    const user = await getUser(userId);
+
+    const [globalItems, guildItemsDoc] = await Promise.all([
+      getGlobalItems(),
+      guildId ? guildItemsCollection.findOne({ _id: guildId }) : null
+    ]);
+
+    const guildItems = guildItemsDoc ? guildItemsDoc.items : {};
+
+    let item = null;
+    let itemType = null;
+    let itemPrice = 0;
+
+    if (globalItems[itemName]) {
+      item = globalItems[itemName];
+      itemType = 'global';
+
+      if (item.type === 'bank_expansion') {
+        itemPrice = await calculateExpansionPrice(userId);
+      } else {
+        itemPrice = item.basePrice || item.price || 0;
+      }
+    } else if (guildItems[itemName]) {
+      item = guildItems[itemName];
+      itemType = 'server';
+      itemPrice = item.price;
+    }
+
+    if (!item) {
+      const availableItems = [...Object.keys(globalItems), ...Object.keys(guildItems)];
+      const notFoundEmbed = new EmbedBuilder()
+        .setTitle('Item Not Found')
+        .setDescription(`"${itemName}" is not available in any store.`)
+        .addFields({
+          name: 'Available Items',
+          value: availableItems.length > 0 ? availableItems.join(', ') : 'No items available',
+          inline: false
+        })
+        .setColor(0xFF6B6B)
+        .setTimestamp();
+
+      return await interaction.editReply({ embeds: [notFoundEmbed] });
+    }
+
+    if (user.cash < itemPrice) {
+      const insufficientEmbed = new EmbedBuilder()
+        .setTitle('Insufficient Funds')
+        .setDescription(`You don't have enough cash to purchase ${itemName}.`)
+        .addFields(
+          { name: 'Required Cash', value: `$${itemPrice.toLocaleString()}`, inline: true },
+          { name: 'Your Cash', value: `$${user.cash.toLocaleString()}`, inline: true },
+          { name: 'Shortfall', value: `$${(itemPrice - user.cash).toLocaleString()}`, inline: true }
+        )
+        .setColor(0xFF6B6B)
+        .setTimestamp();
+
+      return await interaction.editReply({ embeds: [insufficientEmbed] });
+    }
+
+    if (itemType === 'global' && item.type === 'bank_expansion') {
+      const result = await purchaseBankExpansion(userId);
+
+      if (!result.success) {
+        const errorEmbed = new EmbedBuilder()
+          .setTitle('Purchase Failed')
+          .setDescription('An error occurred while processing your purchase.')
+          .setColor(0xFF6B6B)
+          .setTimestamp();
+
+        return await interaction.editReply({ embeds: [errorEmbed] });
+      }
+
+      const successEmbed = new EmbedBuilder()
+        .setTitle('Bank Expansion Purchased')
+        .setDescription(`Successfully purchased ${itemName} for $${result.price.toLocaleString()}!`)
+        .addFields(
+          { name: 'Bank Capacity Increased', value: `$${result.newCapacity.toLocaleString()}`, inline: true },
+          { name: 'Total Expansions', value: `${result.newExpansions}`, inline: true },
+          { name: 'Remaining Cash', value: `$${user.cash.toLocaleString()}`, inline: true },
+          { name: 'Next Expansion Price', value: `$${(await calculateExpansionPrice(userId)).toLocaleString()}`, inline: true },
+          { name: 'Capacity Increase', value: '+25%', inline: true },
+          { name: 'Investment Status', value: 'Permanent Upgrade', inline: true }
+        )
+        .setColor(0x00FF7F)
+        .setFooter({ text: 'Bank expansion permanently increases your storage capacity' })
+        .setTimestamp();
+
+      await interaction.editReply({ embeds: [successEmbed] });
+    } else {
+      user.cash -= itemPrice;
+
+      if (!user.items) user.items = [];
+      user.items.push(itemName);
+
+      await saveUser(userId);
+
+      const successEmbed = new EmbedBuilder()
+        .setTitle('Purchase Successful')
+        .setDescription(`Successfully purchased **${itemName}** for $${itemPrice.toLocaleString()}!`)
+        .addFields(
+          { name: 'Item', value: itemName, inline: true },
+          { name: 'Price Paid', value: `$${itemPrice.toLocaleString()}`, inline: true },
+          { name: 'Remaining Cash', value: `$${user.cash.toLocaleString()}`, inline: true },
+          { name: 'Description', value: item.description || 'No description', inline: false },
+          { name: 'Added to Inventory', value: 'View your items with `/inventory`', inline: false }
+        )
+        .setColor(0x00FF7F)
+        .setTimestamp();
+
+      await interaction.editReply({ embeds: [successEmbed] });
+    }
+  } catch (error) {
+    console.error('❌ Buy command error:', error);
+
+    const errorEmbed = new EmbedBuilder()
+      .setTitle('Purchase Error')
+      .setDescription('An error occurred while processing your purchase. Please try again.')
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+
+    await interaction.editReply({ embeds: [errorEmbed] });
+  }
+}
+
+// New command handlers
+async function handleMassSellCommand(interaction, userId) {
+  const user = userData[userId];
+
+  if (!user.artefacts.length) {
+    const noArtefactsEmbed = new EmbedBuilder()
+      .setTitle('No Artefacts to Sell')
+      .setDescription('You need to find some artefacts first before you can sell them.')
+      .addFields({ name: 'How to Find Artefacts', value: 'Use `/scavenge` to search for rare artefacts', inline: false })
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+
+    return await interaction.reply({ embeds: [noArtefactsEmbed] });
+  }
+
+  // Create a temporary session for this mass sell
+  const sessionId = `${userId}_${Date.now()}`;
+  global.massSellSessions = global.massSellSessions || {};
+  global.massSellSessions[sessionId] = {
+    userId: userId,
+    selectedArtefacts: [],
+    createdAt: Date.now()
+  };
+
+  const massSellEmbed = createMassSellEmbed(user.artefacts, []);
+  const components = createMassSellComponents(sessionId, user.artefacts);
+
+  await interaction.reply({ embeds: [massSellEmbed], components });
+
+  // Auto-cleanup after 5 minutes
+  setTimeout(() => {
+    if (global.massSellSessions[sessionId]) {
+      delete global.massSellSessions[sessionId];
+    }
+  }, 300000);
+}
+
+async function handleAddItemCommand(interaction) {
+  // Use guildId directly (always available) instead of guild object
+  const guildId = interaction.guildId;
+
+  if (!guildId) {
+    const dmEmbed = new EmbedBuilder()
+      .setTitle('Server Required')
+      .setDescription('This command requires server context.')
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+
+    return await interaction.editReply({ embeds: [dmEmbed] });
+  }
+
+  // Check if user is admin
+  if (interaction.user.id !== DEVELOPER_ID && !interaction.member?.permissions.has('Administrator')) {
+    const noPermEmbed = new EmbedBuilder()
+      .setTitle('Access Denied')
+      .setDescription('Only administrators can add custom server items.')
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+
+    return await interaction.editReply({ embeds: [noPermEmbed] });
+  }
+
+  const itemName = interaction.options.getString('name');
+  const itemPrice = interaction.options.getInteger('price');
+  const itemDescription = interaction.options.getString('description') || 'Custom server item';
+
+  const guildItemsDoc = await guildItemsCollection.findOne({ _id: guildId });
+  const guildItems = guildItemsDoc ? guildItemsDoc.items : {};
+
+  guildItems[itemName] = {
+    price: itemPrice,
+    description: itemDescription,
+    addedBy: interaction.user.id,
+    addedAt: Date.now()
+  };
+
+  await guildItemsCollection.replaceOne(
+    { _id: guildId },
+    { _id: guildId, items: guildItems },
+    { upsert: true }
+  );
+
+  const addEmbed = new EmbedBuilder()
+    .setTitle('Item Added Successfully')
+    .setDescription(`**Added "${itemName}"** to the server store.`)
+    .addFields(
+      { name: 'Item Name', value: `**${itemName}**`, inline: true },
+      { name: 'Price', value: `**$${itemPrice.toLocaleString()}**`, inline: true },
+      { name: 'Description', value: itemDescription, inline: false }
+    )
+    .setColor(0x00FF7F)
+    .setTimestamp();
+
+  await interaction.editReply({ embeds: [addEmbed] });
+}
+
+async function handleRemoveItemCommand(interaction) {
+  // Check if user is admin
+  if (interaction.user.id !== DEVELOPER_ID && !interaction.member.permissions.has('Administrator')) {
+    const noPermEmbed = new EmbedBuilder()
+      .setTitle('Access Denied')
+      .setDescription('Only administrators can remove custom server items.')
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+
+    return await interaction.reply({ embeds: [noPermEmbed] });
+  }
+
+  const itemName = interaction.options.getString('name');
+  const guildId = interaction.guild.id;
+
+  const guildItemsDoc = await guildItemsCollection.findOne({ _id: guildId });
+  const guildItems = guildItemsDoc ? guildItemsDoc.items : {};
+
+  if (!guildItems[itemName]) {
+    const notFoundEmbed = new EmbedBuilder()
+      .setTitle('Item Not Found')
+      .setDescription(`No custom item named "${itemName}" exists in this server.`)
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+
+    return await interaction.reply({ embeds: [notFoundEmbed] });
+  }
+
+  delete guildItems[itemName];
+  await guildItemsCollection.replaceOne(
+    { _id: guildId },
+    { _id: guildId, items: guildItems },
+    { upsert: true }
+  );
+
+  const removeEmbed = new EmbedBuilder()
+    .setTitle('Item Removed')
+    .setDescription(`Successfully removed "${itemName}" from the server store.`)
+    .setColor(0x51CF66)
+    .setTimestamp();
+
+  await interaction.reply({ embeds: [removeEmbed] });
+}
+
+async function handleViewItemsCommand(interaction) {
+  // Check if user is admin
+  if (interaction.user.id !== DEVELOPER_ID && !interaction.member.permissions.has('Administrator')) {
+    const noPermEmbed = new EmbedBuilder()
+      .setTitle('Access Denied')
+      .setDescription('Only administrators can view the custom items management panel.')
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+
+    return await interaction.reply({ embeds: [noPermEmbed] });
+  }
+
+  const guildId = interaction.guild.id;
+  const guildItemsDoc = await guildItemsCollection.findOne({ _id: guildId });
+  const guildItems = guildItemsDoc ? guildItemsDoc.items : {};
+
+  if (Object.keys(guildItems).length === 0) {
+    const noItemsEmbed = new EmbedBuilder()
+      .setTitle('No Custom Items')
+      .setDescription('This server has no custom items yet.')
+      .addFields({ name: 'Add Items', value: 'Use `/add-item` to create custom server items', inline: false })
+      .setColor(0xFF9F43)
+      .setTimestamp();
+
+    return await interaction.reply({ embeds: [noItemsEmbed] });
+  }
+
+  const itemList = Object.entries(guildItems).map(([name, data]) => 
+    `**${name}** - $${data.price.toLocaleString()}\n${data.description}`
+  ).join('\n\n');
+
+  const viewEmbed = new EmbedBuilder()
+    .setTitle('Custom Server Items')
+    .setDescription(`This server has ${Object.keys(guildItems).length} custom item(s).`)
+    .addFields({ name: 'Items', value: itemList, inline: false })
+    .setColor(0x339AF0)
+    .setTimestamp();
+
+  await interaction.reply({ embeds: [viewEmbed] });
+}
+
+// Component interaction handler
+async function handleComponentInteraction(interaction) {
+  const { customId } = interaction;
+
+  try {
+
+  // Handle trade accept/decline
+  if (customId.startsWith('trade_accept_')) {
+    const initiatorId = customId.split('_')[2];
+    const recipientId = interaction.user.id;
+
+    // Create trade session
+    const tradeId = `${initiatorId}_${recipientId}`;
+    global.activeTrades[tradeId] = {
+      initiator: initiatorId,
+      recipient: recipientId,
+      initiatorOffer: { cash: 0, artefacts: [] },
+      recipientOffer: { cash: 0, artefacts: [] },
+      initiatorReady: false,
+      recipientReady: false,
+      status: 'active'
+    };
+
+    await startInteractiveTrade(interaction, initiatorId, recipientId, tradeId);
+
+  } else if (customId.startsWith('trade_decline_')) {
+    const initiatorId = customId.split('_')[2];
+
+    const declineEmbed = new EmbedBuilder()
+      .setTitle('Trade Declined')
+      .setDescription(`<@${interaction.user.id}> has declined the trade request.`)
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+
+    await interaction.update({ embeds: [declineEmbed], components: [] });
+
+  // === MARBLE GAME BUTTON HANDLERS ===
+  } else if (customId.startsWith('marble_accept_')) {
+    const gameId = customId.replace('marble_accept_', '');
+    const game = global.activeMarbleGames[gameId];
+
+    if (!game) {
+      return await interaction.reply({ 
+        content: '❌ **Error:** This game is no longer active!', 
+        ephemeral: true 
+      });
+    }
+
+    const userId = interaction.user.id;
+
+    // Check if this user was invited
+    if (!game.invited.some(p => p.id === userId)) {
+      return await interaction.reply({ 
+        content: '❌ **Error:** You were not invited to this game!', 
+        ephemeral: true 
+      });
+    }
+
+    // Check if already responded
+    if (game.accepted.includes(userId) || game.declined.includes(userId)) {
+      return await interaction.reply({ 
+        content: '❌ **Error:** You have already responded to this invitation!', 
+        ephemeral: true 
+      });
+    }
+
+    // Add to accepted list
+    game.accepted.push(userId);
+
+    // Check if all players have accepted
+    if (game.accepted.length === 3) {
+      // All players accepted, proceed to team selection
+      await handleTeamSelection(interaction, gameId);
+    } else {
+      // Update embed to show new acceptance
+      const updatedEmbed = createInvitationEmbed(game);
+      await interaction.update({ embeds: [updatedEmbed], components: [createInvitationButtons(gameId)] });
+    }
+
+  } else if (customId.startsWith('marble_decline_')) {
+    const gameId = customId.replace('marble_decline_', '');
+    const game = global.activeMarbleGames[gameId];
+
+    if (!game) {
+      return await interaction.reply({ 
+        content: '❌ **Error:** This game is no longer active!', 
+        ephemeral: true 
+      });
+    }
+
+    const userId = interaction.user.id;
+    const declinedUser = game.invited.find(p => p.id === userId);
+
+    if (!declinedUser) {
+      return await interaction.reply({ 
+        content: '❌ **Error:** You were not invited to this game!', 
+        ephemeral: true 
+      });
+    }
+
+    // Game cancelled due to decline
+    const declineEmbed = new EmbedBuilder()
+      .setTitle('Marble Game Cancelled')
+      .setDescription(`**${declinedUser.displayName}** has declined the invitation. The marble game has been cancelled.`)
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+
+    await interaction.update({ embeds: [declineEmbed], components: [] });
+
+    // Clean up the game
+    delete global.activeMarbleGames[gameId];
+
+  } else if (customId.startsWith('select_number_')) {
+    const gameId = customId.replace('select_number_', '');
+    await handleNumberSelection(interaction, gameId);
+
+  } else if (customId.startsWith('place_bet_')) {
+    const gameId = customId.replace('place_bet_', '');
+    const game = global.activeMarbleGames[gameId];
+    if (!game) return;
+
+    const userId = interaction.user.id;
+    const modal = new ModalBuilder()
+      .setCustomId(`bet_modal_${gameId}`)
+      .setTitle('Place Your Bet')
+      .addComponents(
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId('bet_amount_input')
+            .setLabel('Bet Amount')
+            .setStyle(TextInputStyle.Short)
+            .setPlaceholder(`Enter your bet (e.g., 1000)`)
+            .setRequired(true)
+            .setMinLength(1)
+            .setMaxLength(10)
+        )
       );
 
-      return interaction.editReply({ embeds: [embed], components: [buttons] });
+    await interaction.showModal(modal);
+
+  } else if (customId.startsWith('bet_modal_')) {
+    const gameId = customId.replace('bet_modal_', '');
+    const game = global.activeMarbleGames[gameId];
+    if (!game) return;
+
+    const userId = interaction.user.id;
+    const betAmount = parseInt(interaction.fields.getTextInputValue('bet_amount_input'));
+
+    if (isNaN(betAmount) || betAmount <= 0) {
+      return await interaction.reply({ content: '❌ Invalid bet amount! Please enter a positive number.', ephemeral: true });
     }
 
-    if (commandName === 'delete') {
-      const subcommand = interaction.options.getSubcommand();
-      if (subcommand === 'messages') {
-        if (!interaction.member.permissions.has(PermissionFlagsBits.ManageMessages)) {
-          return interaction.reply({ content: '🚫 You need Manage Messages permissions to use this command.', ephemeral: false });
-        }
+    if (userData[userId].cash < betAmount) {
+      return await interaction.reply({ content: `❌ You don\'t have enough cash to bet $${betAmount.toLocaleString()}! You have $${userData[userId].cash.toLocaleString()}.`, ephemeral: true });
+    }
 
-        const targetUser = interaction.options.getUser('user');
-        const targetId = interaction.options.getString('userid') || (targetUser ? targetUser.id : null);
+    // Store the bet temporarily
+    if (!game.pendingBets) game.pendingBets = {};
+    game.pendingBets[userId] = betAmount;
 
-        if (!targetId) {
-          return interaction.reply({ content: '❌ Please provide either a user or a user ID.', ephemeral: true });
-        }
+    // Update the embed to show the pending bet
+    const updatedEmbed = createBettingEmbed(game, userId, betAmount);
+    await interaction.update({ embeds: [updatedEmbed] });
 
-        await interaction.deferReply({ ephemeral: true });
+    // Check if all players have placed their bets
+    if (Object.keys(game.pendingBets).length === game.players.length) {
+      const allBets = Object.values(game.pendingBets);
+      const firstBet = allBets[0];
 
-        try {
-          let totalDeleted = 0;
-          let lastId = null;
-          let searching = true;
+      if (allBets.every(bet => bet === firstBet)) {
+        // All bets match, proceed to collect bets and start the game
+        game.betAmount = firstBet;
+        game.totalPot = firstBet * game.players.length;
+        await collectBets(game); // Deduct bets from players
+        await startMarbleGame(interaction, gameId);
+      } else {
+        // Bets do not match, reset and prompt again
+        const mismatchEmbed = new EmbedBuilder()
+          .setTitle('💸 Bets Do Not Match!')
+          .setDescription('**Bets do not match!** Please place your bets again.')
+          .setColor(0xFF6B6B)
+          .setTimestamp();
 
-          while (searching && totalDeleted < 500) { // Safety limit of 500 messages
-            const options = { limit: 100 };
-            if (lastId) options.before = lastId;
-
-            const fetchedMessages = await interaction.channel.messages.fetch(options);
-            if (fetchedMessages.size === 0) {
-              searching = false;
-              break;
-            }
-
-            const userMessages = fetchedMessages.filter(m => m.author.id === targetId);
-            
-            if (userMessages.size > 0) {
-              const deleted = await interaction.channel.bulkDelete(userMessages, true);
-              totalDeleted += deleted.size;
-            }
-
-            lastId = fetchedMessages.last().id;
-
-            // Stop if we've reached messages older than 14 days (bulkDelete limit)
-            const oldestMessage = fetchedMessages.last();
-            if (Date.now() - oldestMessage.createdTimestamp > 14 * 24 * 60 * 60 * 1000) {
-              searching = false;
-            }
-          }
-
-          if (totalDeleted === 0) {
-            return interaction.editReply({ content: 'No deletable messages found from that user in this channel (messages must be under 14 days old).' });
-          }
-
-          return interaction.editReply({ content: `✅ Successfully scoured the channel and deleted ${totalDeleted} messages from the specified user.` });
-        } catch (error) {
-          console.error('Error deleting messages:', error);
-          return interaction.editReply({ content: '❌ Failed to delete messages. They might be older than 14 days or I lack permissions.' });
-        }
+        await interaction.message.edit({ embeds: [mismatchEmbed], components: [] });
+        delete global.activeMarbleGames[gameId]; // Clean up this game instance
       }
     }
 
-    if (commandName === 'serverinfo') {
-      const guild = interaction.guild;
-      const owner = await guild.fetchOwner();
+  } else if (customId.startsWith('trade_add_cash_')) {
+    await handleTradeAddCash(interaction, customId);
 
-      const embed = new EmbedBuilder()
-        .setTitle(`📊 Server Information: ${guild.name}`)
-        .setThumbnail(guild.iconURL({ dynamic: true }))
-        .addFields(
-          { name: '👑 Owner', value: owner.user.tag, inline: true },
-          { name: '👥 Members', value: guild.memberCount.toString(), inline: true },
-          { name: '📅 Created', value: `<t:${Math.floor(guild.createdTimestamp / 1000)}:D>`, inline: true },
-          { name: '🛡️ Verification Level', value: guild.verificationLevel.toString(), inline: true },
-          { name: '📝 Channels', value: guild.channels.cache.size.toString(), inline: true },
-          { name: '😀 Emojis', value: guild.emojis.cache.size.toString(), inline: true }
-        )
-        .setColor(0x5865F2)
-        .setTimestamp();
+  } else if (customId.startsWith('trade_add_artefact_')) {
+    await handleTradeAddArtefact(interaction, customId);
 
-      return interaction.reply({ embeds: [embed] });
+  } else if (customId.startsWith('trade_remove_cash_')) {
+    await handleTradeRemoveCash(interaction, customId);
+
+  } else if (customId.startsWith('trade_remove_artefact_')) {
+    await handleTradeRemoveArtefact(interaction, customId);
+
+  } else if (customId.startsWith('trade_ready_')) {
+    await handleTradeReady(interaction, customId);
+
+  } else if (customId.startsWith('trade_cancel_')) {
+    await handleTradeCancel(interaction, customId);
+
+  } else if (customId.startsWith('trade_cash_modal_')) {
+    const tradeId = customId.split('_')[3];
+    const trade = global.activeTrades[tradeId];
+    if (!trade) {
+      return await interaction.reply({ content: '❌ Trade session not found!', ephemeral: true });
     }
 
-    if (commandName === 'userinfo') {
-      const target = interaction.options.getUser('user') || interaction.user;
-      const member = await interaction.guild.members.fetch(target.id).catch(() => null);
+    const userId = interaction.user.id;
+    const cashAmount = parseInt(interaction.fields.getTextInputValue('cash_amount'));
 
-      const embed = new EmbedBuilder()
-        .setTitle(`👤 User Information: ${target.tag}`)
-        .setThumbnail(target.displayAvatarURL({ dynamic: true }))
-        .addFields(
-          { name: '🆔 ID', value: target.id, inline: true },
-          { name: '📅 Account Created', value: `<t:${Math.floor(target.createdTimestamp / 1000)}:D>`, inline: true },
-          { name: '🤖 Bot', value: target.bot ? 'Yes' : 'No', inline: true }
-        )
-        .setColor(target.accentColor || 0x5865F2)
-        .setTimestamp();
-
-      if (member) {
-        embed.addFields(
-          { name: '📅 Joined Server', value: `<t:${Math.floor(member.joinedTimestamp / 1000)}:D>`, inline: true },
-          { name: '🎭 Roles', value: member.roles.cache.filter(r => r.id !== interaction.guild.id).map(r => r.name).join(', ') || 'None', inline: false }
-        );
-
-        if (member.premiumSince) {
-          embed.addFields({ name: '💎 Boosting Since', value: `<t:${Math.floor(member.premiumSinceTimestamp / 1000)}:D>`, inline: true });
-        }
-      }
-
-      return interaction.reply({ embeds: [embed] });
+    if (isNaN(cashAmount) || cashAmount <= 0) {
+      return await interaction.reply({ content: 'Please enter a valid cash amount!', ephemeral: true });
     }
 
-    if (commandName === 'althistory') {
-      if (!isModerator(interaction.member)) {
-        return interaction.reply({ content: '🚫 You need moderator permissions to use this command.', ephemeral: false });
+    if (cashAmount > userData[userId].cash) {
+      return await interaction.reply({ content: `You only have $${userData[userId].cash.toLocaleString()} available!`, ephemeral: true });
+    }
+
+    const isInitiator = trade.initiator === userId;
+    if (isInitiator) {
+      trade.initiatorOffer.cash = cashAmount;
+      trade.initiatorReady = false;
+    } else {
+      trade.recipientOffer.cash = cashAmount;
+      trade.recipientReady = false;
+    }
+
+    const tradeEmbed = createTradeEmbed(trade, trade.initiator, trade.recipient);
+    const components = createTradeComponents(tradeId, userId);
+
+    await interaction.update({ embeds: [tradeEmbed], components });
+
+  } else if (customId.startsWith('trade_artefact_select_')) {
+    const tradeId = customId.split('_')[3];
+    const trade = global.activeTrades[tradeId];
+    if (!trade) {
+      return await interaction.reply({ content: '❌ Trade session not found!', ephemeral: true });
+    }
+
+    const userId = interaction.user.id;
+    const artefactIndex = parseInt(interaction.values[0]);
+    const artefact = userData[userId].artefacts[artefactIndex];
+
+    if (!artefact) {
+      return await interaction.reply({ content: '❌ Artefact not found in your inventory!', ephemeral: true });
+    }
+
+    const isInitiator = trade.initiator === userId;
+    if (isInitiator) {
+      if (!trade.initiatorOffer.artefacts.includes(artefact)) {
+        trade.initiatorOffer.artefacts.push(artefact);
       }
+      trade.initiatorReady = false;
+    } else {
+      if (!trade.recipientOffer.artefacts.includes(artefact)) {
+        trade.recipientOffer.artefacts.push(artefact);
+      }
+      trade.recipientReady = false;
+    }
 
-      const limit = interaction.options.getInteger('limit') || 5;
+    const tradeEmbed = createTradeEmbed(trade, trade.initiator, trade.recipient);
+    const components = createTradeComponents(tradeId, userId);
 
-      // This is a placeholder - in a real implementation you'd store check history in a database
-      const embed = new EmbedBuilder()
-        .setTitle('📜 Recent Alt Account Checks')
-        .setDescription('This feature requires a database to store check history. Currently showing placeholder data.')
-        .addFields(
-          { name: '⏰ Last 24 Hours', value: 'No checks recorded', inline: false },
-          { name: '📊 Total Checks', value: 'Database not configured', inline: true },
-          { name: '🎯 High Risk Found', value: 'Database not configured', inline: true }
-        )
+    await interaction.update({ embeds: [tradeEmbed], components });
+
+  } else if (customId.startsWith('trade_remove_artefact_select_')) {
+    const tradeId = customId.split('_')[4];
+    const trade = global.activeTrades[tradeId];
+    if (!trade) return;
+
+    const userId = interaction.user.id;
+    const artefactIndex = parseInt(interaction.values[0]);
+    const isInitiator = trade.initiator === userId;
+
+    if (isInitiator) {
+      trade.initiatorOffer.artefacts.splice(artefactIndex, 1);
+      trade.initiatorReady = false;
+    } else {
+      trade.recipientOffer.artefacts.splice(artefactIndex, 1);
+      trade.recipientReady = false;
+    }
+
+    const tradeEmbed = createTradeEmbed(trade, trade.initiator, trade.recipient);
+    const components = createTradeComponents(tradeId, userId);
+
+    await interaction.update({ 
+      content: 'Artefact removed from your offer!', 
+      embeds: [tradeEmbed], 
+      components 
+    });
+
+  } else if (customId.startsWith('convert_accept_')) {
+    const userId = customId.replace('convert_accept_', '');
+
+    if (interaction.user.id !== userId) {
+      return await interaction.reply({ 
+        content: '❌ This conversion is not for you!', 
+        ephemeral: true 
+      });
+    }
+
+    const userXpData = userData[userId].xpData;
+    if (!userXpData || userXpData.xp === 0) {
+      return await interaction.reply({ 
+        content: '❌ You have no XP to convert!', 
+        ephemeral: true 
+      });
+    }
+
+    const xpToConvert = userXpData.xp;
+    const cashEarned = xpToConvert * 2;
+
+    // Convert XP to cash
+    userData[userId].cash += cashEarned;
+    userData[userId].xpData.xp = 0;
+    await saveUserData();
+
+    const successEmbed = new EmbedBuilder()
+      .setTitle('XP Conversion Successful')
+      .setDescription('Your XP has been successfully converted to cash!')
+      .addFields(
+        { name: 'XP Converted', value: `${xpToConvert.toLocaleString()} XP`, inline: true },
+        { name: 'Cash Earned', value: `$${cashEarned.toLocaleString()}`, inline: true },
+        { name: 'New Cash Total', value: `$${userData[userId].cash.toLocaleString()}`, inline: true }
+      )
+      .setColor(0x00FF7F)
+      .setTimestamp();
+
+    await interaction.update({ embeds: [successEmbed], components: [] });
+
+  } else if (customId.startsWith('convert_decline_')) {
+    const userId = customId.replace('convert_decline_', '');
+
+    if (interaction.user.id !== userId) {
+      return await interaction.reply({ 
+        content: '❌ This conversion is not for you!', 
+        ephemeral: true 
+      });
+    }
+
+    const declineEmbed = new EmbedBuilder()
+      .setTitle('XP Conversion Cancelled')
+      .setDescription('You have chosen to keep your XP. You can convert it later using `/convert`.')
+      .setColor(0xFF9F43)
+      .setTimestamp();
+
+    await interaction.update({ embeds: [declineEmbed], components: [] });
+
+  } else if (customId.startsWith('mass_sell_add_')) {
+    const sessionId = customId.replace('mass_sell_add_', '');
+    const session = global.massSellSessions?.[sessionId];
+    if (!session || interaction.user.id !== session.userId) return;
+
+    const selectedArtefacts = interaction.values;
+    session.selectedArtefacts.push(...selectedArtefacts);
+
+    const user = userData[session.userId];
+    const updatedEmbed = createMassSellEmbed(user.artefacts, session.selectedArtefacts);
+    const updatedComponents = createMassSellComponents(sessionId, user.artefacts);
+
+    await interaction.update({ embeds: [updatedEmbed], components: updatedComponents });
+
+  } else if (customId.startsWith('mass_sell_remove_')) {
+    const sessionId = customId.replace('mass_sell_remove_', '');
+    const session = global.massSellSessions?.[sessionId];
+    if (!session || interaction.user.id !== session.userId) return;
+
+    const artefactsToRemove = interaction.values;
+    session.selectedArtefacts = session.selectedArtefacts.filter(art => !artefactsToRemove.includes(art));
+
+    const user = userData[session.userId];
+    const updatedEmbed = createMassSellEmbed(user.artefacts, session.selectedArtefacts);
+    const updatedComponents = createMassSellComponents(sessionId, user.artefacts);
+
+    await interaction.update({ embeds: [updatedEmbed], components: updatedComponents });
+
+  } else if (customId.startsWith('mass_sell_select_all_')) {
+    const sessionId = customId.replace('mass_sell_select_all_', '');
+    const session = global.massSellSessions?.[sessionId];
+    if (!session || interaction.user.id !== session.userId) return;
+
+    const user = userData[session.userId];
+    session.selectedArtefacts = [...user.artefacts];
+
+    const updatedEmbed = createMassSellEmbed(user.artefacts, session.selectedArtefacts);
+    const updatedComponents = createMassSellComponents(sessionId, user.artefacts);
+
+    await interaction.update({ embeds: [updatedEmbed], components: updatedComponents });
+
+  } else if (customId.startsWith('mass_sell_confirm_')) {
+    const sessionId = customId.replace('mass_sell_confirm_', '');
+    const session = global.massSellSessions?.[sessionId];
+    if (!session || interaction.user.id !== session.userId) return;
+
+    if (session.selectedArtefacts.length === 0) {
+      return await interaction.reply({ 
+        content: '❌ You haven\'t selected any artefacts to sell!', 
+        ephemeral: true 
+      });
+    }
+
+    let totalEarnings = 0;
+    const soldItems = [];
+
+    // Process each selected artefact
+    for (const artefact of session.selectedArtefacts) {
+      const artefactIndex = userData[session.userId].artefacts.indexOf(artefact);
+      if (artefactIndex > -1) {
+        const rarity = getRarityByArtefact(artefact);
+        const sellValue = rarity ? rarity.sell : 100;
+        totalEarnings += sellValue;
+        soldItems.push(`${artefact} - $${sellValue.toLocaleString()}`);
+        // Remove artefact from inventory
+        userData[session.userId].artefacts.splice(artefactIndex, 1);
+      }
+    }
+
+    // Add earnings to user's cash
+    userData[session.userId].cash += totalEarnings;
+    await saveUserData();
+
+    const successEmbed = new EmbedBuilder()
+      .setTitle('Selected Artefacts Sold')
+      .setDescription(`Successfully sold ${session.selectedArtefacts.length} selected artefact(s).`)
+      .addFields(
+        { name: 'Items Sold', value: soldItems.join('\n'), inline: false },
+        { name: 'Total Earnings', value: `$${totalEarnings.toLocaleString()}`, inline: true },
+        { name: 'New Cash Total', value: `$${userData[session.userId].cash.toLocaleString()}`, inline: true },
+        { name: 'Remaining Artefacts', value: userData[session.userId].artefacts.length.toString(), inline: true }
+      )
+      .setColor(0x00FF7F)
+      .setTimestamp();
+
+    await interaction.update({ embeds: [successEmbed], components: [] });
+
+    // Clean up session
+    delete global.massSellSessions[sessionId];
+
+  } else if (customId.startsWith('mass_sell_cancel_')) {
+    const sessionId = customId.replace('mass_sell_cancel_', '');
+    const session = global.massSellSessions?.[sessionId];
+    if (!session || interaction.user.id !== session.userId) return;
+
+    const cancelEmbed = new EmbedBuilder()
+      .setTitle('Mass Sale Cancelled')
+      .setDescription('You have cancelled the mass sale. No artefacts were sold.')
+      .setColor(0xFF9F43)
+      .setTimestamp();
+
+    await interaction.update({ embeds: [cancelEmbed], components: [] });
+
+    // Clean up session
+    delete global.massSellSessions[sessionId];
+  }
+
+  } catch (error) {
+    console.error('Component interaction error:', error);
+
+    try {
+      if (!interaction.replied && !interaction.deferred) {
+        await interaction.reply({ 
+          content: '❌ An error occurred while processing your request. Please try again.', 
+          ephemeral: true 
+        });
+      }
+    } catch (replyError) {
+      console.error('Failed to send error response:', replyError);
+    }
+  }
+}
+
+// New Trade System Functions
+async function startInteractiveTrade(interaction, initiatorId, recipientId, tradeId) {
+  const trade = global.activeTrades[tradeId];
+  if (!trade) return;
+
+  const tradeEmbed = createTradeEmbed(trade, initiatorId, recipientId);
+  const components = createTradeComponents(tradeId, interaction.user.id);
+
+  await interaction.update({ embeds: [tradeEmbed], components });
+}
+
+function createTradeEmbed(trade, initiatorId, recipientId) {
+  const initiatorOfferText = formatOffer(trade.initiatorOffer);
+  const recipientOfferText = formatOffer(trade.recipientOffer);
+
+  return new EmbedBuilder()
+    .setTitle('Interactive Trade Session')
+    .setDescription('**Both players can add items, cash, or artefacts to the trade**')
+    .addFields(
+      { name: 'Initiator Offer', value: initiatorOfferText || '*Nothing offered yet*', inline: true },
+      { name: 'Recipient Offer', value: recipientOfferText || '*Nothing offered yet*', inline: true },
+      { name: 'Trade Status', value: getTradeStatus(trade), inline: false },
+      { name: 'Instructions', value: 'Use the buttons below to **add/remove** items from your offer. Both players must click **Ready** to complete the trade.', inline: false }
+    )
+    .setColor(trade.initiatorReady && trade.recipientReady ? 0x00FF7F : 0x4169E1)
+    .setFooter({ text: 'Trade will expire after 10 minutes of inactivity' })
+    .setTimestamp();
+}
+
+function formatOffer(offer) {
+  const parts = [];
+  if (offer.cash > 0) parts.push(`$${offer.cash.toLocaleString()}`);
+  if (offer.artefacts.length > 0) parts.push(offer.artefacts.join(', '));
+  return parts.join('\n') || 'Nothing';
+}
+
+function getTradeStatus(trade) {
+  if (trade.initiatorReady && trade.recipientReady) return '**Both players ready** - Trade will complete automatically';
+  if (trade.initiatorReady) return '⏳ **Initiator ready**, waiting for recipient';
+  if (trade.recipientReady) return '⏳ **Recipient ready**, waiting for initiator';
+  return '**Setting up offers...**';
+}
+
+function createTradeComponents(tradeId, userId) {
+  const trade = global.activeTrades[tradeId];
+  if (!trade) return [];
+
+  const isInitiator = trade.initiator === userId;
+  const userOffer = isInitiator ? trade.initiatorOffer : trade.recipientOffer;
+  const userReady = isInitiator ? trade.initiatorReady : trade.recipientReady;
+
+  const row1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`trade_add_cash_${tradeId}`)
+      .setLabel('Add Cash')
+      .setStyle(ButtonStyle.Primary)
+      .setDisabled(userReady),
+    new ButtonBuilder()
+      .setCustomId(`trade_add_artefact_${tradeId}`)
+      .setLabel('Add Artefact')
+      .setStyle(ButtonStyle.Primary)
+      .setDisabled(userReady),
+    new ButtonBuilder()
+      .setCustomId(`trade_remove_cash_${tradeId}`)
+      .setLabel('Remove Cash')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(userOffer.cash === 0 || userReady),
+    new ButtonBuilder()
+      .setCustomId(`trade_remove_artefact_${tradeId}`)
+      .setLabel('Remove Artefact')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(userOffer.artefacts.length === 0 || userReady)
+  );
+
+  const row2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`trade_ready_${tradeId}`)
+      .setLabel(userReady ? 'Ready!' : 'Mark Ready')
+      .setStyle(userReady ? ButtonStyle.Success : ButtonStyle.Primary)
+      .setDisabled(userReady),
+    new ButtonBuilder()
+      .setCustomId(`trade_cancel_${tradeId}`)
+      .setLabel('Cancel Trade')
+      .setStyle(ButtonStyle.Danger)
+  );
+
+  return [row1, row2];
+}
+
+async function handleTradeAddCash(interaction, customId) {
+  const tradeId = customId.split('_')[3];
+  const trade = global.activeTrades[tradeId];
+  if (!trade) return;
+
+  const userId = interaction.user.id;
+  const isInitiator = trade.initiator === userId;
+
+  if ((isInitiator && trade.initiatorReady) || (!isInitiator && trade.recipientReady)) {
+    return await interaction.reply({ content: 'You cannot modify your offer after marking ready!', ephemeral: true });
+  }
+
+  const modal = new ModalBuilder()
+    .setCustomId(`trade_cash_modal_${tradeId}`)
+    .setTitle('Add Cash to Trade');
+
+  const cashInput = new TextInputBuilder()
+    .setCustomId('cash_amount')
+    .setLabel('Cash amount to add')
+    .setStyle(TextInputStyle.Short)
+    .setPlaceholder('Enter amount in dollars')
+    .setRequired(true)
+    .setMaxLength(10);
+
+  const row = new ActionRowBuilder().addComponents(cashInput);
+  modal.addComponents(row);
+
+  await interaction.showModal(modal);
+}
+
+async function handleTradeAddArtefact(interaction, customId) {
+  const tradeId = customId.split('_')[3];
+  const trade = global.activeTrades[tradeId];
+  if (!trade) return;
+
+  const userId = interaction.user.id;
+  const userArtefacts = userData[userId].artefacts || [];
+
+  if (userArtefacts.length === 0) {
+    return await interaction.reply({ content: 'You have no artefacts to trade!', ephemeral: true });
+  }
+
+  const options = userArtefacts.slice(0, 25).map((artefact, index) => {
+    const rarity = getRarityByArtefact(artefact);
+    return {
+      label: artefact,
+      description: `${rarity ? rarity.name : 'Unknown'} - $${rarity ? rarity.value.toLocaleString() : '100'}`,
+      value: index.toString()
+    };
+  });
+
+  const selectMenu = new StringSelectMenuBuilder()
+    .setCustomId(`trade_artefact_select_${tradeId}`)
+    .setPlaceholder('Choose an artefact to add')
+    .addOptions(options);
+
+  const row = new ActionRowBuilder().addComponents(selectMenu);
+
+  await interaction.reply({ content: 'Select an artefact to add to your trade offer:', components: [row], ephemeral: true });
+}
+
+async function handleTradeRemoveCash(interaction, customId) {
+  const tradeId = customId.split('_')[3];
+  const trade = global.activeTrades[tradeId];
+  if (!trade) return;
+
+  const userId = interaction.user.id;
+  const isInitiator = trade.initiator === userId;
+
+  if (isInitiator) {
+    trade.initiatorOffer.cash = 0;
+    trade.initiatorReady = false;
+  } else {
+    trade.recipientOffer.cash = 0;
+    trade.recipientReady = false;
+  }
+
+  const tradeEmbed = createTradeEmbed(trade, trade.initiator, trade.recipient);
+  const components = createTradeComponents(tradeId, userId);
+
+  await interaction.update({ embeds: [tradeEmbed], components });
+}
+
+async function handleTradeRemoveArtefact(interaction, customId) {
+  const tradeId = customId.split('_')[3];
+  const trade = global.activeTrades[tradeId];
+  if (!trade) return;
+
+  const userId = interaction.user.id;
+  const isInitiator = trade.initiator === userId;
+
+  const userOffer = isInitiator ? trade.initiatorOffer : trade.recipientOffer;
+
+  if (userOffer.artefacts.length === 0) {
+    return await interaction.reply({ 
+      content: 'You have no artefacts in your offer to remove!', 
+      ephemeral: true 
+    });
+  }
+
+  // Create select menu to choose which artefact to remove
+  const options = userOffer.artefacts.slice(0, 25).map((artefact, index) => {
+    const rarity = getRarityByArtefact(artefact);
+    return {
+      label: artefact,
+      description: `${rarity ? rarity.name : 'Unknown'} - Remove from offer`,
+      value: index.toString()
+    };
+  });
+
+  const selectMenu = new StringSelectMenuBuilder()
+    .setCustomId(`trade_remove_artefact_select_${tradeId}`)
+    .setPlaceholder('Choose an artefact to remove')
+    .addOptions(options);
+
+  const row = new ActionRowBuilder().addComponents(selectMenu);
+
+  await interaction.reply({ 
+    content: 'Select an artefact to remove from your trade offer:', 
+    components: [row], 
+    ephemeral: true 
+  });
+}
+
+async function handleTradeReady(interaction, customId) {
+  const tradeId = customId.split('_')[2];
+  const trade = global.activeTrades[tradeId];
+  if (!trade) return;
+
+  const userId = interaction.user.id;
+  const isInitiator = trade.initiator === userId;
+
+  // Validate that user has the items they're offering
+  const userOffer = isInitiator ? trade.initiatorOffer : trade.recipientOffer;
+
+  // Check cash availability
+  if (userOffer.cash > userData[userId].cash) {
+    return await interaction.reply({ 
+      content: `❌ You don't have enough cash! You're offering $${userOffer.cash.toLocaleString()} but only have $${userData[userId].cash.toLocaleString()}`, 
+      ephemeral: true 
+    });
+  }
+
+  // Check artefact availability
+  for (const artefact of userOffer.artefacts) {
+    if (!userData[userId].artefacts.includes(artefact)) {
+      return await interaction.reply({ 
+        content: `❌ You no longer have "${artefact}" in your inventory!`, 
+        ephemeral: true 
+      });
+    }
+  }
+
+  if (isInitiator) {
+    trade.initiatorReady = true;
+  } else {
+    trade.recipientReady = true;
+  }
+
+  if (trade.initiatorReady && trade.recipientReady) {
+    await executeTrade(interaction, trade, tradeId);
+  } else {
+    const tradeEmbed = createTradeEmbed(trade, trade.initiator, trade.recipient);
+    const components = createTradeComponents(tradeId, userId);
+    await interaction.update({ embeds: [tradeEmbed], components });
+  }
+}
+
+async function executeTrade(interaction, trade, tradeId) {
+  const initiator = userData[trade.initiator];
+  const recipient = userData[trade.recipient];
+
+  try {
+    // Final validation before executing trade
+    if (trade.initiatorOffer.cash > initiator.cash) {
+      throw new Error(`Initiator doesn't have enough cash`);
+    }
+    if (trade.recipientOffer.cash > recipient.cash) {
+      throw new Error(`Recipient doesn't have enough cash`);
+    }
+
+    // Validate artefacts exist
+    for (const artefact of trade.initiatorOffer.artefacts) {
+      if (!initiator.artefacts.includes(artefact)) {
+        throw new Error(`Initiator doesn't have "${artefact}"`);
+      }
+    }
+    for (const artefact of trade.recipientOffer.artefacts) {
+      if (!recipient.artefacts.includes(artefact)) {
+        throw new Error(`Recipient doesn't have "${artefact}"`);
+      }
+    }
+
+    // Execute the trade
+    // Transfer cash
+    initiator.cash -= trade.initiatorOffer.cash;
+    initiator.cash += trade.recipientOffer.cash;
+    recipient.cash -= trade.recipientOffer.cash;
+    recipient.cash += trade.initiatorOffer.cash;
+
+    // Transfer artefacts
+    trade.initiatorOffer.artefacts.forEach(artefact => {
+      const index = initiator.artefacts.indexOf(artefact);
+      if (index > -1) {
+        initiator.artefacts.splice(index, 1);
+        recipient.artefacts.push(artefact);
+      }
+    });
+
+    trade.recipientOffer.artefacts.forEach(artefact => {
+      const index = recipient.artefacts.indexOf(artefact);
+      if (index > -1) {
+        recipient.artefacts.splice(index, 1);
+        initiator.artefacts.push(artefact);
+      }
+    });
+
+    await saveUserData();
+    delete global.activeTrades[tradeId];
+
+    const successEmbed = new EmbedBuilder()
+      .setTitle('🎉 Trade Completed Successfully!')
+      .setDescription('**The trade has been executed and all items have been exchanged!**')
+      .addFields(
+        { name: '📦 Initiator Received', value: formatOffer(trade.recipientOffer) || '*Nothing*', inline: true },
+        { name: '📦 Recipient Received', value: formatOffer(trade.initiatorOffer) || '*Nothing*', inline: true }
+      )
+      .setColor(0x00FF7F)
+      .setTimestamp();
+
+    await interaction.update({ embeds: [successEmbed], components: [] });
+
+  } catch (error) {
+    console.error('Trade execution error:', error);
+
+    const errorEmbed = new EmbedBuilder()
+      .setTitle('❌ Trade Failed')
+      .setDescription('The trade could not be completed due to validation errors.')
+      .addFields(
+        { name: 'Error', value: error.message, inline: false },
+        { name: 'Action Required', value: 'Please restart the trade with updated offers', inline: false }
+      )
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+
+    await interaction.update({ embeds: [errorEmbed], components: [] });
+    delete global.activeTrades[tradeId];
+  }
+}
+
+async function handleTradeCancel(interaction, customId) {
+  const tradeId = customId.split('_')[2];
+  delete global.activeTrades[tradeId];
+
+  const cancelEmbed = new EmbedBuilder()
+    .setTitle('Trade Cancelled')
+    .setDescription('The trade has been cancelled by one of the participants.')
+    .setColor(0xFF9F43)
+    .setTimestamp();
+
+  await interaction.update({ embeds: [cancelEmbed], components: [] });
+}
+
+// === MARBLE GAME FUNCTIONS ===
+
+async function handleMarbleGame(interaction) {
+  const userId = interaction.user.id;
+  const player2 = interaction.options.getUser('player2');
+  const player3 = interaction.options.getUser('player3');
+  const player4 = interaction.options.getUser('player4');
+
+  // Validation checks
+  const players = [interaction.user, player2, player3, player4];
+  const uniquePlayerIds = new Set(players.map(p => p.id));
+
+  if (uniquePlayerIds.size !== 4) {
+    return await interaction.reply({ 
+      content: '❌ **Error:** All four players must be different users!', 
+      ephemeral: true 
+    });
+  }
+
+  if (players.some(p => p.bot)) {
+    return await interaction.reply({ 
+      content: '❌ **Error:** Bots cannot participate in marble games!', 
+      ephemeral: true 
+    });
+  }
+
+  // Check if any player is already in a game
+  const existingGame = Object.values(global.activeMarbleGames).find(game => 
+    game.players.some(p => players.some(player => player.id === p.id))
+  );
+
+  if (existingGame) {
+    return await interaction.reply({ 
+      content: '❌ **Error:** One or more players are already in an active marble game!', 
+      ephemeral: true 
+    });
+  }
+
+  // Create game ID and initialize game
+  const gameId = `${userId}_${Date.now()}`;
+  global.activeMarbleGames[gameId] = {
+    gameId,
+    initiator: interaction.user,
+    players: players,
+    invited: [player2, player3, player4],
+    accepted: [],
+    declined: [],
+    pendingBets: {}, // To store individual player bets before they match
+    betAmount: 0, // Will be set once bets match
+    totalPot: 0,
+    betsCollected: false,
+    phase: 'invitation',
+    createdAt: Date.now()
+  };
+
+  const invitationEmbed = createInvitationEmbed(global.activeMarbleGames[gameId]);
+  const buttons = createInvitationButtons(gameId);
+
+  await interaction.reply({ 
+    embeds: [invitationEmbed], 
+    components: [buttons],
+    ephemeral: false 
+  });
+}
+
+function createInvitationEmbed(game) {
+  const pending = game.invited.filter(p => 
+    !game.accepted.includes(p.id) && !game.declined.includes(p.id)
+  );
+
+  return new EmbedBuilder()
+    .setTitle('🎲 Marble Gambling Challenge')
+    .setDescription(`**${game.initiator.displayName}** has challenged you to a marble gambling contest!`)
+    .addFields(
+      { 
+        name: '👥 Players Invited', 
+        value: game.invited.map(p => `<@${p.id}>`).join(', '), 
+        inline: false 
+      },
+      { 
+        name: '💰 Betting Details', 
+        value: `**Bet per Player:** To be determined\\n**Total Pot:** To be determined`, 
+        inline: false 
+      },
+      { 
+        name: '⏳ Pending Responses', 
+        value: pending.length > 0 ? pending.map(p => `<@${p.id}>`).join(', ') : '*None*', 
+        inline: true 
+      },
+      { 
+        name: '✅ Accepted', 
+        value: game.accepted.length > 0 ? game.accepted.map(id => `<@${id}>`).join(', ') : '*None*', 
+        inline: true 
+      },
+      {
+        name: '🎯 Game Rules',
+        value: '• **4 players** split into 2 teams\\n• Each team starts with **10 marbles**\\n• Guess numbers 1-20 to win marbles\\n• First team to **0 marbles loses**, other team wins with **20 marbles**\\n• **Winning team splits the entire pot!**',
+        inline: false
+      }
+    )
+    .setColor(0xFF6B35)
+    .setFooter({ text: '⏰ This invitation expires after 2 minutes' })
+    .setTimestamp();
+}
+
+function createInvitationButtons(gameId) {
+  return new ActionRowBuilder()
+    .addComponents(
+      new ButtonBuilder()
+        .setCustomId(`marble_accept_${gameId}`)
+        .setLabel('Accept Challenge')
+        .setStyle(ButtonStyle.Success),
+      new ButtonBuilder()
+        .setCustomId(`marble_decline_${gameId}`)
+        .setLabel('Decline')
+        .setStyle(ButtonStyle.Danger)
+    );
+}
+
+async function handleTeamSelection(interaction, gameId) {
+  const game = global.activeMarbleGames[gameId];
+  if (!game) return;
+
+  // Move to betting phase
+  game.phase = 'betting';
+
+  await startBettingPhase(interaction, gameId);
+}
+
+async function startBettingPhase(interaction, gameId) {
+  const game = global.activeMarbleGames[gameId];
+  if (!game) return;
+
+  const bettingEmbed = new EmbedBuilder()
+    .setTitle('Betting Phase')
+    .setDescription('**All players must place their bets now!** Each player can bet any amount they want, but all bets must match to proceed.')
+    .addFields(
+      { 
+        name: '🎮 Players', 
+        value: game.players.map(p => `<@${p.id}>`).join(', '), 
+        inline: false 
+      },
+      { 
+        name: '📋 Instructions', 
+        value: '• Each player must click "Place Bet" below\n• Enter your desired bet amount (minimum $50)\n• All players must bet the same amount\n• Game will start once all bets match', 
+        inline: false 
+      },
+      { 
+        name: '🎯 Current Bets', 
+        value: 'No bets placed yet', 
+        inline: false 
+      }
+    )
+    .setColor(0xFFD700)
+    .setTimestamp();
+
+  const betButton = new ActionRowBuilder()
+    .addComponents(
+      new ButtonBuilder()
+        .setCustomId(`place_bet_${gameId}`)
+        .setLabel('Place Bet')
+        .setStyle(ButtonStyle.Primary)
+    );
+
+  await interaction.editReply({ 
+    embeds: [bettingEmbed], 
+    components: [betButton] 
+  });
+}
+
+function createBettingEmbed(game, userId, betAmount) {
+  const pendingBets = game.pendingBets || {};
+  const userBet = pendingBets[userId];
+
+  let currentBetsDescription = 'No bets placed yet';
+  if (Object.keys(pendingBets).length > 0) {
+    currentBetsDescription = Object.entries(pendingBets)
+      .map(([id, bet]) => `<@${id}> - $${bet.toLocaleString()}`)
+      .join('\n');
+  }
+
+  let statusMessage = 'Waiting for all players to place their bets...';
+  let color = 0xFFD700; // Yellow for pending
+
+  if (Object.keys(pendingBets).length === game.players.length) {
+    const allBets = Object.values(pendingBets);
+    if (allBets.every(bet => bet === allBets[0])) {
+      statusMessage = `**All bets match!** $${allBets[0].toLocaleString()} per player. Game starting soon!`;
+      color = 0x00FF7F; // Green for matched bets
+    } else {
+      statusMessage = 'Bets do not match! Please try again.';
+      color = 0xFF6B6B; // Red for mismatch
+    }
+  }
+
+  return new EmbedBuilder()
+    .setTitle('Betting Phase')
+    .setDescription(statusMessage)
+    .addFields(
+      { 
+        name: '🎮 Players', 
+        value: game.players.map(p => `<@${p.id}>`).join(', '), 
+        inline: false 
+      },
+      { 
+        name: '🎯 Current Bets', 
+        value: currentBetsDescription, 
+        inline: false 
+      },
+      {
+        name: '📋 Next Steps',
+        value: '• All players must bet the same amount\n• If bets do not match, the game will be cancelled.',
+        inline: false
+      }
+    )
+    .setColor(color)
+    .setTimestamp();
+}
+
+async function collectBets(game) {
+  if (game.betsCollected) return;
+
+  // Deduct bet amount from all players
+  for (const player of game.players) {
+    userData[player.id].cash -= game.betAmount;
+  }
+
+  game.betsCollected = true;
+  await saveUserData();
+}
+
+async function startMarbleGame(interaction, gameId) {
+  const game = global.activeMarbleGames[gameId];
+  if (!game) return;
+
+  // For simplicity, randomly assign teams
+  const shuffledPlayers = [...game.players].sort(() => Math.random() - 0.5);
+  game.teamA = shuffledPlayers.slice(0, 2);
+  game.teamB = shuffledPlayers.slice(2, 4);
+  game.teamAMarbles = 10;
+  game.teamBMarbles = 10;
+  game.phase = 'game';
+  game.round = 1;
+  game.playerGuesses = {};
+
+  // Coin flip to determine starting team
+  const coinFlip = Math.random() < 0.5 ? 'heads' : 'tails';
+  game.currentTeam = coinFlip === 'heads' ? 'A' : 'B';
+  game.currentPlayerIndex = 0;
+
+  const gameStartEmbed = createGameEmbed(game, coinFlip);
+  const numberButton = createNumberSelectionButton(gameId);
+
+  const channel = interaction.channel;
+  await channel.send({ 
+    embeds: [gameStartEmbed], 
+    components: [numberButton] 
+  });
+}
+
+function createGameEmbed(game, coinFlip = null) {
+  const currentTeam = game.currentTeam === 'A' ? game.teamA : game.teamB;
+  const currentPlayer = currentTeam[game.currentPlayerIndex];
+
+  let description = `**Round ${game.round}** - Marble Gambling in Progress!`;
+  if (coinFlip) {
+    description += `\n\n🪙 **Coin Flip Result:** ${coinFlip.toUpperCase()}\n**Team ${game.currentTeam}** goes first!`;
+  }
+
+  return new EmbedBuilder()
+    .setTitle('🎲 Marble Game - Active')
+    .setDescription(description)
+    .addFields(
+      { 
+        name: '🔴 Team A', 
+        value: `**Players:** ${game.teamA.map(p => p.displayName).join(', ')}\n**Marbles:** ${game.teamAMarbles}/20`, 
+        inline: true 
+      },
+      { 
+        name: '🔵 Team B', 
+        value: `**Players:** ${game.teamB.map(p => p.displayName).join(', ')}\n**Marbles:** ${game.teamBMarbles}/20`, 
+        inline: true 
+      },
+      { 
+        name: '🎯 Current Turn', 
+        value: `**${currentPlayer.displayName}** (Team ${game.currentTeam})\nChoose a number from 1-20!`, 
+        inline: false 
+      }
+    )
+    .setColor(game.currentTeam === 'A' ? 0xFF4444 : 0x4444FF)
+    .setFooter({ text: `🎲 Round ${game.round} • Waiting for number selection` })
+    .setTimestamp();
+}
+
+function createNumberSelectionButton(gameId) {
+  return new ActionRowBuilder()
+    .addComponents(
+      new ButtonBuilder()
+        .setCustomId(`select_number_${gameId}`)
+        .setLabel('Select Number (1-20)')
+        .setStyle(ButtonStyle.Primary)
+    );
+}
+
+async function handleNumberSelection(interaction, gameId) {
+  const game = global.activeMarbleGames[gameId];
+  if (!game) return;
+
+  const currentTeam = game.currentTeam === 'A' ? game.teamA : game.teamB;
+  const currentPlayer = currentTeam[game.currentPlayerIndex];
+
+  if (interaction.user.id !== currentPlayer.id) {
+    return await interaction.reply({ 
+      content: '❌ **It\'s not your turn!**', 
+      ephemeral: true 
+    });
+  }
+
+  const modal = new ModalBuilder()
+    .setCustomId(`number_modal_${gameId}`)
+    .setTitle('Choose Your Number')
+    .addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('number_input')
+          .setLabel('Enter a number from 1 to 20')
+          .setStyle(TextInputStyle.Short)
+          .setMinLength(1)
+          .setMaxLength(2)
+          .setRequired(true)
+      )
+    );
+
+  await interaction.showModal(modal);
+}
+
+async function processNumberGuess(interaction, gameId) {
+  const game = global.activeMarbleGames[gameId];
+  if (!game) return;
+
+  const number = parseInt(interaction.fields.getTextInputValue('number_input'));
+
+  if (isNaN(number) || number < 1 || number > 20) {
+    return await interaction.reply({ 
+      content: '❌ **Invalid number!** Please enter a number between 1 and 20.', 
+      ephemeral: true 
+    });
+  }
+
+  const playerId = interaction.user.id;
+  game.playerGuesses[playerId] = number;
+
+  await interaction.reply({ 
+    content: `✅ **You selected ${number}!** Waiting for other players...`, 
+    ephemeral: true 
+  });
+
+  // Move to next player
+  const currentTeamArray = game.currentTeam === 'A' ? game.teamA : game.teamB;
+  game.currentPlayerIndex++;
+
+  // Check if all players in current team have guessed
+  if (game.currentPlayerIndex >= currentTeamArray.length) {
+    // Switch to other team
+    if (game.currentTeam === 'A') {
+      game.currentTeam = 'B';
+      game.currentPlayerIndex = 0;
+    } else {
+      // All players have guessed, run the randomizer
+      await runRandomizer(interaction, gameId);
+      return;
+    }
+  }
+
+  // Update embed for next player
+  const updatedEmbed = createGameEmbed(game);
+  const numberButton = createNumberSelectionButton(gameId);
+
+  await interaction.message.edit({ 
+    embeds: [updatedEmbed], 
+    components: [numberButton] 
+  });
+}
+
+async function runRandomizer(interaction, gameId) {
+  const game = global.activeMarbleGames[gameId];
+  if (!game) return;
+
+  const allGuesses = Object.values(game.playerGuesses);
+  let randomNumber;
+  let attempts = 0;
+  const maxAttempts = 100; // Prevent infinite loops
+
+  // Keep rolling until we hit a guessed number or max attempts
+  do {
+    randomNumber = Math.floor(Math.random() * 20) + 1;
+    attempts++;
+
+    if (attempts >= maxAttempts) {
+      // Force a hit to prevent infinite loops
+      randomNumber = allGuesses[Math.floor(Math.random() * allGuesses.length)];
+      break;
+    }
+
+    if (!allGuesses.includes(randomNumber)) {
+      // Show re-roll message
+      const rerollEmbed = new EmbedBuilder()
+        .setTitle('🎲 Randomizer Rolling...')
+        .setDescription(`**Number ${randomNumber}** - No hits! Re-rolling in 3 seconds...`)
         .setColor(0xFFA500)
         .setTimestamp();
 
-      return interaction.reply({ embeds: [embed], ephemeral: false });
+      await interaction.message.edit({ embeds: [rerollEmbed], components: [] });
+      await new Promise(resolve => setTimeout(resolve, 3000));
     }
+  } while (!allGuesses.includes(randomNumber));
 
-    if (commandName === 'setreactionlogs') {
-      if (!isAdmin(interaction.member)) {
-        return interaction.reply({ content: '🚫 You need administrator permissions to configure logging.', ephemeral: false });
-      }
+  // Find the winner
+  const winnerId = Object.keys(game.playerGuesses).find(
+    playerId => game.playerGuesses[playerId] === randomNumber
+  );
+  const winnerUser = game.players.find(p => p.id === winnerId);
+  const winnerTeam = game.teamA.some(p => p.id === winnerId) ? 'A' : 'B';
+  const loserTeam = winnerTeam === 'A' ? 'B' : 'A';
 
-      const selectMenu = createChannelSelectMenu(interaction.guild.id, 'reaction');
-      const row = new ActionRowBuilder().addComponents(selectMenu);
-
-      const embed = new EmbedBuilder()
-        .setTitle('🎭 Configure Reaction Logs')
-        .setDescription('Select a channel where reaction logs will be posted.')
-        .setColor(0x5865F2);
-
-      return interaction.reply({ embeds: [embed], components: [row], ephemeral: false});
-    }
-
-    if (commandName === 'setdeletedlogs') {
-      if (!isAdmin(interaction.member)) {
-        return interaction.reply({ content: '🚫 You need administrator permissions to configure logging.', ephemeral: false });
-      }
-
-      const selectMenu = createChannelSelectMenu(interaction.guild.id, 'deleted');
-      const row = new ActionRowBuilder().addComponents(selectMenu);
-
-      const embed = new EmbedBuilder()
-        .setTitle('🗑️ Configure Deleted Message Logs')
-        .setDescription('Select a channel where deleted message logs will be posted.')
-        .setColor(0xFF0000);
-
-      return interaction.reply({ embeds: [embed], components: [row], ephemeral: false });
-    }
-
-    if (commandName === 'seteditlogs') {
-      if (!isAdmin(interaction.member)) {
-        return interaction.reply({ content: '🚫 You need administrator permissions to configure logging.', ephemeral: false });
-      }
-
-      const selectMenu = createChannelSelectMenu(interaction.guild.id, 'edit');
-      const row = new ActionRowBuilder().addComponents(selectMenu);
-
-      const embed = new EmbedBuilder()
-        .setTitle('✏️ Configure Message Edit Logs')
-        .setDescription('Select a channel where message edit logs will be posted.')
-        .setColor(0xFFA500);
-
-      return interaction.reply({ embeds: [embed], components: [row], ephemeral: false });
-    }
-
-    if (commandName === 'logstatus') {
-      if (!isModerator(interaction.member)) {
-        return interaction.reply({ content: '🚫 You need moderator permissions to view logging status.', ephemeral: false });
-      }
-
-      const config = getServerConfig(interaction.guild.id);
-      const embed = new EmbedBuilder()
-        .setTitle('📊 Logging Configuration Status')
-        .addFields(
-          { 
-            name: '🎭 Reaction Logs', 
-            value: config.reactionLogsChannel ? `<#${config.reactionLogsChannel}>` : 'Not configured', 
-            inline: true 
-          },
-          { 
-            name: '🗑️ Deleted Message Logs', 
-            value: config.deletedLogsChannel ? `<#${config.deletedLogsChannel}>` : 'Not configured', 
-            inline: true 
-          },
-          { 
-            name: '✏️ Edit Message Logs', 
-            value: config.editLogsChannel ? `<#${config.editLogsChannel}>` : 'Not configured', 
-            inline: true 
-          }
-        )
-        .setColor(0x5865F2)
-        .setTimestamp();
-
-      return interaction.reply({ embeds: [embed], ephemeral: false });
-    }
-
-    if (commandName === 'say') {
-      if (!isAdmin(interaction.member)) {
-        return interaction.reply({ content: '🚫 You need administrator permissions to use this command.', ephemeral: true });
-      }
-
-      const targetChannel = interaction.options.getChannel('channel');
-      const messageText = interaction.options.getString('message');
-
-      // Verify the channel is a text channel in the same guild
-      if (!targetChannel || targetChannel.type !== ChannelType.GuildText || targetChannel.guild.id !== interaction.guild.id) {
-        return interaction.reply({ content: '❌ Invalid channel selected. Please choose a text channel from this server.', ephemeral: true });
-      }
-
-      try {
-        // Send the message to the target channel
-        await targetChannel.send(messageText);
-
-        return interaction.reply({ 
-          content: `✅ Message sent to ${targetChannel}`, 
-          ephemeral: true 
-        });
-      } catch (error) {
-        console.error('Error sending message:', error);
-        return interaction.reply({ 
-          content: '❌ Failed to send message. Check bot permissions for that channel.', 
-          ephemeral: true 
-        });
-      }
-    }
-
-    if (commandName === 'riskreport') {
-      if (!isModerator(interaction.member)) {
-        return interaction.reply({ content: '🚫 You need moderator permissions to use this command.', ephemeral: false });
-      }
-
-      await interaction.deferReply();
-
-      try {
-        const report = await generateServerRiskReport(interaction.guild, interaction.user);
-        const embed = await createRiskReportEmbed(report, interaction.guild);
-
-        return interaction.editReply({ embeds: [embed] });
-      } catch (error) {
-        console.error('Error generating risk report:', error);
-        return interaction.editReply({ content: '❌ Error generating server risk report. Please try again.' });
-      }
-    }
-
-    if (commandName === 'behavioursummary') {
-      if (!isModerator(interaction.member)) {
-        return interaction.reply({ content: '🚫 You need moderator permissions to use this command.', ephemeral: false });
-      }
-
-      await interaction.deferReply();
-
-      const target = interaction.options.getUser('user');
-
-      try {
-        const behaviorData = await analyzeBehaviorSummary(target, interaction.guild);
-        const embeds = await createBehaviorSummaryEmbeds(behaviorData, target, interaction.guild);
-
-        return interaction.editReply({ embeds });
-      } catch (error) {
-        console.error('Error generating behavior summary:', error);
-        return interaction.editReply({ content: '❌ Error generating behavior summary. Please try again.' });
-      }
-    }
+  // Transfer marble
+  if (winnerTeam === 'A') {
+    game.teamAMarbles++;
+    game.teamBMarbles--;
+  } else {
+    game.teamBMarbles++;
+    game.teamAMarbles--;
   }
 
-  // ✅ Select menu interaction handler
-  if (interaction.isStringSelectMenu()) {
-    const customIdParts = interaction.customId.split('_');
-    const action = customIdParts[0];
-    const logType = customIdParts[1];
-    const guildId = customIdParts[3];
-
-    if (action === 'select' && guildId === interaction.guild.id) {
-      if (!isAdmin(interaction.member)) {
-        return interaction.reply({ content: '🚫 You need administrator permissions to configure logging.', ephemeral: false });
-      }
-
-      const channelId = interaction.values[0];
-      if (channelId === 'none') {
-        return interaction.reply({ content: '❌ No valid channels available. Create a text channel first.', ephemeral: false });
-      }
-
-      const config = getServerConfig(guildId);
-      const channel = interaction.guild.channels.cache.get(channelId);
-
-      if (logType === 'reaction') {
-        config.reactionLogsChannel = channelId;
-        serverConfigs.set(guildId, config);
-
-        return interaction.update({ 
-          content: `✅ Reaction logs configured for ${channel}`, 
-          embeds: [], 
-          components: [] 
-        });
-      } else if (logType === 'deleted') {
-        config.deletedLogsChannel = channelId;
-        serverConfigs.set(guildId, config);
-
-        return interaction.update({ 
-          content: `✅ Deleted message logs configured for ${channel}`, 
-          embeds: [], 
-          components: [] 
-        });
-      } else if (logType === 'edit') {
-        config.editLogsChannel = channelId;
-        serverConfigs.set(guildId, config);
-
-        return interaction.update({ 
-          content: `✅ Message edit logs configured for ${channel}`, 
-          embeds: [], 
-          components: [] 
-        });
-      }
-    }
-  }
-
-  // ✅ Button interaction handler
-  if (!interaction.isButton()) return;
-
-  const [action, userId] = interaction.customId.split('_');
-  const targetUser = await interaction.client.users.fetch(userId).catch(() => null);
-  const member = await interaction.guild.members.fetch(userId).catch(() => null);
-
-  if (!targetUser) {
-    return interaction.reply({ content: '⚠️ User not found.', ephemeral: false });
-  }
-
-  // Check if target is admin (immune to moderation)
-  const isTargetAdmin = member && isAdmin(member);
-
-  if (action === 'allow') {
-    return interaction.update({ content: `✅ Allowed **${targetUser.tag}**`, components: [], embeds: interaction.message.embeds });
-  }
-
-  if (action === 'kick') {
-    if (!interaction.member.permissions.has('KickMembers')) {
-      return interaction.reply({ content: '🚫 You do not have permission to kick.', ephemeral: false });
-    }
-    if (!member) return interaction.reply({ content: '⚠️ User is not in the server.', ephemeral: false });
-
-    if (isTargetAdmin) {
-      return interaction.reply({ content: '🛡️ Cannot kick this user - they have administrator privileges.', ephemeral: false });
-    }
-
-    return interaction.reply({
-      content: `⚠️ Are you sure you want to **kick** ${targetUser.tag}?`,
-      components: [
-        new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId(`confirmkick_${userId}`).setLabel('Yes, Kick').setStyle(ButtonStyle.Danger),
-          new ButtonBuilder().setCustomId(`cancel_${userId}`).setLabel('Cancel').setStyle(ButtonStyle.Secondary)
-        )
-      ],
-      ephemeral: false
-    });
-  }
-
-  if (action === 'ban') {
-    if (!interaction.member.permissions.has('BanMembers')) {
-      return interaction.reply({ content: '🚫 You do not have permission to ban.', ephemeral: false });
-    }
-    if (!member) return interaction.reply({ content: '⚠️ User is not in the server.', ephemeral: false });
-
-    if (isTargetAdmin) {
-      return interaction.reply({ content: '🛡️ Cannot ban this user - they have administrator privileges.', ephemeral: false });
-    }
-
-    return interaction.reply({
-      content: `⚠️ Are you sure you want to **ban** ${targetUser.tag}?`,
-      components: [
-        new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId(`confirmban_${userId}`).setLabel('Yes, Ban').setStyle(ButtonStyle.Danger),
-          new ButtonBuilder().setCustomId(`cancel_${userId}`).setLabel('Cancel').setStyle(ButtonStyle.Secondary)
-        )
-      ],
-      ephemeral: false
-    });
-  }
-
-  if (action === 'confirmkick') {
-    if (isTargetAdmin) {
-      return interaction.update({ content: '🛡️ Cannot kick this user - they have administrator privileges.', components: [] });
-    }
-    await member.kick(`Kicked by ${interaction.user.tag} via alt check`).catch(() => null);
-    return interaction.update({ content: `👢 Kicked **${targetUser.tag}**`, components: [] });
-  }
-
-  if (action === 'confirmban') {
-    if (isTargetAdmin) {
-      return interaction.update({ content: '🛡️ Cannot ban this user - they have administrator privileges.', components: [] });
-    }
-    await member.ban({ reason: `Banned by ${interaction.user.tag} via alt check` }).catch(() => null);
-    return interaction.update({ content: `🔨 Banned **${targetUser.tag}**`, components: [] });
-  }
-
-  if (action === 'cancel') {
-    return interaction.update({ content: '❎ Action cancelled.', components: [] });
-  }
-
-  } catch (error) {
-    console.error('Error handling interaction:', error);
-
-    if (!interaction.replied && !interaction.deferred) {
-      try {
-        await interaction.reply({ content: '❌ An error occurred while processing your request.', ephemeral: true });
-      } catch (e) {
-        console.error('Failed to send error reply:', e);
-      }
-    } else {
-      try {
-        await interaction.followUp({ content: '❌ An error occurred while processing your request.', ephemeral: true });
-      } catch (e) {
-        console.error('Failed to send error followup:', e);
-      }
-    }
-  }
-});
-
-// ✅ Message deleted event handler
-client.on('messageDelete', async message => {
-  // Ignore bot messages and system messages
-  if (!message.author || message.author.bot || message.system) return;
-
-  const config = getServerConfig(message.guild.id);
-  if (!config.deletedLogsChannel) return;
-
-  const logChannel = message.guild.channels.cache.get(config.deletedLogsChannel);
-  if (!logChannel) return;
-
-  const embed = new EmbedBuilder()
-    .setTitle('Message Deleted')
-    .setColor(0xFF0000)
+  const resultEmbed = new EmbedBuilder()
+    .setTitle('Randomiser Result!')
+    .setDescription(`**Number ${randomNumber}** was chosen!\n**${winnerUser.displayName}** (Team ${winnerTeam}) wins this round!`)
     .addFields(
-      { name: 'Author', value: `${message.author.tag} (${message.author.id})`, inline: true },
-      { name: 'Channel', value: `${message.channel}`, inline: true },
-      { name: 'Deleted At', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: true }
+      { 
+        name: 'Round Winner', 
+        value: `**${winnerUser.displayName}** guessed **${randomNumber}**`, 
+        inline: false 
+      },
+      { 
+        name: 'Current Scores', 
+        value: `🔴 **Team A:** ${game.teamAMarbles} marbles\n🔵 **Team B:** ${game.teamBMarbles} marbles`, 
+        inline: false 
+      }
     )
+    .setColor(winnerTeam === 'A' ? 0xFF4444 : 0x4444FF)
     .setTimestamp();
 
-  if (message.content) {
-    embed.addFields({ 
-      name: '💬 Content', 
-      value: message.content.length > 1024 ? `${message.content.substring(0, 1021)}...` : message.content,
-      inline: false 
-    });
+  await interaction.message.edit({ embeds: [resultEmbed], components: [] });
+
+  // Check win condition
+  if (game.teamAMarbles === 0 || game.teamBMarbles === 0 || game.teamAMarbles === 20 || game.teamBMarbles === 20) {
+    setTimeout(() => endGame(interaction, gameId), 3000);
+  } else {
+    setTimeout(() => nextRound(interaction, gameId), 5000);
   }
-
-  if (message.attachments.size > 0) {
-    const attachmentList = message.attachments.map(att => `[${att.name}](${att.url})`).join('\n');
-    embed.addFields({ 
-      name: '📎 Attachments', 
-      value: attachmentList.length > 1024 ? `${attachmentList.substring(0, 1021)}...` : attachmentList,
-      inline: false 
-    });
-  }
-
-  embed.setFooter({ text: `Message ID: ${message.id}` });
-
-  try {
-    await logChannel.send({ embeds: [embed] });
-  } catch (error) {
-    console.error('Error sending deleted message log:', error);
-  }
-});
-
-// ✅ Message edited event handler
-client.on('messageUpdate', async (oldMessage, newMessage) => {
-  // Ignore bot messages, system messages, and messages without content changes
-  if (!newMessage.author || newMessage.author.bot || newMessage.system) return;
-  if (oldMessage.content === newMessage.content) return; // No content change
-
-  const config = getServerConfig(newMessage.guild.id);
-  if (!config.editLogsChannel) return;
-
-  const logChannel = newMessage.guild.channels.cache.get(config.editLogsChannel);
-  if (!logChannel) return;
-
-  const embed = new EmbedBuilder()
-    .setTitle('✏️ Message Edited')
-    .setColor(0xFFA500)
-    .addFields(
-      { name: '👤 Author', value: `${newMessage.author.tag} (${newMessage.author.id})`, inline: true },
-      { name: 'Channel', value: `${newMessage.channel}`, inline: true },
-      { name: 'Edited At', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: true }
-    )
-    .setTimestamp();
-
-  if (oldMessage.content) {
-    embed.addFields({ 
-      name: '📝 Before', 
-      value: oldMessage.content.length > 512 ? `${oldMessage.content.substring(0, 509)}...` : oldMessage.content,
-      inline: false 
-    });
-  }
-
-  if (newMessage.content) {
-    embed.addFields({ 
-      name: '📝 After', 
-      value: newMessage.content.length > 512 ? `${newMessage.content.substring(0, 509)}...` : newMessage.content,
-      inline: false 
-    });
-  }
-
-  embed.addFields({ 
-    name: '🔗 Jump to Message', 
-    value: `[Click here](${newMessage.url})`,
-    inline: true 
-  });
-
-  embed.setFooter({ text: `Message ID: ${newMessage.id}` });
-
-  try {
-    await logChannel.send({ embeds: [embed] });
-  } catch (error) {
-    console.error('Error sending edited message log:', error);
-  }
-});
-
-// ✅ Reaction added event handler
-client.on('messageReactionAdd', async (reaction, user) => {
-  // Ignore bot reactions
-  if (user.bot) return;
-
-  // Fetch partial reactions
-  if (reaction.partial) {
-    try {
-      await reaction.fetch();
-    } catch (error) {
-      console.error('Error fetching reaction:', error);
-      return;
-    }
-  }
-
-  const config = getServerConfig(reaction.message.guild.id);
-  if (!config.reactionLogsChannel) return;
-
-  const logChannel = reaction.message.guild.channels.cache.get(config.reactionLogsChannel);
-  if (!logChannel) return;
-
-  const embed = new EmbedBuilder()
-    .setTitle('🎭 Reaction Added')
-    .setColor(0x00FF00)
-    .addFields(
-      { name: 'User', value: `${user.tag} (${user.id})`, inline: true },
-      { name: 'Channel', value: `${reaction.message.channel}`, inline: true },
-      { name: 'Added At', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: true },
-      { name: 'Reaction', value: `${reaction.emoji}`, inline: true },
-      { name: 'Count', value: `${reaction.count}`, inline: true },
-      { name: 'Message', value: `[Jump to message](${reaction.message.url})`, inline: true }
-    )
-    .setTimestamp();
-
-  if (reaction.message.content) {
-    const content = reaction.message.content.length > 200 ? 
-      `${reaction.message.content.substring(0, 197)}...` : 
-      reaction.message.content;
-    embed.addFields({ name: '💬 Message Content', value: content, inline: false });
-  }
-
-  embed.setFooter({ 
-    text: `Message ID: ${reaction.message.id} | Author: ${reaction.message.author?.tag || 'Unknown'}` 
-  });
-
-  try {
-    await logChannel.send({ embeds: [embed] });
-  } catch (error) {
-    console.error('Error sending reaction log:', error);
-  }
-});
-
-// ✅ Reaction removed event handler
-client.on('messageReactionRemove', async (reaction, user) => {
-  // Ignore bot reactions
-  if (user.bot) return;
-
-  // Fetch partial reactions
-  if (reaction.partial) {
-    try {
-      await reaction.fetch();
-    } catch (error) {
-      console.error('Error fetching reaction:', error);
-      return;
-    }
-  }
-
-  const config = getServerConfig(reaction.message.guild.id);
-  if (!config.reactionLogsChannel) return;
-
-  const logChannel = reaction.message.guild.channels.cache.get(config.reactionLogsChannel);
-  if (!logChannel) return;
-
-  const embed = new EmbedBuilder()
-    .setTitle('Reaction Removed')
-    .setColor(0xFF4444)
-    .addFields(
-      { name: 'User', value: `${user.tag} (${user.id})`, inline: true },
-      { name: 'Channel', value: `${reaction.message.channel}`, inline: true },
-      { name: 'Removed At', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: true },
-      { name: 'Reaction', value: `${reaction.emoji}`, inline: true },
-      { name: 'Count', value: `${reaction.count}`, inline: true },
-      { name: 'Message', value: `[Jump to message](${reaction.message.url})`, inline: true }
-    )
-    .setTimestamp();
-
-  if (reaction.message.content) {
-    const content = reaction.message.content.length > 200 ? 
-      `${reaction.message.content.substring(0, 197)}...` : 
-      reaction.message.content;
-    embed.addFields({ name: '💬 Message Content', value: content, inline: false });
-  }
-
-  embed.setFooter({ 
-    text: `Message ID: ${reaction.message.id} | Author: ${reaction.message.author?.tag || 'Unknown'}` 
-  });
-
-  try {
-    await logChannel.send({ embeds: [embed] });
-  } catch (error) {
-    console.error('Error sending reaction removal log:', error);
-  }
-});
-
-// ✅ Server Risk Assessment Functions
-async function generateServerRiskReport(guild, requestingUser) {
-  const report = {
-    serverInfo: {
-      name: guild.name,
-      memberCount: guild.memberCount,
-      createdAt: guild.createdTimestamp,
-      verificationLevel: guild.verificationLevel,
-      hasIcon: !!guild.icon,
-      hasBanner: !!guild.banner
-    },
-    suspiciousUsers: [],
-    massJoinEvents: [],
-    securityMetrics: {
-      totalMembers: 0,
-      newAccounts: 0,
-      highRiskUsers: 0,
-      mediumRiskUsers: 0,
-      lowRiskUsers: 0,
-      averageRiskScore: 0,
-      inviteSpammers: 0,
-      everyoneMentioners: 0,
-      advertisementPosters: 0
-    },
-    serverSafetyScore: 0,
-    moderationLevel: 'Unknown',
-    recommendations: []
-  };
-
-  try {
-    // Fetch all members (limited by Discord API)
-    const members = await guild.members.fetch({ limit: 1000 });
-    report.securityMetrics.totalMembers = members.size;
-
-    const memberRisks = [];
-    const joinTimes = [];
-    const suspiciousPatterns = new Map();
-
-    // Analyze each member
-    for (const [memberId, member] of members) {
-      if (member.user.bot) continue;
-
-      const risk = await calculateRisk(member.user, guild);
-      memberRisks.push(risk.score);
-      joinTimes.push(member.joinedTimestamp);
-
-      // Categorize risk levels
-      if (risk.score >= 60) {
-        report.securityMetrics.highRiskUsers++;
-        report.suspiciousUsers.push({
-          user: member.user,
-          riskScore: risk.score,
-          riskLevel: risk.label,
-          factors: risk.factors.slice(0, 3),
-          joinedAt: member.joinedTimestamp
-        });
-      } else if (risk.score >= 35) {
-        report.securityMetrics.mediumRiskUsers++;
-      } else {
-        report.securityMetrics.lowRiskUsers++;
-      }
-
-      // Check for new accounts
-      const accountAge = Date.now() - member.user.createdTimestamp;
-      if (accountAge < 7 * 24 * 60 * 60 * 1000) { // 7 days
-        report.securityMetrics.newAccounts++;
-      }
-
-      // Detect mass join patterns
-      const joinHour = new Date(member.joinedTimestamp).getHours();
-      const joinKey = `${new Date(member.joinedTimestamp).toDateString()}_${joinHour}`;
-      if (!suspiciousPatterns.has(joinKey)) {
-        suspiciousPatterns.set(joinKey, []);
-      }
-      suspiciousPatterns.get(joinKey).push({
-        user: member.user,
-        joinTime: member.joinedTimestamp
-      });
-    }
-
-    // Detect mass join events
-    for (const [timeKey, users] of suspiciousPatterns) {
-      if (users.length >= 5) { // 5+ users joined in same hour
-        report.massJoinEvents.push({
-          timeframe: timeKey,
-          userCount: users.length,
-          users: users.slice(0, 5) // Show first 5
-        });
-      }
-    }
-
-    // Calculate average risk score
-    if (memberRisks.length > 0) {
-      report.securityMetrics.averageRiskScore = Math.round(
-        memberRisks.reduce((sum, score) => sum + score, 0) / memberRisks.length
-      );
-    }
-
-    // Analyze server configuration
-    const serverConfigScore = analyzeServerConfiguration(guild);
-
-    // Calculate overall server safety score
-    const riskPenalty = (report.securityMetrics.highRiskUsers * 15) + 
-                       (report.securityMetrics.mediumRiskUsers * 5) +
-                       (report.massJoinEvents.length * 10);
-
-    const baseScore = Math.max(0, 100 - riskPenalty);
-    report.serverSafetyScore = Math.min(100, Math.max(0, baseScore + serverConfigScore));
-
-    // Determine moderation level
-    if (report.serverSafetyScore >= 85) {
-      report.moderationLevel = 'Excellent';
-    } else if (report.serverSafetyScore >= 70) {
-      report.moderationLevel = 'Good';
-    } else if (report.serverSafetyScore >= 50) {
-      report.moderationLevel = 'Moderate';
-    } else if (report.serverSafetyScore >= 30) {
-      report.moderationLevel = 'Poor';
-    } else {
-      report.moderationLevel = 'Critical';
-    }
-
-    // Generate recommendations
-    generateRecommendations(report);
-
-    // Sort suspicious users by risk score
-    report.suspiciousUsers.sort((a, b) => b.riskScore - a.riskScore);
-    report.suspiciousUsers = report.suspiciousUsers.slice(0, 10); // Limit to top 10
-
-  } catch (error) {
-    console.error('Error generating server risk report:', error);
-    throw error;
-  }
-
-  return report;
 }
 
-function analyzeServerConfiguration(guild) {
-  let score = 0;
+async function nextRound(interaction, gameId) {
+  const game = global.activeMarbleGames[gameId];
+  if (!game) return;
 
-  // Verification level bonus
-  if (guild.verificationLevel >= 3) score += 15;
-  else if (guild.verificationLevel >= 2) score += 10;
-  else if (guild.verificationLevel >= 1) score += 5;
+  // Reset for next round
+  game.round++;
+  game.playerGuesses = {};
 
-  // Server age bonus
-  const serverAge = Date.now() - guild.createdTimestamp;
-  const ageDays = Math.floor(serverAge / (1000 * 60 * 60 * 24));
-  if (ageDays > 365) score += 10;
-  else if (ageDays > 90) score += 5;
+  // Flip coin for next round
+  const coinFlip = Math.random() < 0.5 ? 'heads' : 'tails';
+  game.currentTeam = coinFlip === 'heads' ? 'A' : 'B';
+  game.currentPlayerIndex = 0;
 
-  // Server branding bonus
-  if (guild.icon) score += 3;
-  if (guild.banner) score += 2;
+  const nextRoundEmbed = createGameEmbed(game, coinFlip);
+  const numberButton = createNumberSelectionButton(gameId);
 
-  // Role structure analysis
-  const roleCount = guild.roles.cache.size;
-  if (roleCount > 10) score += 5;
-  else if (roleCount > 5) score += 3;
-
-  return Math.min(20, score); // Cap at 20 points
+  await interaction.message.edit({ 
+    embeds: [nextRoundEmbed], 
+    components: [numberButton] 
+  });
 }
 
-function generateRecommendations(report) {
-  const recommendations = [];
+async function endGame(interaction, gameId) {
+  const game = global.activeMarbleGames[gameId];
+  if (!game) return;
 
-  if (report.securityMetrics.highRiskUsers > 5) {
-    recommendations.push('Not looking good for your server. There is a lot of risky users out there. Consider reviewing the member verification process.');
+  const winningTeam = game.teamAMarbles === 20 || game.teamBMarbles === 0 ? 'A' : 'B';
+  const winningPlayers = winningTeam === 'A' ? game.teamA : game.teamB;
+  const finalScoreA = game.teamAMarbles;
+  const finalScoreB = game.teamBMarbles;
+
+  // Distribute winnings to winning team
+  const winningsPerPlayer = game.totalPot / 2; // Split pot between 2 winners
+  for (const player of winningPlayers) {
+    userData[player.id].cash += winningsPerPlayer;
   }
+  await saveUserData();
 
-  if (report.massJoinEvents.length > 2) {
-    recommendations.push('There has been a lot of mass-join events recently. Are you sure your server is safe? Enable member verification or screening.');
-  }
-
-  if (report.securityMetrics.newAccounts > report.securityMetrics.totalMembers * 0.3) {
-    recommendations.push('Yeesh, I detect a lot of new accounts joining this server. Consider implementing the minimum account age requirements.');
-  }
-
-  if (report.serverSafetyScore < 50) {
-    recommendations.push('Low server safety score. Review moderation settings and consider additional security measures.');
-  }
-
-  if (report.serverInfo.verificationLevel < 2) {
-    recommendations.push('Consider increasing server verification level for better security.');
-  }
-
-  if (recommendations.length === 0) {
-    recommendations.push('✅ You have pretty great security going on in your server. keep it up :>');
-  }
-
-  report.recommendations = recommendations.slice(0, 5); // Limit to 5 recommendations
-}
-
-async function createRiskReportEmbed(report, guild) {
-  const colors = {
-    'Excellent': 0x00FF00,
-    'Good': 0x90EE90,
-    'Moderate': 0xFFFF00,
-    'Poor': 0xFF6600,
-    'Critical': 0xFF0000
-  };
-
-  const embed = new EmbedBuilder()
-    .setTitle('Server Security & Safety Report')
-    .setDescription(`**${guild.name}** Security Assessment`)
-    .setThumbnail(guild.iconURL({ dynamic: true, size: 256 }))
-    .setColor(colors[report.moderationLevel] || 0x5865F2)
+  const gameEndEmbed = new EmbedBuilder()
+    .setTitle('Marble Game Complete!')
+    .setDescription(`**Team ${winningTeam} Wins!**\n\nCongratulations to the victorious players!`)
+    .addFields(
+      { 
+        name: 'Winners', 
+        value: winningPlayers.map(p => `**${p.displayName}**`).join('\\n'), 
+        inline: true 
+      },
+      { 
+        name: 'Final Score', 
+        value: `🔴 **Team A:** ${finalScoreA} marbles\n🔵 **Team B:** ${finalScoreB} marbles`, 
+        inline: true 
+      },
+      { 
+        name: 'Prize Distribution', 
+        value: `**Each Winner Receives:** $${winningsPerPlayer.toLocaleString()}\n**Total Pot:** $${game.totalPot.toLocaleString()}`, 
+        inline: false 
+      },
+      { 
+        name: 'Game Stats', 
+        value: `**Rounds Played:** ${game.round}\n**Duration:** ${Math.round((Date.now() - game.createdAt) / 60000)} minutes`, 
+        inline: false 
+      }
+    )
+    .setColor(0x00FF7F)
+    .setFooter({ text: 'Winnings have been distributed! Thanks for playing!' })
     .setTimestamp();
 
-  // Overall metrics
-  embed.addFields(
-    { name: 'Safety Score', value: `**${report.serverSafetyScore}/100**`, inline: true },
-    { name: 'Moderation Level', value: report.moderationLevel, inline: true },
-    { name: 'Average Risk', value: `${report.securityMetrics.averageRiskScore}/100`, inline: true }
+  await interaction.message.edit({ embeds: [gameEndEmbed], components: [] });
+
+  // Clean up
+  delete global.activeMarbleGames[gameId];
+}
+
+// === MASS SELL SYSTEM ===
+
+function createMassSellEmbed(allArtefacts, selectedArtefacts) {
+  const selectedValue = selectedArtefacts.reduce((sum, artefact) => {
+    const rarity = getRarityByArtefact(artefact);
+    return sum + (rarity ? rarity.sell : 100);
+  }, 0);
+
+  const availableArtefacts = allArtefacts.filter(art => !selectedArtefacts.includes(art));
+
+  return new EmbedBuilder()
+    .setTitle('Select Artefacts to Sell')
+    .setDescription('Choose which artefacts you want to sell from your collection.')
+    .addFields(
+      { 
+        name: 'Available Artefacts', 
+        value: availableArtefacts.length > 0 ? 
+          availableArtefacts.slice(0, 10).map(art => {
+            const rarity = getRarityByArtefact(art);
+            return `${art} (${rarity ? rarity.name : 'Unknown'}) - $${rarity ? rarity.sell.toLocaleString() : '100'}`;
+          }).join('\n') + (availableArtefacts.length > 10 ? `\n... and ${availableArtefacts.length - 10} more` : '') :
+          'None available',
+        inline: false 
+      },
+      { 
+        name: 'Selected for Sale', 
+        value: selectedArtefacts.length > 0 ? 
+          selectedArtefacts.map(art => {
+            const rarity = getRarityByArtefact(art);
+            return `${art} - $${rarity ? rarity.sell.toLocaleString() : '100'}`;
+          }).join('\n') : 
+          'None selected',
+        inline: false 
+      },
+      { 
+        name: 'Total Sale Value', 
+        value: `$${selectedValue.toLocaleString()}`, 
+        inline: true 
+      },
+      { 
+        name: 'Items to Sell', 
+        value: selectedArtefacts.length.toString(), 
+        inline: true 
+      }
+    )
+    .setColor(selectedArtefacts.length > 0 ? 0x00FF7F : 0x339AF0)
+    .setFooter({ text: 'Use the buttons below to add/remove artefacts and confirm sale' })
+    .setTimestamp();
+}
+
+function createMassSellComponents(sessionId, allArtefacts) {
+  const session = global.massSellSessions[sessionId];
+  if (!session) return [];
+
+  const availableArtefacts = allArtefacts.filter(art => !session.selectedArtefacts.includes(art));
+
+  const components = [];
+
+  // Add artefact select menu if there are available artefacts
+  if (availableArtefacts.length > 0) {
+    const addOptions = availableArtefacts.slice(0, 25).map((artefact, index) => {
+      const rarity = getRarityByArtefact(artefact);
+      return {
+        label: artefact,
+        description: `${rarity ? rarity.name : 'Unknown'} - $${rarity ? rarity.sell.toLocaleString() : '100'}`,
+        value: artefact
+      };
+    });
+
+    const addSelectMenu = new StringSelectMenuBuilder()
+      .setCustomId(`mass_sell_add_${sessionId}`)
+      .setPlaceholder('Add artefacts to sell')
+      .addOptions(addOptions);
+
+    components.push(new ActionRowBuilder().addComponents(addSelectMenu));
+  }
+
+  // Remove artefact select menu if there are selected artefacts
+  if (session.selectedArtefacts.length > 0) {
+    const removeOptions = session.selectedArtefacts.slice(0, 25).map(artefact => {
+      const rarity = getRarityByArtefact(artefact);
+      return {
+        label: artefact,
+        description: `Remove from sale - $${rarity ? rarity.sell.toLocaleString() : '100'}`,
+        value: artefact
+      };
+    });
+
+    const removeSelectMenu = new StringSelectMenuBuilder()
+      .setCustomId(`mass_sell_remove_${sessionId}`)
+      .setPlaceholder('Remove artefacts from sale')
+      .addOptions(removeOptions);
+
+    components.push(new ActionRowBuilder().addComponents(removeSelectMenu));
+  }
+
+  // Action buttons
+  const actionRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`mass_sell_confirm_${sessionId}`)
+      .setLabel(`Sell Selected (${session.selectedArtefacts.length})`)
+      .setStyle(ButtonStyle.Success)
+      .setDisabled(session.selectedArtefacts.length === 0),
+    new ButtonBuilder()
+      .setCustomId(`mass_sell_select_all_${sessionId}`)
+      .setLabel('Select All')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(availableArtefacts.length === 0),
+    new ButtonBuilder()
+      .setCustomId(`mass_sell_cancel_${sessionId}`)
+      .setLabel('Cancel')
+      .setStyle(ButtonStyle.Danger)
   );
 
-  // Member analysis
-  embed.addFields(
-    { name: 'Total Members', value: report.securityMetrics.totalMembers.toString(), inline: true },
-    { name: 'High Risk', value: report.securityMetrics.highRiskUsers.toString(), inline: true },
-    { name: 'Medium Risk', value: report.securityMetrics.mediumRiskUsers.toString(), inline: true }
-  );
+  components.push(actionRow);
 
-  // Security indicators
-  embed.addFields(
-    { name: 'New Accounts (< 7d)', value: report.securityMetrics.newAccounts.toString(), inline: true },
-    { name: 'Mass Join Events', value: report.massJoinEvents.length.toString(), inline: true },
-    { name: 'Verification Level', value: report.serverInfo.verificationLevel.toString(), inline: true }
-  );
-
-  // Suspicious users (if any)
-  if (report.suspiciousUsers.length > 0) {
-    const suspiciousText = report.suspiciousUsers.slice(0, 5).map(user => 
-      `**${user.user.tag}** (${user.riskScore}/100) - ${user.riskLevel}`
-    ).join('\n');
-
-    embed.addFields({
-      name: 'Suspicious Users:',
-      value: suspiciousText,
-      inline: false
-    });
-  }
-
-  // Mass join events (if any)
-  if (report.massJoinEvents.length > 0) {
-    const massJoinText = report.massJoinEvents.slice(0, 3).map(event => 
-      `**${event.userCount} users** joined during ${event.timeframe.split('_')[0]}`
-    ).join('\n');
-
-    embed.addFields({
-      name: 'Recent Mass Join Events',
-      value: massJoinText,
-      inline: false
-    });
-  }
-
-  // Recommendations
-  if (report.recommendations.length > 0) {
-    embed.addFields({
-      name: 'Security Recommendations',
-      value: report.recommendations.join('\n'),
-      inline: false
-    });
-  }
-
-  embed.setFooter({ 
-    text: `Report generated • ${report.securityMetrics.highRiskUsers + report.securityMetrics.mediumRiskUsers} potentially risky users identified`,
-    iconURL: guild.iconURL({ dynamic: true })
-  });
-
-  return embed;
+  return components;
 }
 
-// ✅ Behavior Analysis Functions
-async function analyzeBehaviorSummary(user, guild) {
-  const behaviorData = {
-    userInfo: {
-      id: user.id,
-      tag: user.tag,
-      joinedAt: null,
-      accountCreated: user.createdTimestamp
-    },
-    messageStats: {
-      totalMessages: 0,
-      totalLinks: 0,
-      totalMentions: 0,
-      averageMessagesPerDay: 0,
-      peakActivityDay: null,
-      peakActivityCount: 0
-    },
-    activityTimeline: [],
-    suspiciousSpikes: [],
-    dailyActivity: new Map(),
-    analysis: {
-      mostActiveHour: null,
-      mostActiveDay: null,
-      consistencyScore: 0,
-      activityPattern: 'Unknown'
-    }
-  };
+// === XP CONVERSION SYSTEM ===
 
-  try {
-    // Get member information
-    const member = await guild.members.fetch(user.id);
-    behaviorData.userInfo.joinedAt = member.joinedTimestamp;
-
-    // Calculate days since joining
-    const daysSinceJoin = Math.floor((Date.now() - member.joinedTimestamp) / (1000 * 60 * 60 * 24));
-    const startDate = new Date(member.joinedTimestamp);
-
-    // Initialize daily activity tracking
-    for (let i = 0; i <= daysSinceJoin; i++) {
-      const date = new Date(startDate.getTime() + (i * 24 * 60 * 60 * 1000));
-      const dateKey = date.toISOString().split('T')[0];
-      behaviorData.dailyActivity.set(dateKey, {
-        date: dateKey,
-        messages: 0,
-        links: 0,
-        mentions: 0,
-        timestamp: date.getTime()
-      });
-    }
-
-    // Fetch messages from all accessible channels
-    const channels = guild.channels.cache.filter(channel => 
-      channel.type === 0 && // Text channels
-      channel.permissionsFor(guild.members.me).has('ReadMessageHistory')
-    );
-
-    console.log(`Analyzing ${channels.size} channels for user ${user.tag}...`);
-
-    for (const [channelId, channel] of channels) {
-      try {
-        let lastMessageId = null;
-        let channelMessageCount = 0;
-        const maxMessagesPerChannel = 500; // Limit to prevent rate limiting
-
-        while (channelMessageCount < maxMessagesPerChannel) {
-          const options = { limit: 100 };
-          if (lastMessageId) options.before = lastMessageId;
-
-          const messages = await channel.messages.fetch(options);
-          if (messages.size === 0) break;
-
-          const userMessages = messages.filter(msg => 
-            msg.author.id === user.id && 
-            msg.createdTimestamp >= member.joinedTimestamp
-          );
-
-          for (const [msgId, message] of userMessages) {
-            const messageDate = new Date(message.createdTimestamp);
-            const dateKey = messageDate.toISOString().split('T')[0];
-
-            if (behaviorData.dailyActivity.has(dateKey)) {
-              const dayData = behaviorData.dailyActivity.get(dateKey);
-              dayData.messages++;
-
-              // Count links
-              const linkPattern = /(https?:\/\/[^\s]+)/g;
-              const links = (message.content.match(linkPattern) || []).length;
-              dayData.links += links;
-              behaviorData.messageStats.totalLinks += links;
-
-              // Count mentions
-              const mentions = message.mentions.users.size + message.mentions.roles.size + message.mentions.channels.size;
-              dayData.mentions += mentions;
-              behaviorData.messageStats.totalMentions += mentions;
-
-              behaviorData.messageStats.totalMessages++;
-            }
-          }
-
-          channelMessageCount += messages.size;
-          lastMessageId = messages.last()?.id;
-
-          // Stop if we've gone past the join date
-          const oldestMessage = messages.last();
-          if (oldestMessage && oldestMessage.createdTimestamp < member.joinedTimestamp) {
-            break;
-          }
-        }
-      } catch (error) {
-        console.error(`Error fetching messages from channel ${channel.name}:`, error);
-      }
-    }
-
-    // Process daily activity data
-    const activityArray = Array.from(behaviorData.dailyActivity.values())
-      .sort((a, b) => a.timestamp - b.timestamp);
-
-    behaviorData.activityTimeline = activityArray;
-
-    // Calculate statistics
-    if (daysSinceJoin > 0) {
-      behaviorData.messageStats.averageMessagesPerDay = Math.round(
-        behaviorData.messageStats.totalMessages / daysSinceJoin
-      );
-    }
-
-    // Find peak activity day
-    let peakDay = null;
-    let peakCount = 0;
-    for (const dayData of activityArray) {
-      if (dayData.messages > peakCount) {
-        peakCount = dayData.messages;
-        peakDay = dayData.date;
-      }
-    }
-    behaviorData.messageStats.peakActivityDay = peakDay;
-    behaviorData.messageStats.peakActivityCount = peakCount;
-
-    // Detect suspicious activity spikes
-    const averageDaily = behaviorData.messageStats.averageMessagesPerDay;
-    const spikeThreshold = Math.max(10, averageDaily * 3); // 3x average or minimum 10
-
-    for (let i = 0; i < activityArray.length; i++) {
-      const dayData = activityArray[i];
-      if (dayData.messages >= spikeThreshold) {
-        // Check if it's part of a sustained spike
-        let spikeStart = i;
-        let spikeEnd = i;
-
-        // Find start of spike
-        while (spikeStart > 0 && activityArray[spikeStart - 1].messages > averageDaily * 1.5) {
-          spikeStart--;
-        }
-
-        // Find end of spike
-        while (spikeEnd < activityArray.length - 1 && activityArray[spikeEnd + 1].messages > averageDaily * 1.5) {
-          spikeEnd++;
-        }
-
-        const spikeData = {
-          startDate: activityArray[spikeStart].date,
-          endDate: activityArray[spikeEnd].date,
-          peakMessages: dayData.messages,
-          totalMessages: activityArray.slice(spikeStart, spikeEnd + 1)
-            .reduce((sum, day) => sum + day.messages, 0),
-          duration: spikeEnd - spikeStart + 1
-        };
-
-        // Avoid duplicate spikes
-        const existingSpike = behaviorData.suspiciousSpikes.find(spike => 
-          spike.startDate === spikeData.startDate
-        );
-
-        if (!existingSpike) {
-          behaviorData.suspiciousSpikes.push(spikeData);
-        }
-
-        // Skip ahead to avoid overlapping spikes
-        i = spikeEnd;
-      }
-    }
-
-    // Analyse activity patterns
-    const hourlyActivity = new Map();
-    const weeklyActivity = new Map();
-
-    // This would require more detailed timestamp analysis
-    // For now, provide basic pattern analysis
-    const nonZeroDays = activityArray.filter(day => day.messages > 0).length;
-    const consistencyScore = Math.round((nonZeroDays / Math.max(1, daysSinceJoin)) * 100);
-
-    behaviorData.analysis.consistencyScore = consistencyScore;
-
-    if (consistencyScore > 80) {
-      behaviorData.analysis.activityPattern = 'Highly Consistent';
-    } else if (consistencyScore > 60) {
-      behaviorData.analysis.activityPattern = 'Moderately Consistent';
-    } else if (consistencyScore > 30) {
-      behaviorData.analysis.activityPattern = 'Sporadic';
-    } else {
-      behaviorData.analysis.activityPattern = 'Inactive/Lurker';
-    }
-
-  } catch (error) {
-    console.error('Error analysing behaviour summary:', error);
-    throw error;
+async function handleConvertCommand(interaction, userId) {
+  // Initialize user XP data if needed
+  if (!userData[userId].xpData) {
+    userData[userId].xpData = { xp: 0, messageCount: 0, lastMessage: 0 };
   }
 
-  return behaviorData;
-}
+  const userXpData = userData[userId].xpData;
 
-async function createBehaviorSummaryEmbeds(behaviorData, user, guild) {
-  // Generate activity graph data for complete timeline
-  const graphData = generateActivityGraph(behaviorData.activityTimeline);
+  if (userXpData.xp === 0) {
+    const noXpEmbed = new EmbedBuilder()
+      .setTitle('No XP Available')
+      .setDescription('You don\'t have any XP to convert yet.')
+      .addFields(
+        { name: 'Current XP', value: '0 XP', inline: true },
+        { name: 'How to Earn XP', value: 'Participate in conversations! You earn 1 XP for every 2 messages sent during active conversations.', inline: false },
+        { name: 'Anti-Spam Protection', value: 'XP is only awarded when you\'re actively conversing with other users in the same channel.', inline: false }
+      )
+      .setColor(0xFF9F43)
+      .setTimestamp();
 
-  // Single comprehensive behavior summary embed
-  const embed = new EmbedBuilder()
-    .setTitle(`Behaviour Analysis: ${user.tag}`)
-    .setDescription(`Complete activity analysis since joining this server`)
-    .setThumbnail(user.displayAvatarURL({ dynamic: true, size: 256 }))
+    return await interaction.reply({ embeds: [noXpEmbed] });
+  }
+
+  const cashValue = userXpData.xp * 2;
+
+  const convertEmbed = new EmbedBuilder()
+    .setTitle('XP Conversion Available')
+    .setDescription('Would you like to convert your XP into cash?')
+    .addFields(
+      { name: 'Available XP', value: `${userXpData.xp.toLocaleString()} XP`, inline: true },
+      { name: 'Conversion Rate', value: '1 XP = $2', inline: true },
+      { name: 'Cash Value', value: `$${cashValue.toLocaleString()}`, inline: true },
+      { name: 'Current Cash', value: `$${userData[userId].cash.toLocaleString()}`, inline: true },
+      { name: 'Cash After Conversion', value: `$${(userData[userId].cash + cashValue).toLocaleString()}`, inline: true },
+      { name: 'Note', value: 'Converted cash goes directly to your wallet (not bank)', inline: false }
+    )
     .setColor(0x5865F2)
+    .setFooter({ text: 'This action cannot be undone' })
     .setTimestamp();
 
-  // User info section
-  const joinDate = behaviorData.userInfo.joinedAt ? 
-    `<t:${Math.floor(behaviorData.userInfo.joinedAt / 1000)}:D>` : 'Unknown';
-  const daysSinceJoin = behaviorData.userInfo.joinedAt ? 
-    Math.floor((Date.now() - behaviorData.userInfo.joinedAt) / (1000 * 60 * 60 * 24)) : 0;
+  const acceptButton = new ButtonBuilder()
+    .setCustomId(`convert_accept_${userId}`)
+    .setLabel('Accept Conversion')
+    .setStyle(ButtonStyle.Success);
 
-  embed.addFields(
-    { name: 'Joined Server', value: joinDate, inline: true },
-    { name: 'Days Since Join', value: `${daysSinceJoin} days`, inline: true },
-    { name: 'Activity Pattern', value: behaviorData.analysis.activityPattern, inline: true }
-  );
+  const declineButton = new ButtonBuilder()
+    .setCustomId(`convert_decline_${userId}`)
+    .setLabel('Keep XP')
+    .setStyle(ButtonStyle.Secondary);
 
-  // Message statistics
-  embed.addFields(
-    { name: 'Total Messages', value: behaviorData.messageStats.totalMessages.toString(), inline: true },
-    { name: 'Links Shared', value: behaviorData.messageStats.totalLinks.toString(), inline: true },
-    { name: 'Total Mentions', value: behaviorData.messageStats.totalMentions.toString(), inline: true }
-  );
+  const row = new ActionRowBuilder().addComponents(acceptButton, declineButton);
 
-  // Activity metrics
-  embed.addFields(
-    { name: 'Avg Messages/Day', value: behaviorData.messageStats.averageMessagesPerDay.toString(), inline: true },
-    { name: 'Peak Activity Day', value: `${behaviorData.messageStats.peakActivityCount} messages`, inline: true },
-    { name: 'Consistency Score', value: `${behaviorData.analysis.consistencyScore}%`, inline: true }
-  );
-
-  // Complete activity timeline graph
-  if (graphData.length > 0) {
-    const timelineTitle = daysSinceJoin <= 30 ? 
-      `Activity Timeline (${daysSinceJoin} days)` : 
-      `Activity Timeline (${daysSinceJoin} days - Showing pattern)`;
-
-    embed.addFields({
-      name: `📈 ${timelineTitle}`,
-      value: `\`\`\`\n${graphData}\n\`\`\``,
-      inline: false
-    });
-  }
-
-  // Suspicious activity spikes (if any)
-  if (behaviorData.suspiciousSpikes.length > 0) {
-    const spikesText = behaviorData.suspiciousSpikes.slice(0, 3).map(spike => {
-      const duration = spike.duration === 1 ? '1 day' : `${spike.duration} days`;
-      return `${spike.startDate} to ${spike.endDate}: ${spike.totalMessages} messages over ${duration}`;
-    }).join('\n');
-
-    embed.addFields({
-      name: `Suspicious Activity Spikes`,
-      value: spikesText,
-      inline: false
-    });
-  }
-
-  return [embed];
+  await interaction.reply({ embeds: [convertEmbed], components: [row] });
 }
 
-function generateActivityGraph(timeline) {
-  if (timeline.length === 0) return 'No activity data available';
+async function handleMiningStatusCommand(interaction) {
+  await checkAndHandleEvents(); // Ensure events are up to date
 
-  let dataToGraph = timeline;
+  const eventData = await getEventSystem();
+  const event = eventData.currentEvent;
+  const nextEventTime = eventData.nextEventTime;
+  const now = Date.now();
 
-  // If timeline is very long, sample it to fit in Discord embed
-  if (timeline.length > 60) {
-    // Sample every nth day to fit approximately 60 points
-    const step = Math.ceil(timeline.length / 60);
-    dataToGraph = timeline.filter((_, index) => index % step === 0);
+  if (event) {
+    // Active event
+    const timeLeft = event.endTime - now;
+    const hoursLeft = Math.floor(timeLeft / (60 * 60 * 1000));
+    const minutesLeft = Math.floor((timeLeft % (60 * 60 * 1000)) / (60 * 1000));
+
+    const eventEmbed = new EmbedBuilder()
+      .setTitle('ACTIVE MINING EVENT')
+      .setDescription('**A mining crisis is currently affecting exploration operations!**')
+      .addFields(
+        { 
+          name: 'Collapsed Mine', 
+          value: `**${event.negativeArtefact}** mine is currently **CLOSED** due to structural collapse`, 
+          inline: false 
+        },
+        { 
+          name: 'Expanded Mine', 
+          value: `**${event.positiveArtefact}** mine has **DOUBLED** discovery rates due to geological expansion`, 
+          inline: false 
+        },
+        { 
+          name: 'Time Remaining', 
+          value: `**${hoursLeft}h ${minutesLeft}m** until mines return to normal`, 
+          inline: true 
+        },
+        { 
+          name: 'Scavenging Impact', 
+          value: `• **${event.negativeArtefact}**: Cannot be found\n• **${event.positiveArtefact}**: 2x discovery chance\n• All other artefacts: Normal rates`, 
+          inline: false 
+        }
+      )
+      .setColor(0xFF4500)
+      .setFooter({ text: 'Take advantage of the expanded mine while you can!' })
+      .setTimestamp();
+
+    await interaction.reply({ embeds: [eventEmbed] });
+
+  } else {
+    // No active event
+    const timeUntilNext = nextEventTime - now;
+    const daysUntilNext = Math.floor(timeUntilNext / (24 * 60 * 60 * 1000));
+    const hoursUntilNext = Math.floor((timeUntilNext % (24 * 60 * 60 * 1000)) / (60 * 60 * 1000));
+
+    const statusEmbed = new EmbedBuilder()
+      .setTitle('MINING OPERATIONS STATUS')
+      .setDescription('**All mining sectors are operating under normal conditions**')
+      .addFields(
+        { 
+          name: '🏭 Mine Status', 
+          value: 'All artefact mines are **OPERATIONAL** and accessible for exploration', 
+          inline: false 
+        },
+        { 
+          name: 'Discovery Rates', 
+          value: 'Standard scavenging probabilities are in effect across all sectors', 
+          inline: false 
+        },
+        { 
+          name: 'Next Event', 
+          value: `Expected mining event in **${daysUntilNext}d ${hoursUntilNext}h**`, 
+          inline: true 
+        },
+        { 
+          name: 'Current Scavenging', 
+          value: 'All artefacts available at normal discovery rates', 
+          inline: false 
+        }
+      )
+      .setColor(0x00FF7F)
+      .setFooter({ text: 'Fortune Bot Mining Authority • Real-time status monitoring' })
+      .setTimestamp();
+
+    await interaction.reply({ embeds: [statusEmbed] });
+  }
+}
+
+// === DEVELOPER COMMAND HANDLERS ===
+
+async function handleGiveArtefactCommand(interaction) {
+  // Check developer permissions
+  if (!isDeveloper(interaction.user.id)) {
+    const accessDeniedEmbed = new EmbedBuilder()
+      .setTitle('Access Denied')
+      .setDescription('This command is restricted to developers only.')
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+
+    return await interaction.reply({ embeds: [accessDeniedEmbed], ephemeral: true });
   }
 
-  if (dataToGraph.length === 0) return 'No activity data available';
+  const targetUser = interaction.options.getUser('user');
+  const artefactName = interaction.options.getString('artefact');
+  const targetId = targetUser.id;
 
-  const maxMessages = Math.max(...dataToGraph.map(day => day.messages));
-  if (maxMessages === 0) return 'No messages found in timeline';
+  // Initialize target user if needed
+  if (!userData[targetId]) userData[targetId] = { cash: 0, artefacts: [], bankBalance: 0 };
 
-  // Create a simple text-based graph
-  const graphLines = [];
-  const graphHeight = 8; // Number of rows in graph
+  // Validate artefact exists
+  const rarity = getRarityByArtefact(artefactName);
+  if (!rarity) {
+    const invalidArtefactEmbed = new EmbedBuilder()
+      .setTitle('Invalid Artefact')
+      .setDescription(`"${artefactName}" is not a valid artefact name.`)
+      .addFields({
+        name: 'Valid Artefacts',
+        value: rarities.map(r => r.items.join(', ')).join('\n'),
+        inline: false
+      })
+      .setColor(0xFF6B6B)
+      .setTimestamp();
 
-  // Create graph rows from top to bottom
-  for (let row = graphHeight; row >= 0; row--) {
-    let line = '';
-    const threshold = (row / graphHeight) * maxMessages;
+    return await interaction.reply({ embeds: [invalidArtefactEmbed], ephemeral: true });
+  }
 
-    for (const day of dataToGraph) {
-      if (day.messages >= threshold && day.messages > 0) {
-        line += '█';
-      } else if (day.messages >= threshold * 0.7 && day.messages > 0) {
-        line += '▓';
-      } else if (day.messages >= threshold * 0.3 && day.messages > 0) {
-        line += '▒';
-      } else if (day.messages > 0) {
-        line += '░';
-      } else {
-        line += ' ';
+  // Give artefact to user
+  userData[targetId].artefacts.push(artefactName);
+  await saveUserData();
+
+  const successEmbed = new EmbedBuilder()
+    .setTitle('Artefact Given')
+    .setDescription(`Successfully gave **${artefactName}** to ${targetUser.displayName}!`)
+    .addFields(
+      { name: 'Recipient', value: `<@${targetId}>`, inline: true },
+      { name: 'Artefact', value: artefactName, inline: true },
+      { name: 'Rarity', value: rarity.name, inline: true },
+      { name: 'Value', value: `$${rarity.value.toLocaleString()}`, inline: true },
+      { name: 'Developer', value: `<@${interaction.user.id}>`, inline: true }
+    )
+    .setColor(rarity.color)
+    .setFooter({ text: 'Developer Command Executed' })
+    .setTimestamp();
+
+  await interaction.reply({ embeds: [successEmbed] });
+}
+
+async function handleGiveCashCommand(interaction) {
+  // Check developer permissions
+  if (!isDeveloper(interaction.user.id)) {
+    const accessDeniedEmbed = new EmbedBuilder()
+      .setTitle('Access Denied')
+      .setDescription('This command is restricted to developers only.')
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+
+    return await interaction.reply({ embeds: [accessDeniedEmbed], ephemeral: true });
+  }
+
+  const targetUser = interaction.options.getUser('user');
+  const amount = interaction.options.getInteger('amount');
+  const targetId = targetUser.id;
+
+  // Initialize target user if needed
+  if (!userData[targetId]) userData[targetId] = { cash: 0, artefacts: [], bankBalance: 0 };
+
+  // Give cash to user
+  userData[targetId].cash += amount;
+  await saveUserData();
+
+  const successEmbed = new EmbedBuilder()
+    .setTitle('Cash Given')
+    .setDescription(`Successfully gave **$${amount.toLocaleString()}** to ${targetUser.displayName}!`)
+    .addFields(
+      { name: 'Recipient', value: `<@${targetId}>`, inline: true },
+      { name: 'Amount Given', value: `$${amount.toLocaleString()}`, inline: true },
+      { name: 'New Cash Total', value: `$${userData[targetId].cash.toLocaleString()}`, inline: true },
+      { name: 'Developer', value: `<@${interaction.user.id}>`, inline: true }
+    )
+    .setColor(0x00FF7F)
+    .setFooter({ text: 'Developer Command Executed' })
+    .setTimestamp();
+
+  await interaction.reply({ embeds: [successEmbed] });
+}
+
+async function handleSetEventCommand(interaction) {
+  // Check developer permissions
+  if (!isDeveloper(interaction.user.id)) {
+    const accessDeniedEmbed = new EmbedBuilder()
+      .setTitle('Access Denied')
+      .setDescription('This command is restricted to developers only.')
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+
+    return await interaction.reply({ embeds: [accessDeniedEmbed], ephemeral: true });
+  }
+
+  const positiveArtefact = interaction.options.getString('positive_artefact');
+  const negativeArtefact = interaction.options.getString('negative_artefact');
+
+  // Validate artefacts exist
+  const positiveRarity = getRarityByArtefact(positiveArtefact);
+  const negativeRarity = getRarityByArtefact(negativeArtefact);
+
+  if (!positiveRarity || !negativeRarity) {
+    const invalidEmbed = new EmbedBuilder()
+      .setTitle('Invalid Artefact Names')
+      .setDescription('One or both artefact names are invalid.')
+      .addFields({
+        name: 'Valid Artefacts',
+        value: rarities.map(r => r.items.join(', ')).join('\n'),
+        inline: false
+      })
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+
+    return await interaction.reply({ embeds: [invalidEmbed], ephemeral: true });
+  }
+
+  if (positiveArtefact === negativeArtefact) {
+    const sameArtefactEmbed = new EmbedBuilder()
+      .setTitle('Invalid Event Configuration')
+      .setDescription('Positive and negative artefacts must be different.')
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+
+    return await interaction.reply({ embeds: [sameArtefactEmbed], ephemeral: true });
+  }
+
+  // End current event if one is active
+  const eventData = await getEventSystem();
+  if (eventData && eventData.currentEvent) {
+    await endCurrentEvent();
+  }
+
+  // Create new event
+  const now = Date.now();
+  const newEvent = {
+    id: `dev_event_${now}`,
+    startTime: now,
+    endTime: now + (24 * 60 * 60 * 1000), // 24 hours
+    negativeArtefact,
+    positiveArtefact,
+    type: 'developer_triggered'
+  };
+
+  const updatedEventData = {
+    currentEvent: newEvent,
+    lastEventStart: now,
+    nextEventTime: now + (4 * 24 * 60 * 60 * 1000), // Next event in 4 days
+    eventHistory: [newEvent, ...(eventData?.eventHistory || [])].slice(0, 10)
+  };
+
+  await saveEventSystem(updatedEventData);
+
+  const eventEmbed = new EmbedBuilder()
+    .setTitle('Developer Event Triggered')
+    .setDescription(`**Mining event manually initiated by ${interaction.user.displayName}!**`)
+    .addFields(
+      { 
+        name: 'Mine Collapse', 
+        value: `**${negativeArtefact}** mine has been forcibly closed`, 
+        inline: false 
+      },
+      { 
+        name: 'Mine Expansion', 
+        value: `**${positiveArtefact}** mine has been expanded (2x discovery rate)`, 
+        inline: false 
+      },
+      { 
+        name: 'Event Duration', 
+        value: '24 hours', 
+        inline: true 
+      },
+      { 
+        name: 'Effect', 
+        value: `• **${negativeArtefact}**: Cannot be found\n• **${positiveArtefact}**: 2x discovery chance`, 
+        inline: false 
+      },
+      { 
+        name: 'Developer', 
+        value: `<@${interaction.user.id}>`, 
+        inline: true 
       }
-    }
+    )
+    .setColor(0x9932CC)
+    .setFooter({ text: 'Developer Command Executed • Event Active for 24 hours' })
+    .setTimestamp();
 
-    // Add y-axis label
-    const label = Math.round(threshold).toString().padStart(3, ' ');
-    graphLines.push(`${label}│${line}`);
-  }
+  await interaction.reply({ embeds: [eventEmbed] });
 
-  // Add x-axis
-  const xAxis = '   └' + '─'.repeat(dataToGraph.length);
-  graphLines.push(xAxis);
-
-  // Add date labels for start and end
-  if (dataToGraph.length >= 2) {
-    const firstDate = dataToGraph[0].date.split('-').slice(1).join('/');
-    const lastDate = dataToGraph[dataToGraph.length - 1].date.split('-').slice(1).join('/');
-    const spacing = ' '.repeat(Math.max(0, dataToGraph.length - firstDate.length - lastDate.length));
-    graphLines.push(`    ${firstDate}${spacing}${lastDate}`);
-  }
-
-  // Add summary line
-  const totalDays = timeline.length;
-  const totalMessages = timeline.reduce((sum, day) => sum + day.messages, 0);
-  graphLines.push(`    Total: ${totalMessages} messages over ${totalDays} days`);
-
-  return graphLines.join('\n');
+  // Broadcast the event start
+  await broadcastEventStart(newEvent);
 }
 
-client.login(process.env.TOKEN);
+async function handleRemoveArtefactCommand(interaction) {
+  // Check developer permissions
+  if (!isDeveloper(interaction.user.id)) {
+    const accessDeniedEmbed = new EmbedBuilder()
+      .setTitle('Access Denied')
+      .setDescription('This command is restricted to developers only.')
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+
+    return await interaction.reply({ embeds: [accessDeniedEmbed], ephemeral: true });
+  }
+
+  const targetUser = interaction.options.getUser('user');
+  const artefactName = interaction.options.getString('artefact');
+  const targetId = targetUser.id;
+
+  // Initialize target user if needed
+  if (!userData[targetId]) userData[targetId] = { cash: 0, artefacts: [], bankBalance: 0 };
+
+  // Check if user has the artefact
+  const artefactIndex = userData[targetId].artefacts.findIndex(item => item === artefactName);
+  if (artefactIndex === -1) {
+    const notFoundEmbed = new EmbedBuilder()
+      .setTitle('Artefact Not Found')
+      .setDescription(`${targetUser.displayName} does not have an artefact named "${artefactName}".`)
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+
+    return await interaction.reply({ embeds: [notFoundEmbed], ephemeral: true });
+  }
+
+  const rarity = getRarityByArtefact(artefactName);
+
+  // Remove artefact from user
+  userData[targetId].artefacts.splice(artefactIndex, 1);
+  await saveUserData();
+
+  const successEmbed = new EmbedBuilder()
+    .setTitle('Artefact Removed')
+    .setDescription(`Successfully removed **${artefactName}** from ${targetUser.displayName}!`)
+    .addFields(
+      { name: 'Target User', value: `<@${targetId}>`, inline: true },
+      { name: 'Artefact', value: artefactName, inline: true },
+      { name: 'Rarity', value: rarity ? rarity.name : 'Unknown', inline: true },
+      { name: 'Value', value: rarity ? `$${rarity.value.toLocaleString()}` : 'Unknown', inline: true },
+      { name: 'Developer', value: `<@${interaction.user.id}>`, inline: true }
+    )
+    .setColor(0xFF6B6B)
+    .setFooter({ text: 'Developer Command Executed' })
+    .setTimestamp();
+
+  await interaction.reply({ embeds: [successEmbed] });
+}
+
+async function handleRemoveCashCommand(interaction) {
+  // Check developer permissions
+  if (!isDeveloper(interaction.user.id)) {
+    const accessDeniedEmbed = new EmbedBuilder()
+      .setTitle('Access Denied')
+      .setDescription('This command is restricted to developers only.')
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+
+    return await interaction.reply({ embeds: [accessDeniedEmbed], ephemeral: true });
+  }
+
+  const targetUser = interaction.options.getUser('user');
+  const amount = interaction.options.getInteger('amount');
+  const targetId = targetUser.id;
+
+  // Initialize target user if needed
+  if (!userData[targetId]) userData[targetId] = { cash: 0, artefacts: [], bankBalance: 0 };
+
+  const totalWealth = userData[targetId].cash + (userData[targetId].bankBalance || 0);
+
+  // Check if user has enough total money (cash + bank)
+  if (totalWealth < amount) {
+    const insufficientEmbed = new EmbedBuilder()
+      .setTitle('Insufficient Funds')
+      .setDescription(`${targetUser.displayName} only has $${totalWealth.toLocaleString()} total wealth, cannot remove $${amount.toLocaleString()}.`)
+      .addFields(
+        { name: 'Available Cash', value: `$${userData[targetId].cash.toLocaleString()}`, inline: true },
+        { name: 'Bank Balance', value: `$${(userData[targetId].bankBalance || 0).toLocaleString()}`, inline: true },
+        { name: 'Total Wealth', value: `$${totalWealth.toLocaleString()}`, inline: true }
+      )
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+
+    return await interaction.reply({ embeds: [insufficientEmbed], ephemeral: true });
+  }
+
+  let remainingToRemove = amount;
+  let removedFromCash = 0;
+  let removedFromBank = 0;
+
+  // First, remove from cash
+  if (userData[targetId].cash > 0) {
+    removedFromCash = Math.min(userData[targetId].cash, remainingToRemove);
+    userData[targetId].cash -= removedFromCash;
+    remainingToRemove -= removedFromCash;
+  }
+
+  // Then, remove remaining from bank if needed
+  if (remainingToRemove > 0 && userData[targetId].bankBalance > 0) {
+    removedFromBank = Math.min(userData[targetId].bankBalance, remainingToRemove);
+    userData[targetId].bankBalance -= removedFromBank;
+    remainingToRemove -= removedFromBank;
+  }
+
+  await saveUserData();
+
+  const successEmbed = new EmbedBuilder()
+    .setTitle('Cash Removed (Bypassed Bank)')
+    .setDescription(`Successfully removed **$${amount.toLocaleString()}** from ${targetUser.displayName}!`)
+    .addFields(
+      { name: 'Target User', value: `<@${targetId}>`, inline: true },
+      { name: 'Amount Removed', value: `$${amount.toLocaleString()}`, inline: true },
+      { name: 'Removed from Cash', value: `$${removedFromCash.toLocaleString()}`, inline: true },
+      { name: 'Removed from Bank', value: `$${removedFromBank.toLocaleString()}`, inline: true },
+      { name: 'New Cash Total', value: `$${userData[targetId].cash.toLocaleString()}`, inline: true },
+      { name: 'New Bank Balance', value: `$${(userData[targetId].bankBalance || 0).toLocaleString()}`, inline: true },
+      { name: 'Developer', value: `<@${interaction.user.id}>`, inline: false }
+    )
+    .setColor(0xFF6B6B)
+    .setFooter({ text: 'Developer Command Executed • Bank Protection Bypassed' })
+    .setTimestamp();
+
+  await interaction.reply({ embeds: [successEmbed] });
+}
+
+async function handleResetCooldownsCommand(interaction) {
+  // Check developer permissions
+  if (!isDeveloper(interaction.user.id)) {
+    const accessDeniedEmbed = new EmbedBuilder()
+      .setTitle('Access Denied')
+      .setDescription('This command is restricted to developers only.')
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+
+    return await interaction.editReply({ embeds: [accessDeniedEmbed] });
+  }
+
+  const targetUser = interaction.options.getUser('user');
+
+  if (targetUser) {
+    // Reset cooldowns for specific user
+    const userId = targetUser.id;
+
+    // Clear all cooldowns for this user (safe deletion from objects)
+    if (cooldowns.scavenge && cooldowns.scavenge[userId]) delete cooldowns.scavenge[userId];
+    if (cooldowns.labor && cooldowns.labor[userId]) delete cooldowns.labor[userId];
+    if (cooldowns.steal && cooldowns.steal[userId]) delete cooldowns.steal[userId];
+
+    await saveCooldowns();
+
+    const successEmbed = new EmbedBuilder()
+      .setTitle('Cooldowns Reset')
+      .setDescription(`Successfully reset all cooldowns for ${targetUser.displayName}!`)
+      .addFields(
+        { name: 'Target User', value: `<@${userId}>`, inline: true },
+        { name: 'Cooldowns Reset', value: 'Scavenge, Labor, Steal', inline: true },
+        { name: 'Developer', value: `<@${interaction.user.id}>`, inline: true }
+      )
+      .setColor(0x51CF66)
+      .setFooter({ text: 'Developer Command Executed' })
+      .setTimestamp();
+
+    await interaction.editReply({ embeds: [successEmbed] });
+  } else {
+    // Reset cooldowns for ALL users globally
+    cooldowns.scavenge = {};
+    cooldowns.labor = {};
+    cooldowns.steal = {};
+
+    await saveCooldowns();
+
+    const successEmbed = new EmbedBuilder()
+      .setTitle('Global Cooldown Reset')
+      .setDescription('Successfully reset ALL cooldowns for ALL users globally!')
+      .addFields(
+        { name: 'Scope', value: 'All Users Worldwide', inline: true },
+        { name: 'Cooldowns Reset', value: 'Scavenge, Labor, Steal', inline: true },
+        { name: 'Developer', value: `<@${interaction.user.id}>`, inline: true }
+      )
+      .setColor(0x51CF66)
+      .setFooter({ text: 'Developer Command Executed' })
+      .setTimestamp();
+
+    await interaction.editReply({ embeds: [successEmbed] });
+  }
+}
+
+client.login(token);[]
