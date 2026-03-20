@@ -105,6 +105,7 @@ global.tempItems = {};
 global.activeTrades = {};
 global.activeMarbleGames = {};
 global.messageTracker = {};
+global.giveArtefactSessions = {};
 
 // Graceful shutdown handler for Railway deployment
 async function gracefulShutdown(signal) {
@@ -830,21 +831,11 @@ client.once('clientReady', async () => {
   const devCommands = [
     new SlashCommandBuilder()
       .setName('give-artefact')
-      .setDescription('Give an artefact to a user (Developer only)')
+      .setDescription('Open an interactive menu to give artefacts to a user (Developer only)')
       .addUserOption(option =>
         option.setName('user')
-          .setDescription('User to give artefact to')
-          .setRequired(true))
-      .addStringOption(option =>
-        option.setName('artefact')
-          .setDescription('Name of the artefact to give')
-          .setRequired(true))
-      .addIntegerOption(option =>
-        option.setName('amount')
-          .setDescription('How many copies to give (default: 1)')
-          .setRequired(false)
-          .setMinValue(1)
-          .setMaxValue(100)),
+          .setDescription('User to give artefacts to')
+          .setRequired(true)),
 
     new SlashCommandBuilder()
       .setName('give-cash')
@@ -996,6 +987,36 @@ client.on('interactionCreate', async interaction => {
     if (customId.startsWith('number_modal_')) {
       const gameId = customId.replace('number_modal_', '');
       await processNumberGuess(interaction, gameId);
+      return;
+    }
+
+    if (customId.startsWith('ga_amount_modal_')) {
+      const sessionId = customId.replace('ga_amount_modal_', '');
+      const session = global.giveArtefactSessions[sessionId];
+
+      if (!session) {
+        return await interaction.reply({ content: 'This session has expired.', ephemeral: true });
+      }
+
+      const rawAmount = interaction.fields.getTextInputValue('ga_amount_input');
+      const amount = parseInt(rawAmount);
+
+      if (isNaN(amount) || amount < 1 || amount > 1000) {
+        return await interaction.reply({ content: 'Please enter a valid number between 1 and 1000.', ephemeral: true });
+      }
+
+      const existing = session.queue.find(e => e.name === session.selectedArtefact);
+      if (existing) {
+        existing.amount += amount;
+      } else {
+        session.queue.push({ name: session.selectedArtefact, amount });
+      }
+
+      await interaction.deferUpdate();
+      await session.message.edit({
+        embeds: [buildGiveArtefactEmbed(session)],
+        components: buildGiveArtefactComponents(sessionId, session)
+      });
       return;
     }
   }
@@ -3750,58 +3771,205 @@ async function handleMiningStatusCommand(interaction) {
 
 // === DEVELOPER COMMAND HANDLERS ===
 
+function buildGiveArtefactEmbed(session) {
+  const queueText = session.queue.length
+    ? session.queue.map(e => {
+        const rarity = getRarityByArtefact(e.name);
+        return `${e.name} x${e.amount} — ${rarity ? rarity.name : 'Unknown'} ($${(rarity ? rarity.sell * e.amount : 0).toLocaleString()} total)`;
+      }).join('\n')
+    : 'Nothing queued yet — select an artefact and add it below.';
+
+  const totalItems = session.queue.reduce((s, e) => s + e.amount, 0);
+
+  return new EmbedBuilder()
+    .setTitle(`Give Artefacts to ${session.targetDisplayName}`)
+    .setDescription('Select an artefact from the dropdown, then use the buttons to queue it. Confirm when your list is ready.')
+    .addFields(
+      { name: 'Currently Selected', value: session.selectedArtefact || 'None — pick from the dropdown below', inline: false },
+      { name: `Queue (${totalItems} artefact${totalItems !== 1 ? 's' : ''})`, value: queueText, inline: false }
+    )
+    .setColor(session.queue.length > 0 ? 0x51CF66 : 0x339AF0)
+    .setFooter({ text: 'Session expires in 5 minutes' })
+    .setTimestamp();
+}
+
+function buildGiveArtefactComponents(sessionId, session) {
+  const allArtefacts = rarities.flatMap(r => r.items.map(item => ({ item, rarity: r })));
+  const selectOptions = allArtefacts.map(({ item, rarity }) => ({
+    label: item,
+    description: `${rarity.name} — $${rarity.sell.toLocaleString()} sell value`,
+    value: item,
+    default: session.selectedArtefact === item
+  }));
+
+  const selectRow = new ActionRowBuilder().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId(`ga_select_${sessionId}`)
+      .setPlaceholder('Select an artefact to queue')
+      .addOptions(selectOptions)
+  );
+
+  const hasSelection = !!session.selectedArtefact;
+  const hasQueue = session.queue.length > 0;
+  const totalItems = session.queue.reduce((s, e) => s + e.amount, 0);
+
+  const buttonRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`ga_add_one_${sessionId}`)
+      .setLabel('Add x1')
+      .setStyle(ButtonStyle.Primary)
+      .setDisabled(!hasSelection),
+    new ButtonBuilder()
+      .setCustomId(`ga_add_custom_${sessionId}`)
+      .setLabel('Add Custom Amount')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(!hasSelection),
+    new ButtonBuilder()
+      .setCustomId(`ga_clear_queue_${sessionId}`)
+      .setLabel('Clear Queue')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(!hasQueue),
+    new ButtonBuilder()
+      .setCustomId(`ga_confirm_${sessionId}`)
+      .setLabel(`Confirm Give (${totalItems})`)
+      .setStyle(ButtonStyle.Success)
+      .setDisabled(!hasQueue),
+    new ButtonBuilder()
+      .setCustomId(`ga_cancel_${sessionId}`)
+      .setLabel('Cancel')
+      .setStyle(ButtonStyle.Danger)
+  );
+
+  return [selectRow, buttonRow];
+}
+
 async function handleGiveArtefactCommand(interaction) {
   if (!isDeveloper(interaction.user.id)) {
-    const accessDeniedEmbed = new EmbedBuilder()
-      .setTitle('Access Denied')
-      .setDescription('This command is restricted to developers only.')
-      .setColor(0xFF6B6B)
-      .setTimestamp();
-    return await interaction.reply({ embeds: [accessDeniedEmbed], ephemeral: true });
+    return await interaction.reply({
+      embeds: [new EmbedBuilder().setTitle('Access Denied').setDescription('This command is restricted to developers only.').setColor(0xFF6B6B).setTimestamp()],
+      ephemeral: true
+    });
   }
 
   const targetUser = interaction.options.getUser('user');
-  const artefactName = interaction.options.getString('artefact');
-  const amount = interaction.options.getInteger('amount') ?? 1;
   const targetId = targetUser.id;
 
-  const rarity = getRarityByArtefact(artefactName);
-  if (!rarity) {
-    const invalidArtefactEmbed = new EmbedBuilder()
-      .setTitle('Invalid Artefact')
-      .setDescription(`"${artefactName}" is not a valid artefact name.`)
-      .addFields({
-        name: 'Valid Artefacts',
-        value: rarities.map(r => r.items.join(', ')).join('\n'),
-        inline: false
-      })
-      .setColor(0xFF6B6B)
-      .setTimestamp();
-    return await interaction.reply({ embeds: [invalidArtefactEmbed], ephemeral: true });
-  }
+  await getUser(targetId);
 
-  const target = await getUser(targetId);
-  for (let i = 0; i < amount; i++) {
-    target.artefacts.push(artefactName);
-  }
-  await saveUser(targetId);
+  const sessionId = `${interaction.user.id}_${Date.now()}`;
+  const session = {
+    userId: interaction.user.id,
+    targetId,
+    targetDisplayName: targetUser.displayName,
+    selectedArtefact: null,
+    queue: [],
+    message: null
+  };
 
-  const successEmbed = new EmbedBuilder()
-    .setTitle('Artefact Given')
-    .setDescription(`Successfully gave **${amount}x ${artefactName}** to ${targetUser.displayName}!`)
-    .addFields(
-      { name: 'Recipient', value: `<@${targetId}>`, inline: true },
-      { name: 'Artefact', value: artefactName, inline: true },
-      { name: 'Amount', value: amount.toString(), inline: true },
-      { name: 'Rarity', value: rarity.name, inline: true },
-      { name: 'Sell Value Each', value: `$${rarity.sell.toLocaleString()}`, inline: true },
-      { name: 'Developer', value: `<@${interaction.user.id}>`, inline: true }
-    )
-    .setColor(rarity.color)
-    .setFooter({ text: 'Developer Command Executed' })
-    .setTimestamp();
+  global.giveArtefactSessions[sessionId] = session;
 
-  await interaction.reply({ embeds: [successEmbed] });
+  const reply = await interaction.reply({
+    embeds: [buildGiveArtefactEmbed(session)],
+    components: buildGiveArtefactComponents(sessionId, session),
+    fetchReply: true
+  });
+
+  session.message = reply;
+
+  const collector = reply.createMessageComponentCollector({
+    filter: i => i.user.id === interaction.user.id,
+    time: 300000
+  });
+
+  collector.on('collect', async i => {
+    if (i.customId === `ga_select_${sessionId}`) {
+      session.selectedArtefact = i.values[0];
+      await i.update({ embeds: [buildGiveArtefactEmbed(session)], components: buildGiveArtefactComponents(sessionId, session) });
+
+    } else if (i.customId === `ga_add_one_${sessionId}`) {
+      const existing = session.queue.find(e => e.name === session.selectedArtefact);
+      if (existing) {
+        existing.amount++;
+      } else {
+        session.queue.push({ name: session.selectedArtefact, amount: 1 });
+      }
+      await i.update({ embeds: [buildGiveArtefactEmbed(session)], components: buildGiveArtefactComponents(sessionId, session) });
+
+    } else if (i.customId === `ga_add_custom_${sessionId}`) {
+      const modal = new ModalBuilder()
+        .setCustomId(`ga_amount_modal_${sessionId}`)
+        .setTitle(`Amount for ${session.selectedArtefact}`)
+        .addComponents(
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder()
+              .setCustomId('ga_amount_input')
+              .setLabel(`How many ${session.selectedArtefact} to give?`)
+              .setStyle(TextInputStyle.Short)
+              .setPlaceholder('Enter a number (1–1000)')
+              .setMinLength(1)
+              .setMaxLength(4)
+              .setRequired(true)
+          )
+        );
+      await i.showModal(modal);
+
+    } else if (i.customId === `ga_clear_queue_${sessionId}`) {
+      session.queue = [];
+      await i.update({ embeds: [buildGiveArtefactEmbed(session)], components: buildGiveArtefactComponents(sessionId, session) });
+
+    } else if (i.customId === `ga_confirm_${sessionId}`) {
+      const target = await getUser(targetId);
+      let totalGiven = 0;
+      const summaryLines = [];
+
+      for (const entry of session.queue) {
+        for (let j = 0; j < entry.amount; j++) {
+          target.artefacts.push(entry.name);
+        }
+        totalGiven += entry.amount;
+        const rarity = getRarityByArtefact(entry.name);
+        summaryLines.push(`${entry.name} x${entry.amount} (${rarity ? rarity.name : 'Unknown'})`);
+      }
+
+      await saveUser(targetId);
+      collector.stop('confirmed');
+      delete global.giveArtefactSessions[sessionId];
+
+      const successEmbed = new EmbedBuilder()
+        .setTitle('Artefacts Given')
+        .setDescription(`Successfully gave **${totalGiven}** artefact(s) to <@${targetId}>!`)
+        .addFields(
+          { name: 'Items Given', value: summaryLines.join('\n'), inline: false },
+          { name: 'Recipient', value: `<@${targetId}>`, inline: true },
+          { name: 'Given By', value: `<@${interaction.user.id}>`, inline: true }
+        )
+        .setColor(0x51CF66)
+        .setFooter({ text: 'Developer Command Executed' })
+        .setTimestamp();
+
+      await i.update({ embeds: [successEmbed], components: [] });
+
+    } else if (i.customId === `ga_cancel_${sessionId}`) {
+      collector.stop('cancelled');
+      delete global.giveArtefactSessions[sessionId];
+      await i.update({
+        embeds: [new EmbedBuilder().setTitle('Cancelled').setDescription('No artefacts were given.').setColor(0xFF6B6B).setTimestamp()],
+        components: []
+      });
+    }
+  });
+
+  collector.on('end', async (collected, reason) => {
+    if (reason === 'time') {
+      delete global.giveArtefactSessions[sessionId];
+      try {
+        await interaction.editReply({
+          embeds: [new EmbedBuilder().setTitle('Session Expired').setDescription('No artefacts were given.').setColor(0xFF9F43).setTimestamp()],
+          components: []
+        });
+      } catch (e) {}
+    }
+  });
 }
 
 async function handleGiveCashCommand(interaction) {
