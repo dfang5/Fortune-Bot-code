@@ -838,7 +838,13 @@ client.once('clientReady', async () => {
       .addStringOption(option =>
         option.setName('artefact')
           .setDescription('Name of the artefact to give')
-          .setRequired(true)),
+          .setRequired(true))
+      .addIntegerOption(option =>
+        option.setName('amount')
+          .setDescription('How many copies to give (default: 1)')
+          .setRequired(false)
+          .setMinValue(1)
+          .setMaxValue(100)),
 
     new SlashCommandBuilder()
       .setName('give-cash')
@@ -3745,25 +3751,20 @@ async function handleMiningStatusCommand(interaction) {
 // === DEVELOPER COMMAND HANDLERS ===
 
 async function handleGiveArtefactCommand(interaction) {
-  // Check developer permissions
   if (!isDeveloper(interaction.user.id)) {
     const accessDeniedEmbed = new EmbedBuilder()
       .setTitle('Access Denied')
       .setDescription('This command is restricted to developers only.')
       .setColor(0xFF6B6B)
       .setTimestamp();
-
     return await interaction.reply({ embeds: [accessDeniedEmbed], ephemeral: true });
   }
 
   const targetUser = interaction.options.getUser('user');
   const artefactName = interaction.options.getString('artefact');
+  const amount = interaction.options.getInteger('amount') ?? 1;
   const targetId = targetUser.id;
 
-  // Initialize target user if needed
-  if (!userData[targetId]) userData[targetId] = { cash: 0, artefacts: [], bankBalance: 0 };
-
-  // Validate artefact exists
   const rarity = getRarityByArtefact(artefactName);
   if (!rarity) {
     const invalidArtefactEmbed = new EmbedBuilder()
@@ -3776,22 +3777,24 @@ async function handleGiveArtefactCommand(interaction) {
       })
       .setColor(0xFF6B6B)
       .setTimestamp();
-
     return await interaction.reply({ embeds: [invalidArtefactEmbed], ephemeral: true });
   }
 
-  // Give artefact to user
-  userData[targetId].artefacts.push(artefactName);
-  await saveUserData();
+  const target = await getUser(targetId);
+  for (let i = 0; i < amount; i++) {
+    target.artefacts.push(artefactName);
+  }
+  await saveUser(targetId);
 
   const successEmbed = new EmbedBuilder()
     .setTitle('Artefact Given')
-    .setDescription(`Successfully gave **${artefactName}** to ${targetUser.displayName}!`)
+    .setDescription(`Successfully gave **${amount}x ${artefactName}** to ${targetUser.displayName}!`)
     .addFields(
       { name: 'Recipient', value: `<@${targetId}>`, inline: true },
       { name: 'Artefact', value: artefactName, inline: true },
+      { name: 'Amount', value: amount.toString(), inline: true },
       { name: 'Rarity', value: rarity.name, inline: true },
-      { name: 'Value', value: `$${rarity.value.toLocaleString()}`, inline: true },
+      { name: 'Sell Value Each', value: `$${rarity.sell.toLocaleString()}`, inline: true },
       { name: 'Developer', value: `<@${interaction.user.id}>`, inline: true }
     )
     .setColor(rarity.color)
