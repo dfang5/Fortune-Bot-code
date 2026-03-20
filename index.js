@@ -105,7 +105,6 @@ global.tempItems = {};
 global.activeTrades = {};
 global.activeMarbleGames = {};
 global.messageTracker = {};
-global.massSellSessions = {};
 
 // Graceful shutdown handler for Railway deployment
 async function gracefulShutdown(signal) {
@@ -763,19 +762,7 @@ client.once('clientReady', async () => {
 
     new SlashCommandBuilder()
       .setName('mass-sell')
-      .setDescription('Sell multiple artefacts at once')
-      .addStringOption(option =>
-        option.setName('rarity')
-          .setDescription('Sell all artefacts of a specific rarity')
-          .setRequired(false)
-          .addChoices(
-            { name: 'Common', value: 'Common' },
-            { name: 'Uncommon', value: 'Uncommon' },
-            { name: 'Rare', value: 'Rare' },
-            { name: 'Legendary', value: 'Legendary' },
-            { name: 'Unknown', value: 'Unknown' },
-            { name: 'All', value: 'All' }
-          )),
+      .setDescription('Open an interactive menu to select and sell artefacts from your inventory'),
 
     new SlashCommandBuilder()
       .setName('add-item')
@@ -2011,63 +1998,201 @@ async function handleBuyCommand(interaction, userId) {
 // New command handlers
 async function handleMassSellCommand(interaction, userId) {
   const user = await getUser(userId);
-  const rarityFilter = interaction.options.getString('rarity') || 'All';
 
-  if (!user.artefacts.length) {
+  if (!user.artefacts || !user.artefacts.length) {
     const noArtefactsEmbed = new EmbedBuilder()
       .setTitle('No Artefacts to Sell')
       .setDescription('You need to find some artefacts first before you can sell them.')
       .setColor(0xFF6B6B)
       .setTimestamp();
-
     return await interaction.reply({ embeds: [noArtefactsEmbed] });
   }
 
-  let totalValue = 0;
-  let soldCount = 0;
-  const remainingArtefacts = [];
-  const soldArtefacts = [];
+  const selectedIndices = new Set();
 
-  user.artefacts.forEach(artefactName => {
-    const isShiny = artefactName.startsWith('✨ SHINY ') && artefactName.endsWith(' ✨');
-    const baseName = isShiny ? artefactName.replace('✨ SHINY ', '').replace(' ✨', '') : artefactName;
+  function getArtefactSellValue(name) {
+    const isShiny = name.startsWith('✨ SHINY ') && name.endsWith(' ✨');
+    const baseName = isShiny ? name.replace('✨ SHINY ', '').replace(' ✨', '') : name;
     const rarity = getRarityByArtefact(baseName);
-    
-    if (rarityFilter === 'All' || (rarity && rarity.name === rarityFilter)) {
-      let sellValue = rarity ? rarity.sell : 100;
-      if (isShiny) sellValue *= 20;
-      totalValue += sellValue;
-      soldCount++;
-      soldArtefacts.push(artefactName);
-    } else {
-      remainingArtefacts.push(artefactName);
+    const sell = rarity ? rarity.sell : 100;
+    return { isShiny, baseName, rarity, finalValue: isShiny ? sell * 20 : sell };
+  }
+
+  function buildEmbed() {
+    const selectedList = [...selectedIndices].map(i => {
+      const name = user.artefacts[i];
+      const { rarity, finalValue } = getArtefactSellValue(name);
+      return `${name} - $${finalValue.toLocaleString()} (${rarity ? rarity.name : 'Unknown'})`;
+    });
+
+    const totalValue = [...selectedIndices].reduce((sum, i) => {
+      const { finalValue } = getArtefactSellValue(user.artefacts[i]);
+      return sum + finalValue;
+    }, 0);
+
+    const selectedText = selectedList.length
+      ? selectedList.join('\n').slice(0, 1020)
+      : 'Nothing selected yet — use the menu below to add artefacts.';
+
+    return new EmbedBuilder()
+      .setTitle('Mass Sell — Select Artefacts')
+      .setDescription('Add artefacts using the top menu. Remove them with the bottom menu. Click Confirm to finalise the sale.')
+      .addFields(
+        { name: `Selected for Sale (${selectedIndices.size})`, value: selectedText, inline: false },
+        { name: 'Total Sell Value', value: `$${totalValue.toLocaleString()}`, inline: true },
+        { name: 'Artefacts in Inventory', value: user.artefacts.length.toString(), inline: true }
+      )
+      .setColor(selectedIndices.size > 0 ? 0x51CF66 : 0x339AF0)
+      .setFooter({ text: 'Session expires in 5 minutes' })
+      .setTimestamp();
+  }
+
+  function buildComponents() {
+    const rows = [];
+
+    const available = user.artefacts
+      .map((name, i) => ({ name, i }))
+      .filter(({ i }) => !selectedIndices.has(i));
+
+    if (available.length > 0) {
+      const addOptions = available.slice(0, 25).map(({ name, i }) => {
+        const { rarity, finalValue } = getArtefactSellValue(name);
+        return {
+          label: name.length > 100 ? name.slice(0, 97) + '...' : name,
+          description: `${rarity ? rarity.name : 'Unknown'} — Sell for $${finalValue.toLocaleString()}`,
+          value: i.toString()
+        };
+      });
+      rows.push(new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+          .setCustomId('ms_add')
+          .setPlaceholder(`Add artefact to sale (${available.length} available)`)
+          .addOptions(addOptions)
+      ));
+    }
+
+    if (selectedIndices.size > 0) {
+      const removeOptions = [...selectedIndices].slice(0, 25).map(i => {
+        const name = user.artefacts[i];
+        const { rarity, finalValue } = getArtefactSellValue(name);
+        return {
+          label: name.length > 100 ? name.slice(0, 97) + '...' : name,
+          description: `${rarity ? rarity.name : 'Unknown'} — $${finalValue.toLocaleString()} — Click to remove`,
+          value: i.toString()
+        };
+      });
+      rows.push(new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+          .setCustomId('ms_remove')
+          .setPlaceholder(`Remove artefact from selection (${selectedIndices.size} selected)`)
+          .addOptions(removeOptions)
+      ));
+    }
+
+    rows.push(new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId('ms_confirm')
+        .setLabel(`Confirm Sale (${selectedIndices.size})`)
+        .setStyle(ButtonStyle.Success)
+        .setDisabled(selectedIndices.size === 0),
+      new ButtonBuilder()
+        .setCustomId('ms_clear')
+        .setLabel('Clear All')
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(selectedIndices.size === 0),
+      new ButtonBuilder()
+        .setCustomId('ms_cancel')
+        .setLabel('Cancel')
+        .setStyle(ButtonStyle.Danger)
+    ));
+
+    return rows;
+  }
+
+  const reply = await interaction.reply({
+    embeds: [buildEmbed()],
+    components: buildComponents(),
+    fetchReply: true
+  });
+
+  const collector = reply.createMessageComponentCollector({
+    filter: i => i.user.id === userId,
+    time: 300000
+  });
+
+  collector.on('collect', async i => {
+    if (i.customId === 'ms_add') {
+      for (const val of i.values) selectedIndices.add(parseInt(val));
+      await i.update({ embeds: [buildEmbed()], components: buildComponents() });
+
+    } else if (i.customId === 'ms_remove') {
+      for (const val of i.values) selectedIndices.delete(parseInt(val));
+      await i.update({ embeds: [buildEmbed()], components: buildComponents() });
+
+    } else if (i.customId === 'ms_clear') {
+      selectedIndices.clear();
+      await i.update({ embeds: [buildEmbed()], components: buildComponents() });
+
+    } else if (i.customId === 'ms_confirm') {
+      if (selectedIndices.size === 0) {
+        return await i.reply({ content: 'No artefacts selected to sell.', ephemeral: true });
+      }
+
+      let totalEarned = 0;
+      const soldNames = [];
+      const indicesToRemove = [...selectedIndices].sort((a, b) => b - a);
+
+      for (const idx of indicesToRemove) {
+        const name = user.artefacts[idx];
+        const { finalValue } = getArtefactSellValue(name);
+        totalEarned += finalValue;
+        soldNames.push(name);
+        user.artefacts.splice(idx, 1);
+      }
+
+      user.cash += totalEarned;
+      await saveUser(userId);
+      collector.stop('sold');
+
+      const soldDisplay = soldNames.slice(0, 20).join('\n')
+        + (soldNames.length > 20 ? `\n... and ${soldNames.length - 20} more` : '');
+
+      const successEmbed = new EmbedBuilder()
+        .setTitle('Sale Complete')
+        .setDescription(`Successfully sold **${soldNames.length}** artefact(s) for **$${totalEarned.toLocaleString()}**!`)
+        .addFields(
+          { name: 'Items Sold', value: soldDisplay, inline: false },
+          { name: 'Total Earned', value: `$${totalEarned.toLocaleString()}`, inline: true },
+          { name: 'New Cash Balance', value: `$${user.cash.toLocaleString()}`, inline: true }
+        )
+        .setColor(0x51CF66)
+        .setTimestamp();
+
+      await i.update({ embeds: [successEmbed], components: [] });
+
+    } else if (i.customId === 'ms_cancel') {
+      collector.stop('cancelled');
+      const cancelEmbed = new EmbedBuilder()
+        .setTitle('Sale Cancelled')
+        .setDescription('No artefacts were sold.')
+        .setColor(0xFF6B6B)
+        .setTimestamp();
+      await i.update({ embeds: [cancelEmbed], components: [] });
     }
   });
 
-  if (soldCount === 0) {
-    return await interaction.reply({ 
-      content: `You don't have any artefacts of rarity: **${rarityFilter}**`, 
-      ephemeral: true 
-    });
-  }
-
-  user.cash += totalValue;
-  user.artefacts = remainingArtefacts;
-  await saveUser(userId);
-
-  const confirmEmbed = new EmbedBuilder()
-    .setTitle('Mass Sale Successful')
-    .setDescription(`Successfully sold **${soldCount}** artefacts for **$${totalValue.toLocaleString()}**!`)
-    .addFields(
-      { name: 'Rarity Filter', value: rarityFilter, inline: true },
-      { name: 'Items Sold', value: soldCount.toString(), inline: true },
-      { name: 'Total Earned', value: `$${totalValue.toLocaleString()}`, inline: true },
-      { name: 'New Cash Balance', value: `$${user.cash.toLocaleString()}`, inline: false }
-    )
-    .setColor(0x51CF66)
-    .setTimestamp();
-
-  await interaction.reply({ embeds: [confirmEmbed] });
+  collector.on('end', async (collected, reason) => {
+    if (reason === 'time') {
+      const timeoutEmbed = new EmbedBuilder()
+        .setTitle('Session Expired')
+        .setDescription('The mass sell session timed out. No artefacts were sold.')
+        .setColor(0xFF9F43)
+        .setTimestamp();
+      try {
+        await interaction.editReply({ embeds: [timeoutEmbed], components: [] });
+      } catch (e) {}
+    }
+  });
 }
 
 async function handleAddItemCommand(interaction) {
@@ -3475,13 +3600,6 @@ async function endGame(interaction, gameId) {
 
 // === MASS SELL SYSTEM ===
 
-function createMassSellEmbed(allArtefacts, selectedArtefacts) {
-  return null;
-}
-
-function createMassSellComponents(sessionId, allArtefacts) {
-  return null;
-}
 
 // === XP CONVERSION SYSTEM ===
 
