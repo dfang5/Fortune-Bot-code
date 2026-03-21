@@ -422,15 +422,61 @@ async function saveUserData() {
 
 // Rarity and artefact config
 const rarities = [
-  { name:'Common', chance:65, color:0xAAAAAA, value:100, sell:150, items:['Quartz','Mica','Olivine'] },
-  { name:'Uncommon', chance:20, color:0x00FF00, value:500, sell:500, items:['Garnet','Talc','Magnetite'] },
-  { name:'Rare', chance:10, color:0x00008B, value:1500, sell:1500, items:['Eye of Monazite','Chest of Xenotime','Euxenite'] },
-  { name:'Legendary', chance:4, color:0xFFD700, value:5000, sell:5000, items:['Watch of Scandium','Statue of Bastnasite','Allanite'] },
-  { name:'Unknown', chance:1, color:0x000000, value:15000, sell:15000, items:['Gem of Diamond','Kyawthuite'] }
+  { name:'Common',    chance:65, color:0xAAAAAA, value:100,   sell:150,   items:['Quartz','Mica','Olivine','Condensed Quartz','Calcite Crystal'] },
+  { name:'Uncommon',  chance:20, color:0x00FF00, value:500,   sell:500,   items:['Garnet','Talc','Magnetite','Lithium Battery'] },
+  { name:'Rare',      chance:10, color:0x00008B, value:1500,  sell:1500,  items:['Eye of Monazite','Chest of Xenotime','Euxenite','Beryl','Loparite'] },
+  { name:'Legendary', chance:4,  color:0xFFD700, value:5000,  sell:5000,  items:['Watch of Scandium','Statue of Bastnasite','Allanite','Fluorite Shard','Ixiolite','Lapis Lazuli','Nephrite Goblet'] },
+  { name:'Unknown',   chance:1,  color:0x000000, value:15000, sell:15000, items:['Gem of Diamond','Kyawthuite','Hazenite Droplet','Ephemeral Allanite'] }
 ];
-function getRarityByArtefact(name) { 
+
+// Tier for each artefact — T1=75% value, T2=100% value, T3=150% value
+const artefactTiers = {
+  // Common
+  'Quartz': 2, 'Mica': 2, 'Olivine': 2,
+  'Condensed Quartz': 2,
+  'Calcite Crystal': 3,
+  // Uncommon
+  'Garnet': 2, 'Talc': 2, 'Magnetite': 2,
+  'Lithium Battery': 3,
+  // Rare
+  'Eye of Monazite': 2, 'Chest of Xenotime': 2, 'Euxenite': 2,
+  'Beryl': 1,
+  'Loparite': 3,
+  // Legendary
+  'Watch of Scandium': 2, 'Statue of Bastnasite': 2, 'Allanite': 2,
+  'Fluorite Shard': 1, 'Nephrite Goblet': 1,
+  'Ixiolite': 2,
+  'Lapis Lazuli': 3,
+  // Unknown
+  'Gem of Diamond': 2, 'Kyawthuite': 2,
+  'Hazenite Droplet': 1,
+  'Ephemeral Allanite': 3
+};
+
+const TIER_MULTIPLIERS = { 1: 0.75, 2: 1.0, 3: 1.5 };
+
+function getArtefactTier(name) {
+  const cleanName = name.startsWith('✨ SHINY ') && name.endsWith(' ✨')
+    ? name.replace('✨ SHINY ', '').replace(' ✨', '')
+    : name;
+  return artefactTiers[cleanName] || 2;
+}
+
+function calcArtefactSellValue(name, rarity) {
+  const tier = getArtefactTier(name);
+  const base = rarity ? rarity.sell : 100;
+  return Math.floor(base * TIER_MULTIPLIERS[tier]);
+}
+
+function calcArtefactValue(name, rarity) {
+  const tier = getArtefactTier(name);
+  const base = rarity ? rarity.value : 100;
+  return Math.floor(base * TIER_MULTIPLIERS[tier]);
+}
+
+function getRarityByArtefact(name) {
   const cleanName = name.startsWith('✨ SHINY ') && name.endsWith(' ✨') ? name.replace('✨ SHINY ', '').replace(' ✨', '') : name;
-  return rarities.find(r => r.items.includes(cleanName)); 
+  return rarities.find(r => r.items.includes(cleanName));
 }
 
 // === EVENT SYSTEM ===
@@ -1231,13 +1277,15 @@ async function handleInfoCommand(interaction) {
         inline: false
       },
       {
-        name: '💎 Rarity Levels',
+        name: 'Rarity Levels & Tier Values',
         value: [
-          '**Common** (65%) - $100-150',
-          '**Uncommon** (20%) - $550-700', 
-          '**Rare** (10%) - $1,500-2,500',
-          '**Legendary** (4%) - $5,000',
-          '**Unknown** (1%) - $15,000'
+          '**Common** (65%) — T1: $112 | T2: $150 | T3: $225',
+          '**Uncommon** (20%) — T1: $375 | T2: $500 | T3: $750',
+          '**Rare** (10%) — T1: $1,125 | T2: $1,500 | T3: $2,250',
+          '**Legendary** (4%) — T1: $3,750 | T2: $5,000 | T3: $7,500',
+          '**Unknown** (1%) — T1: $11,250 | T2: $15,000 | T3: $22,500',
+          '',
+          'T1 = 75% of base value | T2 = base | T3 = 150% of base'
         ].join('\n'),
         inline: false
       }
@@ -1573,7 +1621,8 @@ async function handleScavengeCommand(interaction, userId) {
     .addFields(
       { name: 'Artefact Found', value: `${finalArtefactName}`, inline: true },
       { name: 'Rarity', value: `${selectedRarity.name}`, inline: true },
-      { name: 'Estimated Value', value: `$${(isShiny ? selectedRarity.value * 20 : selectedRarity.value).toLocaleString()}`, inline: true },
+      { name: 'Tier', value: `T${getArtefactTier(artefact)}`, inline: true },
+      { name: 'Estimated Value', value: `$${(isShiny ? calcArtefactSellValue(finalArtefactName, selectedRarity) * 20 : calcArtefactSellValue(finalArtefactName, selectedRarity)).toLocaleString()}`, inline: true },
       { name: 'Next Scavenge', value: 'Available in 2 hours', inline: false }
     )
     .setColor(scavengeColor)
@@ -1661,10 +1710,9 @@ async function handleInventoryCommand(interaction, userId) {
 
   const totalValue = user.artefacts.reduce((sum, artefactName) => {
     const isShiny = artefactName.startsWith('✨ SHINY ') && artefactName.endsWith(' ✨');
-    const baseName = isShiny ? artefactName.replace('✨ SHINY ', '').replace(' ✨', '') : artefactName;
-    const rarity = getRarityByArtefact(baseName);
-    const sellPrice = rarity ? rarity.sell : 0;
-    return sum + (isShiny ? sellPrice * 20 : sellPrice);
+    const rarity = getRarityByArtefact(artefactName);
+    const tierSell = calcArtefactSellValue(artefactName, rarity);
+    return sum + (isShiny ? tierSell * 20 : tierSell);
   }, 0);
 
   const artefactCounts = user.artefacts.reduce((counts, artefact) => {
@@ -1672,13 +1720,15 @@ async function handleInventoryCommand(interaction, userId) {
     return counts;
   }, {});
 
-  const artefactList = Object.keys(artefactCounts).length ? 
+  const artefactList = Object.keys(artefactCounts).length ?
     Object.entries(artefactCounts).map(([artefactName, count]) => {
+      const rarity = getRarityByArtefact(artefactName);
+      const tier = getArtefactTier(artefactName);
+      const tierSell = calcArtefactSellValue(artefactName, rarity);
       const isShiny = artefactName.startsWith('✨ SHINY ') && artefactName.endsWith(' ✨');
-      const baseName = isShiny ? artefactName.replace('✨ SHINY ', '').replace(' ✨', '') : artefactName;
-      const rarity = getRarityByArtefact(baseName);
+      const sellDisplay = isShiny ? tierSell * 20 : tierSell;
       const countSuffix = count > 1 ? ` [${count}]` : '';
-      return `${artefactName} (${rarity ? rarity.name : 'Unknown'})${countSuffix}`;
+      return `${artefactName} (${rarity ? rarity.name : 'Unknown'} T${tier} — $${sellDisplay.toLocaleString()})${countSuffix}`;
     }).join('\n') : 'No artefacts';
 
   // Count purchased items
@@ -2072,17 +2122,17 @@ async function handleBuyCommand(interaction, userId) {
 
 function getMassSellValue(name) {
   const isShiny = name.startsWith('✨ SHINY ') && name.endsWith(' ✨');
-  const baseName = isShiny ? name.replace('✨ SHINY ', '').replace(' ✨', '') : name;
-  const rarity = getRarityByArtefact(baseName);
-  const sell = rarity ? rarity.sell : 100;
-  return { isShiny, rarity, finalValue: isShiny ? sell * 20 : sell };
+  const rarity = getRarityByArtefact(name);
+  const tier = getArtefactTier(name);
+  const tierSell = calcArtefactSellValue(name, rarity);
+  return { isShiny, rarity, tier, finalValue: isShiny ? tierSell * 20 : tierSell };
 }
 
 function buildMassSellEmbed(session, userArtefacts) {
   const queueText = session.queue.length
     ? session.queue.map(e => {
-        const { rarity, finalValue } = getMassSellValue(e.name);
-        return `${e.name} x${e.amount} — ${rarity ? rarity.name : 'Unknown'} ($${(finalValue * e.amount).toLocaleString()} total)`;
+        const { rarity, tier, finalValue } = getMassSellValue(e.name);
+        return `${e.name} x${e.amount} — ${rarity ? rarity.name : 'Unknown'} T${tier} ($${(finalValue * e.amount).toLocaleString()} total)`;
       }).join('\n')
     : 'Nothing queued yet — select an artefact and add it below.';
 
@@ -2123,10 +2173,10 @@ function buildMassSellComponents(sessionId, session, userArtefacts) {
 
   if (availableEntries.length > 0) {
     const selectOptions = availableEntries.slice(0, 25).map(([name, count]) => {
-      const { rarity, finalValue } = getMassSellValue(name);
+      const { rarity, tier, finalValue } = getMassSellValue(name);
       return {
         label: name.length > 100 ? name.slice(0, 97) + '...' : name,
-        description: `${rarity ? rarity.name : 'Unknown'} — $${finalValue.toLocaleString()} each (${count} available)`,
+        description: `${rarity ? rarity.name : 'Unknown'} T${tier} — $${finalValue.toLocaleString()} each (${count} available)`,
         value: name,
         default: session.selectedArtefact === name
       };
@@ -2974,9 +3024,11 @@ async function handleTradeAddArtefact(interaction, customId) {
 
   const options = userArtefacts.slice(0, 25).map((artefact, index) => {
     const rarity = getRarityByArtefact(artefact);
+    const tier = getArtefactTier(artefact);
+    const sellVal = calcArtefactSellValue(artefact, rarity);
     return {
       label: artefact,
-      description: `${rarity ? rarity.name : 'Unknown'} - $${rarity ? rarity.value.toLocaleString() : '100'}`,
+      description: `${rarity ? rarity.name : 'Unknown'} T${tier} — $${sellVal.toLocaleString()} sell value`,
       value: index.toString()
     };
   });
@@ -3878,7 +3930,9 @@ function buildGiveArtefactEmbed(session) {
   const queueText = session.queue.length
     ? session.queue.map(e => {
         const rarity = getRarityByArtefact(e.name);
-        return `${e.name} x${e.amount} — ${rarity ? rarity.name : 'Unknown'} ($${(rarity ? rarity.sell * e.amount : 0).toLocaleString()} total)`;
+        const tier = getArtefactTier(e.name);
+        const tierSell = calcArtefactSellValue(e.name, rarity);
+        return `${e.name} x${e.amount} — ${rarity ? rarity.name : 'Unknown'} T${tier} ($${(tierSell * e.amount).toLocaleString()} total)`;
       }).join('\n')
     : 'Nothing queued yet — select an artefact and add it below.';
 
@@ -3898,12 +3952,16 @@ function buildGiveArtefactEmbed(session) {
 
 function buildGiveArtefactComponents(sessionId, session) {
   const allArtefacts = rarities.flatMap(r => r.items.map(item => ({ item, rarity: r })));
-  const selectOptions = allArtefacts.map(({ item, rarity }) => ({
-    label: item,
-    description: `${rarity.name} — $${rarity.sell.toLocaleString()} sell value`,
-    value: item,
-    default: session.selectedArtefact === item
-  }));
+  const selectOptions = allArtefacts.map(({ item, rarity }) => {
+    const tier = getArtefactTier(item);
+    const tierSell = calcArtefactSellValue(item, rarity);
+    return {
+      label: item,
+      description: `${rarity.name} T${tier} — $${tierSell.toLocaleString()} sell value`,
+      value: item,
+      default: session.selectedArtefact === item
+    };
+  });
 
   const selectRow = new ActionRowBuilder().addComponents(
     new StringSelectMenuBuilder()
@@ -4268,7 +4326,8 @@ async function handleRemoveArtefactCommand(interaction) {
       { name: 'Target User', value: `<@${targetId}>`, inline: true },
       { name: 'Artefact', value: artefactName, inline: true },
       { name: 'Rarity', value: rarity ? rarity.name : 'Unknown', inline: true },
-      { name: 'Value', value: rarity ? `$${rarity.value.toLocaleString()}` : 'Unknown', inline: true },
+      { name: 'Tier', value: `T${getArtefactTier(artefactName)}`, inline: true },
+      { name: 'Value', value: rarity ? `$${calcArtefactSellValue(artefactName, rarity).toLocaleString()}` : 'Unknown', inline: true },
       { name: 'Developer', value: `<@${interaction.user.id}>`, inline: true }
     )
     .setColor(0xFF6B6B)
