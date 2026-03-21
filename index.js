@@ -144,7 +144,15 @@ async function getUser(userId) {
     console.log(`🔍 Loading user ${userId} from database...`);
     const user = await usersCollection.findOne({ _id: userId });
     console.log(`🔍 Database returned for ${userId}:`, JSON.stringify(user, null, 2));
-    userData[userId] = user || { cash: 0, artefacts: [], items: [], bankBalance: 0 };
+    userData[userId] = user || {
+      cash: 0,
+      artefacts: [],
+      items: [],
+      bankBalance: 0,
+      joinedDate: Date.now(),
+      commandCount: 0,
+      observationPermission: 'prohibit'
+    };
     console.log(`🔍 Final userData for ${userId}:`, JSON.stringify(userData[userId], null, 2));
   }
   return userData[userId];
@@ -873,6 +881,18 @@ client.once('clientReady', async () => {
       .setName('mining-status')
       .setDescription('Check current mining events and sector status'),
 
+    new SlashCommandBuilder()
+      .setName('observe')
+      .setDescription("View another player's inventory and stats (requires their permission)")
+      .addUserOption(option =>
+        option.setName('player')
+          .setDescription('The player you want to observe')
+          .setRequired(true)),
+
+    new SlashCommandBuilder()
+      .setName('configure-observation')
+      .setDescription('Set whether other players can view your inventory and stats'),
+
   ];
 
   // Developer-only commands (registered separately)
@@ -1129,6 +1149,15 @@ client.on('interactionCreate', async interaction => {
   // Load user data from database before processing any command
   await getUser(userId);
 
+  // Increment command counter (persisted on next natural save)
+  if (!userData[userId].commandCount) userData[userId].commandCount = 0;
+  userData[userId].commandCount++;
+
+  // Seed joinedDate for existing users who predate the field
+  if (!userData[userId].joinedDate) {
+    userData[userId].joinedDate = Date.now();
+  }
+
   try {
     switch (interaction.commandName) {
       case 'info':
@@ -1213,6 +1242,14 @@ client.on('interactionCreate', async interaction => {
 
       case 'reset-cooldowns':
         await handleResetCooldownsCommand(interaction);
+        break;
+
+      case 'observe':
+        await handleObserveCommand(interaction, userId);
+        break;
+
+      case 'configure-observation':
+        await handleConfigureObservationCommand(interaction, userId);
         break;
     }
   } catch (error) {
@@ -1587,11 +1624,11 @@ async function handleScavengeCommand(interaction, userId) {
   }
 
   const artefact = selectedRarity.items[Math.floor(Math.random() * selectedRarity.items.length)];
-  
+
   // 0.5% chance for shiny version
   const isShiny = Math.random() < 0.005;
   const finalArtefactName = isShiny ? `✨ SHINY ${artefact} ✨` : artefact;
-  
+
   userData[userId].artefacts.push(finalArtefactName);
   cooldowns.scavenge[userId] = now;
 
@@ -1643,7 +1680,7 @@ async function handleScavengeCommand(interaction, userId) {
       .setFooter({ text: 'Thank you for playing Fortune Bot!' })
       .setThumbnail(client.user.displayAvatarURL())
       .setTimestamp();
-    
+
     await interaction.followUp({ content: 'https://discord.gg/NZtnJbj4QA', embeds: [inviteEmbed], ephemeral: false });
   }
 }
@@ -1698,7 +1735,7 @@ async function handleLaborCommand(interaction, userId) {
       .setFooter({ text: 'Thank you for playing Fortune Bot!' })
       .setThumbnail(client.user.displayAvatarURL())
       .setTimestamp();
-    
+
     await interaction.followUp({ content: 'https://discord.gg/NZtnJbj4QA', embeds: [inviteEmbed], ephemeral: false });
   }
 }
@@ -3905,7 +3942,7 @@ async function handleMiningStatusCommand(interaction) {
       .setDescription('**All mining sectors are operating under normal conditions**')
       .addFields(
         { 
-          name: '🏭 Mine Status', 
+          name: 'Mine Status', 
           value: 'All artefact mines are **OPERATIONAL** and accessible for exploration', 
           inline: false 
         },
@@ -4482,6 +4519,278 @@ async function handleResetCooldownsCommand(interaction) {
 
     await interaction.editReply({ embeds: [successEmbed] });
   }
+}
+
+async function handleConfigureObservationCommand(interaction, userId) {
+  const user = await getUser(userId);
+  const current = user.observationPermission || 'prohibit';
+
+  function buildConfigEmbed(setting) {
+    const isAllow = setting === 'allow';
+    return new EmbedBuilder()
+      .setTitle('Observation Permissions')
+      .setDescription(
+        'Control whether other players can view your inventory, artefacts, stats and activity using `/observe`.\n\n' +
+        'Your current setting is shown below. Click a button to change it.'
+      )
+      .addFields(
+        {
+          name: 'Current Setting',
+          value: isAllow
+            ? 'Allow — Anyone may view your profile with /observe.'
+            : 'Prohibit — Your profile is hidden from /observe.',
+          inline: false
+        },
+        {
+          name: 'What "Allow" exposes',
+          value: [
+            'Cash on hand and bank balance',
+            'Full artefact collection with rarity, tier, and value',
+            'Purchased items',
+            'XP, message count, and command count',
+            'Date you started playing'
+          ].join('\n'),
+          inline: false
+        }
+      )
+      .setColor(isAllow ? 0x51CF66 : 0xFF6B6B)
+      .setFooter({ text: 'Changes are saved immediately when you click a button.' })
+      .setTimestamp();
+  }
+
+  function buildConfigComponents(setting) {
+    return [new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId('obs_cfg_allow')
+        .setLabel('Allow Observation')
+        .setStyle(setting === 'allow' ? ButtonStyle.Success : ButtonStyle.Secondary)
+        .setDisabled(setting === 'allow'),
+      new ButtonBuilder()
+        .setCustomId('obs_cfg_prohibit')
+        .setLabel('Prohibit Observation')
+        .setStyle(setting === 'prohibit' ? ButtonStyle.Danger : ButtonStyle.Secondary)
+        .setDisabled(setting === 'prohibit')
+    )];
+  }
+
+  const reply = await interaction.reply({
+    embeds: [buildConfigEmbed(current)],
+    components: buildConfigComponents(current),
+    ephemeral: true,
+    fetchReply: true
+  });
+
+  const collector = reply.createMessageComponentCollector({
+    filter: i => i.user.id === userId,
+    time: 120000
+  });
+
+  collector.on('collect', async i => {
+    const newSetting = i.customId === 'obs_cfg_allow' ? 'allow' : 'prohibit';
+    userData[userId].observationPermission = newSetting;
+    await saveUser(userId);
+    await i.update({
+      embeds: [buildConfigEmbed(newSetting)],
+      components: buildConfigComponents(newSetting)
+    });
+  });
+
+  collector.on('end', async () => {
+    try {
+      await interaction.editReply({ components: [] });
+    } catch (e) {}
+  });
+}
+
+async function handleObserveCommand(interaction, observerId) {
+  const targetDiscordUser = interaction.options.getUser('player');
+  const targetId = targetDiscordUser.id;
+
+  if (targetId === observerId) {
+    return await interaction.reply({
+      embeds: [new EmbedBuilder()
+        .setTitle('Cannot Observe Yourself')
+        .setDescription('Use `/inventory` to view your own stats and artefacts.')
+        .setColor(0xFF9F43)
+        .setTimestamp()
+      ],
+      ephemeral: true
+    });
+  }
+
+  const target = await getUser(targetId);
+  const permission = target.observationPermission || 'prohibit';
+
+  if (permission !== 'allow') {
+    return await interaction.reply({
+      embeds: [new EmbedBuilder()
+        .setTitle('Observation Denied')
+        .setDescription(
+          `The user you wish to observe has set their observation permissions to **Prohibit**.\n\n` +
+          `If you would like to observe their inventory, ask them to give you access by running ` +
+          `\`/configure-observation\` and selecting **Allow**.`
+        )
+        .addFields(
+          { name: 'Requested Profile', value: `<@${targetId}>`, inline: true },
+          { name: 'Permission Status', value: 'Prohibit', inline: true }
+        )
+        .setColor(0xFF6B6B)
+        .setFooter({ text: 'Each player controls their own visibility settings.' })
+        .setTimestamp()
+      ]
+    });
+  }
+
+  // Pull live data
+  const bankCapacity = await calculateBankCapacity(targetId);
+  const totalWealth = target.cash + (target.bankBalance || 0);
+
+  const collectionValue = (target.artefacts || []).reduce((sum, name) => {
+    const isShiny = name.startsWith('✨ SHINY ') && name.endsWith(' ✨');
+    const rarity = getRarityByArtefact(name);
+    const tierSell = calcArtefactSellValue(name, rarity);
+    return sum + (isShiny ? tierSell * 20 : tierSell);
+  }, 0);
+
+  const xp = target.xpData?.xp || 0;
+  const messages = target.xpData?.messageCount || 0;
+  const commands = target.commandCount || 0;
+  const joinedDate = target.joinedDate
+    ? `<t:${Math.floor(target.joinedDate / 1000)}:D>`
+    : 'Before records began';
+
+  // Build artefact lines
+  const artefactCounts = {};
+  (target.artefacts || []).forEach(name => {
+    artefactCounts[name] = (artefactCounts[name] || 0) + 1;
+  });
+
+  const artefactLines = Object.entries(artefactCounts).map(([name, count]) => {
+    const rarity = getRarityByArtefact(name);
+    const tier = getArtefactTier(name);
+    const tierSell = calcArtefactSellValue(name, rarity);
+    const isShiny = name.startsWith('✨ SHINY ') && name.endsWith(' ✨');
+    const sellDisplay = isShiny ? tierSell * 20 : tierSell;
+    const countSuffix = count > 1 ? ` [${count}]` : '';
+    return `${name} (${rarity ? rarity.name : 'Unknown'} T${tier} — $${sellDisplay.toLocaleString()})${countSuffix}`;
+  });
+
+  // Items summary
+  const itemCounts = {};
+  (target.items || []).forEach(item => { itemCounts[item] = (itemCounts[item] || 0) + 1; });
+  const itemsDisplay = Object.entries(itemCounts)
+    .map(([name, count]) => `${name}${count > 1 ? ` [${count}]` : ''}`)
+    .join(', ') || 'No items purchased';
+
+  // Chunk artefacts across pages (15 per artefact page)
+  const ARTS_PER_PAGE = 15;
+  const artefactChunks = [];
+  if (artefactLines.length === 0) {
+    artefactChunks.push('No artefacts in inventory.');
+  } else {
+    for (let i = 0; i < artefactLines.length; i += ARTS_PER_PAGE) {
+      artefactChunks.push(artefactLines.slice(i, i + ARTS_PER_PAGE).join('\n'));
+    }
+  }
+
+  // Page layout: [0] Financial | [1..n] Artefacts | [last] Profile
+  const totalPages = 2 + artefactChunks.length;
+  let currentPage = 0;
+
+  function buildPage(page) {
+    const base = { color: 0x339AF0 };
+
+    if (page === 0) {
+      return new EmbedBuilder()
+        .setTitle(`Observing ${targetDiscordUser.displayName}`)
+        .setDescription(`Financial overview for <@${targetId}>`)
+        .addFields(
+          { name: 'Cash on Hand',      value: `$${target.cash.toLocaleString()}`,                inline: true },
+          { name: 'Bank Balance',       value: `$${(target.bankBalance || 0).toLocaleString()}`,  inline: true },
+          { name: 'Total Wealth',       value: `$${totalWealth.toLocaleString()}`,                inline: true },
+          { name: 'Collection Value',   value: `$${collectionValue.toLocaleString()}`,            inline: true },
+          { name: 'Bank Capacity',      value: `$${bankCapacity.toLocaleString()}`,               inline: true },
+          { name: 'Bank Expansions',    value: `${target.bankExpansions || 0}`,                   inline: true },
+          { name: 'Artefacts Owned',    value: `${(target.artefacts || []).length}`,              inline: true },
+          { name: 'Purchased Items',    value: `${(target.items || []).length}`,                  inline: true },
+          { name: 'Items',              value: itemsDisplay.length > 500 ? itemsDisplay.slice(0, 497) + '...' : itemsDisplay, inline: false }
+        )
+        .setColor(0x339AF0)
+        .setFooter({ text: `Page 1 of ${totalPages} — Financial Overview` })
+        .setTimestamp();
+
+    } else if (page === totalPages - 1) {
+      return new EmbedBuilder()
+        .setTitle(`Observing ${targetDiscordUser.displayName}`)
+        .setDescription(`Player profile for <@${targetId}>`)
+        .addFields(
+          { name: 'Experience Points', value: `${xp.toLocaleString()} XP`,          inline: true },
+          { name: 'XP Cash Value',     value: `$${(xp * 2).toLocaleString()}`,       inline: true },
+          { name: '\u200B',            value: '\u200B',                               inline: true },
+          { name: 'Messages Sent',     value: messages.toLocaleString(),             inline: true },
+          { name: 'Commands Used',     value: commands.toLocaleString(),             inline: true },
+          { name: '\u200B',            value: '\u200B',                               inline: true },
+          { name: 'Playing Since',     value: joinedDate,                            inline: false }
+        )
+        .setColor(0xFFD700)
+        .setFooter({ text: `Page ${totalPages} of ${totalPages} — Player Profile` })
+        .setTimestamp();
+
+    } else {
+      const chunkIndex = page - 1;
+      const label = artefactChunks.length > 1
+        ? `Artefacts (${chunkIndex + 1} of ${artefactChunks.length})`
+        : 'Artefacts';
+      return new EmbedBuilder()
+        .setTitle(`Observing ${targetDiscordUser.displayName}`)
+        .setDescription(
+          `<@${targetId}> holds **${(target.artefacts || []).length}** artefact(s) ` +
+          `valued at **$${collectionValue.toLocaleString()}** total.`
+        )
+        .addFields({ name: label, value: artefactChunks[chunkIndex], inline: false })
+        .setColor(0x9B59B6)
+        .setFooter({ text: `Page ${page + 1} of ${totalPages} — Artefact Collection` })
+        .setTimestamp();
+    }
+  }
+
+  function buildNavComponents(page) {
+    return [new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId('obs_prev')
+        .setLabel('Previous')
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(page === 0),
+      new ButtonBuilder()
+        .setCustomId('obs_next')
+        .setLabel('Next')
+        .setStyle(ButtonStyle.Primary)
+        .setDisabled(page === totalPages - 1)
+    )];
+  }
+
+  const reply = await interaction.reply({
+    embeds: [buildPage(0)],
+    components: buildNavComponents(0),
+    fetchReply: true
+  });
+
+  const collector = reply.createMessageComponentCollector({
+    filter: i => i.user.id === observerId,
+    time: 300000
+  });
+
+  collector.on('collect', async i => {
+    if (i.customId === 'obs_prev') currentPage = Math.max(0, currentPage - 1);
+    if (i.customId === 'obs_next') currentPage = Math.min(totalPages - 1, currentPage + 1);
+    await i.update({ embeds: [buildPage(currentPage)], components: buildNavComponents(currentPage) });
+  });
+
+  collector.on('end', async () => {
+    try {
+      await interaction.editReply({ components: [] });
+    } catch (e) {}
+  });
 }
 
 client.login(token);[]
