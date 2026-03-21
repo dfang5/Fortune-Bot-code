@@ -1848,12 +1848,22 @@ async function handleTradeCommand(interaction, userId) {
 }
 
 async function handleLeaderboardCommand(interaction) {
-  const users = Object.entries(userData)
-    .filter(([id, data]) => data.cash !== undefined)
-    .sort((a, b) => (b[1].cash + (b[1].bankBalance || 0)) - (a[1].cash + (a[1].bankBalance || 0)))
-    .slice(0, 10);
+  // Query all users directly from MongoDB so rankings persist across bot restarts
+  const allDocs = await usersCollection.find({}, { projection: { cash: 1, bankBalance: 1 } }).toArray();
 
-  if (!users.length) {
+  // Build entries, using the live in-memory cache where available so any
+  // recent changes that haven't been flushed yet are reflected accurately
+  const entries = allDocs.map(doc => {
+    const live = userData[doc._id];
+    const cash = live !== undefined ? live.cash : (doc.cash || 0);
+    const bank = live !== undefined ? (live.bankBalance || 0) : (doc.bankBalance || 0);
+    return { id: doc._id, total: cash + bank };
+  });
+
+  entries.sort((a, b) => b.total - a.total);
+  const top10 = entries.filter(e => e.total > 0).slice(0, 10);
+
+  if (!top10.length) {
     const emptyEmbed = new EmbedBuilder()
       .setTitle('Leaderboard')
       .setDescription('No players have earned money yet.')
@@ -1863,16 +1873,15 @@ async function handleLeaderboardCommand(interaction) {
     return await interaction.reply({ embeds: [emptyEmbed] });
   }
 
+  const medals = ['1st', '2nd', '3rd'];
   const leaderboardEmbed = new EmbedBuilder()
-    .setTitle('🏆 Top Fortune Holders')
-    .setDescription(users.map(([id, data], i) => {
-      const totalWealth = data.cash + (data.bankBalance || 0);
-      const medals = ['🥇', '🥈', '🥉'];
-      const medal = medals[i] || '🔸';
-      return `${medal} **${i + 1}.** <@${id}> - **$${totalWealth.toLocaleString()}**`;
+    .setTitle('Top Fortune Holders')
+    .setDescription(top10.map((entry, i) => {
+      const place = medals[i] || `${i + 1}th`;
+      return `**${place}** <@${entry.id}> — $${entry.total.toLocaleString()}`;
     }).join('\n'))
     .setColor(0xFFD700)
-    .setFooter({ text: '💰 Rankings based on total wealth (cash + bank balance)' })
+    .setFooter({ text: 'Rankings based on total wealth (cash + bank balance)' })
     .setTimestamp();
 
   await interaction.reply({ embeds: [leaderboardEmbed] });
