@@ -683,6 +683,9 @@ client.on('messageCreate', async (message) => {
   // Ignore bot messages
   if (message.author.bot) return;
 
+  // Database not ready yet — ignore until fully initialised
+  if (!usersCollection) return;
+
   const userId = message.author.id;
   const channelId = message.channel.id;
   const now = Date.now();
@@ -1018,6 +1021,19 @@ client.once('clientReady', async () => {
 
 // Handle autocomplete interactions
 client.on('interactionCreate', async interaction => {
+  // Database not ready yet — respond gracefully instead of crashing
+  if (!usersCollection) {
+    if (interaction.isAutocomplete()) {
+      await interaction.respond([]);
+      return;
+    }
+    if (interaction.isRepliable()) {
+      await interaction.reply({ content: 'The bot is still starting up, please try again in a moment.', ephemeral: true });
+      return;
+    }
+    return;
+  }
+
   if (interaction.isAutocomplete()) {
     const { commandName, focusedOption } = interaction;
 
