@@ -151,7 +151,8 @@ async function getUser(userId) {
       bankBalance: 0,
       joinedDate: Date.now(),
       commandCount: 0,
-      observationPermission: 'prohibit'
+      observationPermission: 'prohibit',
+      discoveredArtefacts: []
     };
     console.log(`🔍 Final userData for ${userId}:`, JSON.stringify(userData[userId], null, 2));
   }
@@ -896,6 +897,10 @@ client.once('clientReady', async () => {
       .setName('configure-observation')
       .setDescription('Set whether other players can view your inventory and stats'),
 
+    new SlashCommandBuilder()
+      .setName('collection')
+      .setDescription('Browse your artefact field guide — see what you have and have not discovered'),
+
   ];
 
   // Developer-only commands (registered separately)
@@ -1266,6 +1271,10 @@ client.on('interactionCreate', async interaction => {
 
       case 'configure-observation':
         await handleConfigureObservationCommand(interaction, userId);
+        break;
+
+      case 'collection':
+        await handleCollectionCommand(interaction, userId);
         break;
     }
   } catch (error) {
@@ -1646,6 +1655,10 @@ async function handleScavengeCommand(interaction, userId) {
   const finalArtefactName = isShiny ? `✨ SHINY ${artefact} ✨` : artefact;
 
   userData[userId].artefacts.push(finalArtefactName);
+  if (!userData[userId].discoveredArtefacts) userData[userId].discoveredArtefacts = [];
+  if (!userData[userId].discoveredArtefacts.includes(artefact)) {
+    userData[userId].discoveredArtefacts.push(artefact);
+  }
   cooldowns.scavenge[userId] = now;
 
   await saveUserData();
@@ -2934,6 +2947,25 @@ async function handleComponentInteraction(interaction) {
       .setTimestamp();
 
     await interaction.update({ embeds: [declineEmbed], components: [] });
+
+  } else if (customId.startsWith('collection_prev_') || customId.startsWith('collection_next_')) {
+    const isPrev = customId.startsWith('collection_prev_');
+    const parts = customId.split('_');
+    const ownerId = parts[2];
+    const currentPage = parseInt(parts[3]);
+
+    if (interaction.user.id !== ownerId) {
+      return await interaction.reply({
+        content: '❌ This is not your field guide!',
+        ephemeral: true
+      });
+    }
+
+    const newPage = isPrev ? currentPage - 1 : currentPage + 1;
+    const user = await getUser(ownerId);
+    const embed = buildCollectionPage(user, newPage);
+    const components = buildCollectionButtons(ownerId, newPage);
+    await interaction.update({ embeds: [embed], components });
 
   }
 
@@ -4616,6 +4648,111 @@ async function handleConfigureObservationCommand(interaction, userId) {
       await interaction.editReply({ components: [] });
     } catch (e) {}
   });
+}
+
+function buildProgressBar(current, total) {
+  if (total === 0) return '[░░░░░░░░░░]';
+  const filled = Math.round((current / total) * 10);
+  const empty = 10 - filled;
+  return `[${'█'.repeat(filled)}${'░'.repeat(empty)}]`;
+}
+
+function buildCollectionPage(user, pageIndex) {
+  const rarity = rarities[pageIndex];
+  const items = rarity.items;
+
+  if (!user.discoveredArtefacts) user.discoveredArtefacts = [];
+
+  const discovered = new Set([
+    ...user.discoveredArtefacts,
+    ...(user.artefacts || []).map(a =>
+      a.startsWith('✨ SHINY ') && a.endsWith(' ✨')
+        ? a.replace('✨ SHINY ', '').replace(' ✨', '')
+        : a
+    )
+  ]);
+
+  const inventoryCounts = {};
+  for (const a of (user.artefacts || [])) {
+    const base = a.startsWith('✨ SHINY ') && a.endsWith(' ✨')
+      ? a.replace('✨ SHINY ', '').replace(' ✨', '')
+      : a;
+    inventoryCounts[base] = (inventoryCounts[base] || 0) + 1;
+  }
+
+  const byTier = { 1: [], 2: [], 3: [] };
+  for (const item of items) {
+    const tier = artefactTiers[item] || 2;
+    byTier[tier].push(item);
+  }
+
+  const collectedCount = items.filter(i => discovered.has(i)).length;
+  const totalCount = items.length;
+  const progressBar = buildProgressBar(collectedCount, totalCount);
+
+  const rarityEmoji = { Common: '⬜', Uncommon: '🟩', Rare: '🟦', Legendary: '🟨', Unknown: '⬛' };
+  const tierLabel = { 1: 'Tier I — Subdued  ·  ×0.75 value', 2: 'Tier II — Standard  ·  ×1.0 value', 3: 'Tier III — Prime  ·  ×1.5 value' };
+
+  const fields = [];
+  for (const tier of [1, 2, 3]) {
+    const tierItems = byTier[tier];
+    if (tierItems.length === 0) continue;
+
+    const lines = tierItems.map(item => {
+      const isFound = discovered.has(item);
+      const count = inventoryCounts[item] || 0;
+      const sellValue = calcArtefactSellValue(item, rarity).toLocaleString();
+      const countStr = count > 0 ? `  *(×${count} in vault)*` : '';
+      const icon = isFound ? '✅' : '❌';
+      const nameStr = isFound ? `**${item}**` : `~~${item}~~`;
+      return `${icon}  ${nameStr}  ·  $${sellValue}${countStr}`;
+    });
+
+    fields.push({
+      name: `▬▬▬  ${tierLabel[tier]}  ▬▬▬`,
+      value: lines.join('\n'),
+      inline: false
+    });
+  }
+
+  const embedColor = rarity.color === 0x000000 ? 0x2B2D31 : rarity.color;
+
+  return new EmbedBuilder()
+    .setTitle(`${rarityEmoji[rarity.name] || '📋'}  Field Guide — ${rarity.name}`)
+    .setDescription(
+      `**${collectedCount} / ${totalCount} discovered**  ${progressBar}\n` +
+      `*Drop chance: ${rarity.chance}%  ·  Base sell value: $${rarity.sell.toLocaleString()}*`
+    )
+    .setColor(embedColor)
+    .addFields(fields)
+    .setFooter({ text: `Page ${pageIndex + 1} / ${rarities.length}  ·  ✅ Discovered  ·  ❌ Not yet found` })
+    .setTimestamp();
+}
+
+function buildCollectionButtons(userId, pageIndex) {
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`collection_prev_${userId}_${pageIndex}`)
+      .setLabel('◀  Previous')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(pageIndex === 0),
+    new ButtonBuilder()
+      .setCustomId(`collection_next_${userId}_${pageIndex}`)
+      .setLabel('Next  ▶')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(pageIndex === rarities.length - 1)
+  );
+  return [row];
+}
+
+async function handleCollectionCommand(interaction, userId) {
+  const user = await getUser(userId);
+  if (!user.discoveredArtefacts) user.discoveredArtefacts = [];
+
+  const pageIndex = 0;
+  const embed = buildCollectionPage(user, pageIndex);
+  const components = buildCollectionButtons(userId, pageIndex);
+  await interaction.reply({ embeds: [embed], components });
 }
 
 async function handleObserveCommand(interaction, observerId) {
