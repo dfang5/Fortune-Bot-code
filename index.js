@@ -431,11 +431,11 @@ async function saveUserData() {
 
 // Rarity and artefact config
 const rarities = [
-  { name:'Common',    chance:65, color:0xAAAAAA, value:100,   sell:150,   items:['Quartz','Mica','Olivine','Condensed Quartz','Calcite Crystal'] },
-  { name:'Uncommon',  chance:20, color:0x00FF00, value:500,   sell:500,   items:['Garnet','Talc','Magnetite','Lithium Battery'] },
-  { name:'Rare',      chance:10, color:0x00008B, value:1500,  sell:1500,  items:['Eye of Monazite','Chest of Xenotime','Euxenite','Beryl','Loparite'] },
-  { name:'Legendary', chance:4,  color:0xFFD700, value:5000,  sell:5000,  items:['Watch of Scandium','Statue of Bastnasite','Allanite','Fluorite Shard','Ixiolite','Lapis Lazuli','Nephrite Goblet'] },
-  { name:'Unknown',   chance:1,  color:0x000000, value:15000, sell:15000, items:['Gem of Diamond','Kyawthuite','Hazenite Droplet','Ephemeral Allanite'] }
+  { name:'Common',    chance:65, color:0xAAAAAA, value:100,   sell:150,   items:['Quartz','Mica','Olivine','Condensed Quartz','Calcite Crystal','Feldspar','Flint Chip','Shale Flake','Agate Cluster','Basalt Prism'] },
+  { name:'Uncommon',  chance:20, color:0x00FF00, value:500,   sell:500,   items:['Garnet','Talc','Magnetite','Lithium Battery','Hornblende','Limestone Tablet','Serpentine','Ring of Malachite','Jade Scarab'] },
+  { name:'Rare',      chance:10, color:0x00008B, value:1500,  sell:1500,  items:['Eye of Monazite','Chest of Xenotime','Euxenite','Beryl','Loparite','Amber Fossil','Obsidian Blade','Scepter of Rhodonite','Turquoise Idol'] },
+  { name:'Legendary', chance:4,  color:0xFFD700, value:5000,  sell:5000,  items:['Watch of Scandium','Statue of Bastnasite','Allanite','Fluorite Shard','Ixiolite','Lapis Lazuli','Nephrite Goblet','Citrine Crest','Staff of Chrysoberyl','Relic of Moissanite'] },
+  { name:'Unknown',   chance:1,  color:0x000000, value:15000, sell:15000, items:['Gem of Diamond','Kyawthuite','Hazenite Droplet','Ephemeral Allanite','Meteorite Shard','Coesite Fragment','Painite Crystal','Scepter of Onyx','Primordial Opal'] }
 ];
 
 // Tier for each artefact — T1=75% value, T2=100% value, T3=150% value
@@ -444,22 +444,33 @@ const artefactTiers = {
   'Quartz': 2, 'Mica': 2, 'Olivine': 2,
   'Condensed Quartz': 2,
   'Calcite Crystal': 3,
+  'Feldspar': 1, 'Flint Chip': 1, 'Shale Flake': 1,
+  'Agate Cluster': 3, 'Basalt Prism': 3,
   // Uncommon
   'Garnet': 2, 'Talc': 2, 'Magnetite': 2,
   'Lithium Battery': 3,
+  'Hornblende': 1, 'Limestone Tablet': 1, 'Serpentine': 1,
+  'Ring of Malachite': 3, 'Jade Scarab': 3,
   // Rare
   'Eye of Monazite': 2, 'Chest of Xenotime': 2, 'Euxenite': 2,
   'Beryl': 1,
   'Loparite': 3,
+  'Amber Fossil': 1, 'Obsidian Blade': 1,
+  'Scepter of Rhodonite': 3, 'Turquoise Idol': 3,
   // Legendary
   'Watch of Scandium': 2, 'Statue of Bastnasite': 2, 'Allanite': 2,
   'Fluorite Shard': 1, 'Nephrite Goblet': 1,
   'Ixiolite': 2,
   'Lapis Lazuli': 3,
+  'Citrine Crest': 1,
+  'Staff of Chrysoberyl': 3, 'Relic of Moissanite': 3,
   // Unknown
   'Gem of Diamond': 2, 'Kyawthuite': 2,
   'Hazenite Droplet': 1,
-  'Ephemeral Allanite': 3
+  'Ephemeral Allanite': 3,
+  'Meteorite Shard': 1, 'Coesite Fragment': 1,
+  'Painite Crystal': 2,
+  'Scepter of Onyx': 3, 'Primordial Opal': 3
 };
 
 const TIER_MULTIPLIERS = { 1: 0.75, 2: 1.0, 3: 1.5 };
