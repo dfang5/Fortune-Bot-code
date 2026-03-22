@@ -431,14 +431,14 @@ async function saveUserData() {
 
 // Rarity and artefact config
 const rarities = [
-  { name:'Common',    chance:65, color:0xAAAAAA, value:100,   sell:150,   items:['Quartz','Mica','Olivine','Condensed Quartz','Calcite Crystal','Feldspar','Flint Chip','Shale Flake','Agate Cluster','Basalt Prism'] },
-  { name:'Uncommon',  chance:20, color:0x00FF00, value:500,   sell:500,   items:['Garnet','Talc','Magnetite','Lithium Battery','Hornblende','Limestone Tablet','Serpentine','Ring of Malachite','Jade Scarab'] },
-  { name:'Rare',      chance:10, color:0x00008B, value:1500,  sell:1500,  items:['Eye of Monazite','Chest of Xenotime','Euxenite','Beryl','Loparite','Amber Fossil','Obsidian Blade','Scepter of Rhodonite','Turquoise Idol'] },
-  { name:'Legendary', chance:4,  color:0xFFD700, value:5000,  sell:5000,  items:['Watch of Scandium','Statue of Bastnasite','Allanite','Fluorite Shard','Ixiolite','Lapis Lazuli','Nephrite Goblet','Citrine Crest','Staff of Chrysoberyl','Relic of Moissanite'] },
-  { name:'Unknown',   chance:1,  color:0x000000, value:15000, sell:15000, items:['Gem of Diamond','Kyawthuite','Hazenite Droplet','Ephemeral Allanite','Meteorite Shard','Coesite Fragment','Painite Crystal','Scepter of Onyx','Primordial Opal'] }
+  { name:'Common',    chance:65, color:0xAAAAAA, value:100,   sell:150,   items:['Quartz','Mica','Olivine','Condensed Quartz','Calcite Crystal','Feldspar','Flint Chip','Shale Flake','Agate Cluster','Basalt Prism','Diorite Slab','Lignite Chip','Travertine Fragment','Smoky Quartz','Sandstone Carving','Pumice Dome'] },
+  { name:'Uncommon',  chance:20, color:0x00FF00, value:500,   sell:500,   items:['Garnet','Talc','Magnetite','Lithium Battery','Hornblende','Limestone Tablet','Serpentine','Ring of Malachite','Jade Scarab','Dolomite Tablet','Augite Crystal','Stibnite Wand','Chalcopyrite','Crown of Gypsum','Rhodochrosite'] },
+  { name:'Rare',      chance:10, color:0x00008B, value:1500,  sell:1500,  items:['Eye of Monazite','Chest of Xenotime','Euxenite','Beryl','Loparite','Amber Fossil','Obsidian Blade','Scepter of Rhodonite','Turquoise Idol','Spectrolite Lens','Vanadinite Cluster','Wulfenite Plate','Brazilianite Shard','Mask of Dioptase','Alexandrite Prism'] },
+  { name:'Legendary', chance:4,  color:0xFFD700, value:5000,  sell:5000,  items:['Watch of Scandium','Statue of Bastnasite','Allanite','Fluorite Shard','Ixiolite','Lapis Lazuli','Nephrite Goblet','Citrine Crest','Staff of Chrysoberyl','Relic of Moissanite','Orb of Tanzanite','Spessartine Dagger','Demantoid Shard','Crown of Benitoite','Throne of Jadeite','Taaffeite Pendant'] },
+  { name:'Unknown',   chance:1,  color:0x000000, value:15000, sell:15000, items:['Gem of Diamond','Kyawthuite','Hazenite Droplet','Ephemeral Allanite','Meteorite Shard','Coesite Fragment','Painite Crystal','Scepter of Onyx','Primordial Opal','Musgravite Fragment','Pezzottaite Core','Void Calcite','Serendibite Relic','Grandidierite Prism','Stellar Obsidian'] }
 ];
 
-// Tier for each artefact — T1=75% value, T2=100% value, T3=150% value
+// Tier for each artefact — T1=65% value, T2=75%, T3=100%, T4=125%, T5=135%
 const artefactTiers = {
   // Common
   'Quartz': 2, 'Mica': 2, 'Olivine': 2,
@@ -446,17 +446,23 @@ const artefactTiers = {
   'Calcite Crystal': 3,
   'Feldspar': 1, 'Flint Chip': 1, 'Shale Flake': 1,
   'Agate Cluster': 3, 'Basalt Prism': 3,
+  'Diorite Slab': 4, 'Lignite Chip': 4, 'Travertine Fragment': 4,
+  'Smoky Quartz': 5, 'Sandstone Carving': 5, 'Pumice Dome': 5,
   // Uncommon
   'Garnet': 2, 'Talc': 2, 'Magnetite': 2,
   'Lithium Battery': 3,
   'Hornblende': 1, 'Limestone Tablet': 1, 'Serpentine': 1,
   'Ring of Malachite': 3, 'Jade Scarab': 3,
+  'Dolomite Tablet': 4, 'Augite Crystal': 4, 'Stibnite Wand': 4,
+  'Chalcopyrite': 5, 'Crown of Gypsum': 5, 'Rhodochrosite': 5,
   // Rare
   'Eye of Monazite': 2, 'Chest of Xenotime': 2, 'Euxenite': 2,
   'Beryl': 1,
   'Loparite': 3,
   'Amber Fossil': 1, 'Obsidian Blade': 1,
   'Scepter of Rhodonite': 3, 'Turquoise Idol': 3,
+  'Spectrolite Lens': 4, 'Vanadinite Cluster': 4, 'Wulfenite Plate': 4,
+  'Brazilianite Shard': 5, 'Mask of Dioptase': 5, 'Alexandrite Prism': 5,
   // Legendary
   'Watch of Scandium': 2, 'Statue of Bastnasite': 2, 'Allanite': 2,
   'Fluorite Shard': 1, 'Nephrite Goblet': 1,
@@ -464,16 +470,20 @@ const artefactTiers = {
   'Lapis Lazuli': 3,
   'Citrine Crest': 1,
   'Staff of Chrysoberyl': 3, 'Relic of Moissanite': 3,
+  'Orb of Tanzanite': 4, 'Spessartine Dagger': 4, 'Demantoid Shard': 4,
+  'Crown of Benitoite': 5, 'Throne of Jadeite': 5, 'Taaffeite Pendant': 5,
   // Unknown
   'Gem of Diamond': 2, 'Kyawthuite': 2,
   'Hazenite Droplet': 1,
   'Ephemeral Allanite': 3,
   'Meteorite Shard': 1, 'Coesite Fragment': 1,
   'Painite Crystal': 2,
-  'Scepter of Onyx': 3, 'Primordial Opal': 3
+  'Scepter of Onyx': 3, 'Primordial Opal': 3,
+  'Musgravite Fragment': 4, 'Pezzottaite Core': 4, 'Void Calcite': 4,
+  'Serendibite Relic': 5, 'Grandidierite Prism': 5, 'Stellar Obsidian': 5
 };
 
-const TIER_MULTIPLIERS = { 1: 0.75, 2: 1.0, 3: 1.5 };
+const TIER_MULTIPLIERS = { 1: 0.65, 2: 0.75, 3: 1.0, 4: 1.25, 5: 1.35 };
 
 function getArtefactTier(name) {
   const cleanName = name.startsWith('✨ SHINY ') && name.endsWith(' ✨')
@@ -1352,13 +1362,13 @@ async function handleInfoCommand(interaction) {
       {
         name: 'Rarity Levels & Tier Values',
         value: [
-          '**Common** (65%) — T1: $112 | T2: $150 | T3: $225',
-          '**Uncommon** (20%) — T1: $375 | T2: $500 | T3: $750',
-          '**Rare** (10%) — T1: $1,125 | T2: $1,500 | T3: $2,250',
-          '**Legendary** (4%) — T1: $3,750 | T2: $5,000 | T3: $7,500',
-          '**Unknown** (1%) — T1: $11,250 | T2: $15,000 | T3: $22,500',
+          '**Common** (65%) — T1: $97 | T2: $112 | T3: $150 | T4: $187 | T5: $202',
+          '**Uncommon** (20%) — T1: $325 | T2: $375 | T3: $500 | T4: $625 | T5: $675',
+          '**Rare** (10%) — T1: $975 | T2: $1,125 | T3: $1,500 | T4: $1,875 | T5: $2,025',
+          '**Legendary** (4%) — T1: $3,250 | T2: $3,750 | T3: $5,000 | T4: $6,250 | T5: $6,750',
+          '**Unknown** (1%) — T1: $9,750 | T2: $11,250 | T3: $15,000 | T4: $18,750 | T5: $20,250',
           '',
-          'T1 = 75% of base value | T2 = base | T3 = 150% of base'
+          'T1=65%  T2=75%  T3=100% (base)  T4=125%  T5=135%'
         ].join('\n'),
         inline: false
       }
@@ -1898,16 +1908,16 @@ async function handleTradeCommand(interaction, userId) {
   const row = new ActionRowBuilder().addComponents(acceptButton, declineButton);
 
   const tradeRequestEmbed = new EmbedBuilder()
-    .setTitle('🤝 Trade Request')
-    .setDescription(`**${interaction.user.displayName}** wants to trade with you!`)
+    .setTitle('Trade Request')
+    .setDescription(`**${interaction.user.displayName}** wants to trade with you.`)
     .addFields(
-      { name: '👤 Initiator', value: `<@${userId}>`, inline: true },
-      { name: '🎯 Recipient', value: `<@${targetUser.id}>`, inline: true },
-      { name: '📊 Status', value: '⏳ Waiting for response...', inline: false },
-      { name: '⚡ Action Required', value: 'Choose **Accept** or **Decline** below', inline: false }
+      { name: 'Initiator', value: `<@${userId}>`, inline: true },
+      { name: 'Recipient', value: `<@${targetUser.id}>`, inline: true },
+      { name: 'Status', value: 'Waiting for response...', inline: false },
+      { name: 'Action Required', value: 'Choose **Accept** or **Decline** below.', inline: false }
     )
     .setColor(0x5865F2)
-    .setFooter({ text: '⏰ This request will expire after 2 minutes' })
+    .setFooter({ text: 'This request will expire after 2 minutes' })
     .setTimestamp();
 
   await interaction.reply({ 
@@ -3007,22 +3017,25 @@ async function startInteractiveTrade(interaction, initiatorId, recipientId, trad
   await interaction.update({ embeds: [tradeEmbed], components });
 }
 
-function createTradeEmbed(trade, initiatorId, recipientId) {
-  const initiatorOfferText = formatOffer(trade.initiatorOffer);
-  const recipientOfferText = formatOffer(trade.recipientOffer);
+function calcOfferValue(offer) {
+  let total = offer.cash;
+  for (const name of offer.artefacts) {
+    const rarity = getRarityByArtefact(name);
+    total += calcArtefactSellValue(name, rarity);
+  }
+  return total;
+}
 
-  return new EmbedBuilder()
-    .setTitle('Interactive Trade Session')
-    .setDescription('**Both players can add items, cash, or artefacts to the trade**')
-    .addFields(
-      { name: 'Initiator Offer', value: initiatorOfferText || '*Nothing offered yet*', inline: true },
-      { name: 'Recipient Offer', value: recipientOfferText || '*Nothing offered yet*', inline: true },
-      { name: 'Trade Status', value: getTradeStatus(trade), inline: false },
-      { name: 'Instructions', value: 'Use the buttons below to **add/remove** items from your offer. Both players must click **Ready** to complete the trade.', inline: false }
-    )
-    .setColor(trade.initiatorReady && trade.recipientReady ? 0x00FF7F : 0x4169E1)
-    .setFooter({ text: 'Trade will expire after 10 minutes of inactivity' })
-    .setTimestamp();
+function formatOfferDetailed(offer) {
+  const lines = [];
+  if (offer.cash > 0) lines.push(`Cash — $${offer.cash.toLocaleString()}`);
+  for (const name of offer.artefacts) {
+    const rarity = getRarityByArtefact(name);
+    const tier = getArtefactTier(name);
+    const val = calcArtefactSellValue(name, rarity);
+    lines.push(`${name} (${rarity ? rarity.name : 'Unknown'}, T${tier}, ~$${val.toLocaleString()})`);
+  }
+  return lines.length > 0 ? lines.join('\n') : '*Nothing offered yet*';
 }
 
 function formatOffer(offer) {
@@ -3032,11 +3045,45 @@ function formatOffer(offer) {
   return parts.join('\n') || 'Nothing';
 }
 
+function createTradeEmbed(trade, initiatorId, recipientId) {
+  const initiatorOfferText = formatOfferDetailed(trade.initiatorOffer);
+  const recipientOfferText = formatOfferDetailed(trade.recipientOffer);
+  const initiatorValue = calcOfferValue(trade.initiatorOffer);
+  const recipientValue = calcOfferValue(trade.recipientOffer);
+
+  const initiatorStatus = trade.initiatorReady ? '**Ready**' : 'Preparing offer';
+  const recipientStatus = trade.recipientReady ? '**Ready**' : 'Preparing offer';
+
+  return new EmbedBuilder()
+    .setTitle('Trade Session')
+    .setDescription('Both parties may add artefacts and cash. Once both mark Ready, the trade executes automatically.')
+    .addFields(
+      {
+        name: `Initiator Offer  —  est. $${initiatorValue.toLocaleString()}`,
+        value: initiatorOfferText,
+        inline: true
+      },
+      {
+        name: `Recipient Offer  —  est. $${recipientValue.toLocaleString()}`,
+        value: recipientOfferText,
+        inline: true
+      },
+      {
+        name: 'Player Status',
+        value: `<@${initiatorId}>  —  ${initiatorStatus}\n<@${recipientId}>  —  ${recipientStatus}`,
+        inline: false
+      }
+    )
+    .setColor(trade.initiatorReady && trade.recipientReady ? 0x00FF7F : 0x1a3a5c)
+    .setFooter({ text: 'Trade expires after 10 minutes of inactivity' })
+    .setTimestamp();
+}
+
 function getTradeStatus(trade) {
-  if (trade.initiatorReady && trade.recipientReady) return '**Both players ready** - Trade will complete automatically';
-  if (trade.initiatorReady) return '⏳ **Initiator ready**, waiting for recipient';
-  if (trade.recipientReady) return '⏳ **Recipient ready**, waiting for initiator';
-  return '**Setting up offers...**';
+  if (trade.initiatorReady && trade.recipientReady) return '**Both players ready** — Trade will complete automatically';
+  if (trade.initiatorReady) return 'Initiator ready, waiting for recipient';
+  if (trade.recipientReady) return 'Recipient ready, waiting for initiator';
+  return 'Setting up offers...';
 }
 
 function createTradeComponents(tradeId, userId) {
@@ -3308,11 +3355,11 @@ async function executeTrade(interaction, trade, tradeId) {
     delete global.activeTrades[tradeId];
 
     const successEmbed = new EmbedBuilder()
-      .setTitle('🎉 Trade Completed Successfully!')
-      .setDescription('**The trade has been executed and all items have been exchanged!**')
+      .setTitle('Trade Complete')
+      .setDescription('All items have been exchanged successfully.')
       .addFields(
-        { name: '📦 Initiator Received', value: formatOffer(trade.recipientOffer) || '*Nothing*', inline: true },
-        { name: '📦 Recipient Received', value: formatOffer(trade.initiatorOffer) || '*Nothing*', inline: true }
+        { name: 'Initiator Received', value: formatOffer(trade.recipientOffer) || '*Nothing*', inline: true },
+        { name: 'Recipient Received', value: formatOffer(trade.initiatorOffer) || '*Nothing*', inline: true }
       )
       .setColor(0x00FF7F)
       .setTimestamp();
@@ -4057,7 +4104,7 @@ function buildGiveArtefactEmbed(session) {
 
 function buildGiveArtefactComponents(sessionId, session) {
   const allArtefacts = rarities.flatMap(r => r.items.map(item => ({ item, rarity: r })));
-  const selectOptions = allArtefacts.map(({ item, rarity }) => {
+  const selectOptions = allArtefacts.slice(0, 25).map(({ item, rarity }) => {
     const tier = getArtefactTier(item);
     const tierSell = calcArtefactSellValue(item, rarity);
     return {
@@ -4691,9 +4738,9 @@ function buildCollectionPage(user, pageIndex) {
     inventoryCounts[base] = (inventoryCounts[base] || 0) + 1;
   }
 
-  const byTier = { 1: [], 2: [], 3: [] };
+  const byTier = { 1: [], 2: [], 3: [], 4: [], 5: [] };
   for (const item of items) {
-    const tier = artefactTiers[item] || 2;
+    const tier = artefactTiers[item] || 3;
     byTier[tier].push(item);
   }
 
@@ -4702,12 +4749,12 @@ function buildCollectionPage(user, pageIndex) {
   const progressBar = buildProgressBar(collectedCount, totalCount);
 
   const rarityEmoji = { Common: '⬜', Uncommon: '🟩', Rare: '🟦', Legendary: '🟨', Unknown: '⬛' };
-  const tierLabel = { 1: 'Tier I — Subdued  ·  ×0.75 value', 2: 'Tier II — Standard  ·  ×1.0 value', 3: 'Tier III — Prime  ·  ×1.5 value' };
+  const tierLabel = { 1: 'Tier I  ·  ×0.65 value', 2: 'Tier II  ·  ×0.75 value', 3: 'Tier III  ·  ×1.0 value', 4: 'Tier IV  ·  ×1.25 value', 5: 'Tier V  ·  ×1.35 value' };
 
   const fields = [];
-  for (const tier of [1, 2, 3]) {
+  for (const tier of [1, 2, 3, 4, 5]) {
     const tierItems = byTier[tier];
-    if (tierItems.length === 0) continue;
+    if (!tierItems || tierItems.length === 0) continue;
 
     const lines = tierItems.map(item => {
       const isFound = discovered.has(item);
