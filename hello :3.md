@@ -10,7 +10,7 @@ Back then it could only track money and artefacts, and guess what, it didn't eve
 
 It wasn't until I added a banking system that I additionally coded in a database. 
 
-I'm proud of what I did. Fortune bot has grown into a big community with future expansions planned everywhere, with a garagantuan 4258 lines of code including 150,000 characters.
+I'm proud of what I did. Fortune bot has grown into a big community with future expansions planned everywhere, with a garagantuan 5007 lines of code including 180,090 characters.
 
 Because of that I can confidently say that if you put the effort in to create anything, frankly, you will get all the credit back depending on how much you put.
 
