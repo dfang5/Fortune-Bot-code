@@ -784,6 +784,10 @@ client.once('clientReady', async () => {
           .setMinValue(1)),
 
     new SlashCommandBuilder()
+      .setName('bank-all')
+      .setDescription('Deposit all cash on hand into your bank account'),
+
+    new SlashCommandBuilder()
       .setName('withdraw')
       .setDescription('Withdraw money from your bank account')
       .addIntegerOption(option =>
@@ -1208,6 +1212,10 @@ client.on('interactionCreate', async interaction => {
       case 'bank':
         await handleBankCommand(interaction, userId);
         break;
+
+      case 'bank-all':
+        await handleBankAllCommand(interaction, userId);
+        break;
       case 'withdraw':
         await handleWithdrawCommand(interaction, userId);
         break;
@@ -1439,6 +1447,73 @@ async function handleBankCommand(interaction, userId) {
       { name: 'New Bank Balance', value: `$${userData[userId].bankBalance.toLocaleString()}`, inline: true },
       { name: 'Bank Capacity Used', value: `${((userData[userId].bankBalance / finalCapacity) * 100).toFixed(1)}%`, inline: true },
       { name: 'Available Space', value: `$${(finalCapacity - userData[userId].bankBalance).toLocaleString()}`, inline: true },
+      { name: 'Expansions Owned', value: `${expansions}`, inline: true }
+    )
+    .setColor(0x00FF7F)
+    .setFooter({ text: 'Your banked money is safe from theft attempts' })
+    .setTimestamp();
+
+  await interaction.reply({ embeds: [successEmbed] });
+}
+
+async function handleBankAllCommand(interaction, userId) {
+  const cash = userData[userId].cash || 0;
+
+  if (cash <= 0) {
+    const noFundsEmbed = new EmbedBuilder()
+      .setTitle('No Cash to Deposit')
+      .setDescription('You have no cash on hand to deposit.')
+      .addFields(
+        { name: 'Cash on Hand', value: `$0`, inline: true },
+        { name: 'Bank Balance', value: `$${(userData[userId].bankBalance || 0).toLocaleString()}`, inline: true }
+      )
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+
+    return await interaction.reply({ embeds: [noFundsEmbed] });
+  }
+
+  const currentBank = userData[userId].bankBalance || 0;
+  const bankCapacity = await calculateBankCapacity(userId);
+  const availableSpace = bankCapacity - currentBank;
+
+  if (availableSpace <= 0) {
+    const fullEmbed = new EmbedBuilder()
+      .setTitle('Bank Full')
+      .setDescription('Your bank is at capacity. Purchase a Bank Expansion Ticket from `/store` to make room.')
+      .addFields(
+        { name: 'Cash on Hand', value: `$${cash.toLocaleString()}`, inline: true },
+        { name: 'Bank Balance', value: `$${currentBank.toLocaleString()}`, inline: true },
+        { name: 'Bank Capacity', value: `$${bankCapacity.toLocaleString()}`, inline: true }
+      )
+      .setColor(0xFF9F43)
+      .setTimestamp();
+
+    return await interaction.reply({ embeds: [fullEmbed] });
+  }
+
+  const amount = Math.min(cash, availableSpace);
+  const partialDeposit = amount < cash;
+
+  userData[userId].cash -= amount;
+  userData[userId].bankBalance = currentBank + amount;
+  await saveUserData();
+
+  const expansions = userData[userId].bankExpansions || 0;
+  const newBank = userData[userId].bankBalance;
+  const successEmbed = new EmbedBuilder()
+    .setTitle('Bank Deposit Completed')
+    .setDescription(
+      partialDeposit
+        ? `Your bank could only hold $${amount.toLocaleString()} of your cash. The remainder stays on hand.`
+        : `All $${amount.toLocaleString()} of your cash has been deposited.`
+    )
+    .addFields(
+      { name: 'Deposited', value: `$${amount.toLocaleString()}`, inline: true },
+      { name: 'Remaining Cash', value: `$${userData[userId].cash.toLocaleString()}`, inline: true },
+      { name: 'New Bank Balance', value: `$${newBank.toLocaleString()}`, inline: true },
+      { name: 'Bank Capacity Used', value: `${((newBank / bankCapacity) * 100).toFixed(1)}%`, inline: true },
+      { name: 'Available Space', value: `$${(bankCapacity - newBank).toLocaleString()}`, inline: true },
       { name: 'Expansions Owned', value: `${expansions}`, inline: true }
     )
     .setColor(0x00FF7F)
