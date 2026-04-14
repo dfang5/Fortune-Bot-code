@@ -1318,6 +1318,8 @@ client.on('interactionCreate', async interaction => {
 
       if (!interaction.replied && !interaction.deferred) {
         await interaction.reply({ embeds: [errorEmbed], flags: 64 });
+      } else if (interaction.deferred && !interaction.replied) {
+        await interaction.editReply({ embeds: [errorEmbed] });
       }
     } catch (replyError) {
       console.error('Failed to send error message:', replyError);
@@ -1698,6 +1700,7 @@ async function handleStealCommand(interaction, userId) {
 
 // Game command handlers
 async function handleScavengeCommand(interaction, userId) {
+  await interaction.deferReply();
   const now = Date.now();
   const SCAVENGE_COOLDOWN = 2 * 60 * 60 * 1000; // 2 hours
 
@@ -1716,7 +1719,7 @@ async function handleScavengeCommand(interaction, userId) {
       .setColor(0xFF9F43)
       .setTimestamp();
 
-    return await interaction.reply({ embeds: [cooldownEmbed] });
+    return await interaction.editReply({ embeds: [cooldownEmbed] });
   }
 
   // Check for active events before scavenging
@@ -1794,7 +1797,7 @@ async function handleScavengeCommand(interaction, userId) {
     scavengeEmbed.addFields({ name: 'Mining Event', value: eventText, inline: false });
   }
 
-  await interaction.reply({ embeds: [scavengeEmbed] });
+  await interaction.editReply({ embeds: [scavengeEmbed] });
 
   // 20% chance to show server invite
   if (Math.random() < 0.20) {
@@ -1811,6 +1814,7 @@ async function handleScavengeCommand(interaction, userId) {
 }
 
 async function handleLaborCommand(interaction, userId) {
+  await interaction.deferReply();
   const now = Date.now();
   const LABOR_COOLDOWN = 40 * 60 * 1000; // 40 minutes
 
@@ -1828,7 +1832,7 @@ async function handleLaborCommand(interaction, userId) {
       .setColor(0xFF9F43)
       .setTimestamp();
 
-    return await interaction.reply({ embeds: [cooldownEmbed] });
+    return await interaction.editReply({ embeds: [cooldownEmbed] });
   }
 
   const earnings = Math.floor(Math.random() * 500) + 100; // $100-600
@@ -1849,7 +1853,7 @@ async function handleLaborCommand(interaction, userId) {
     .setColor(0x51CF66)
     .setTimestamp();
 
-  await interaction.reply({ embeds: [laborEmbed] });
+  await interaction.editReply({ embeds: [laborEmbed] });
 
   // 20% chance to show server invite
   if (Math.random() < 0.20) {
@@ -1866,6 +1870,7 @@ async function handleLaborCommand(interaction, userId) {
 }
 
 async function handleInventoryCommand(interaction, userId) {
+  await interaction.deferReply();
   const user = await getUser(userId);
   const userXpData = await getXpData(userId);
   const bankCapacity = await calculateBankCapacity(userId);
@@ -1923,7 +1928,7 @@ async function handleInventoryCommand(interaction, userId) {
     .setFooter({ text: 'Use /convert to turn XP into cash (1 XP = $2)' })
     .setTimestamp();
 
-  await interaction.reply({ embeds: [inventoryEmbed] });
+  await interaction.editReply({ embeds: [inventoryEmbed] });
 }
 
 
