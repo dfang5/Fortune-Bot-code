@@ -1170,6 +1170,12 @@ client.on('interactionCreate', async interaction => {
       return;
     }
 
+    if (customId.startsWith('bet_modal_')) {
+      const gameId = customId.replace('bet_modal_', '');
+      await handleBetModalSubmit(interaction, gameId);
+      return;
+    }
+
     if (customId.startsWith('ms_amount_modal_')) {
       const sessionId = customId.replace('ms_amount_modal_', '');
       const session = global.massSellSessions[sessionId];
@@ -3289,8 +3295,8 @@ async function handleComponentInteraction(interaction) {
 
     // Check if all players have accepted
     if (game.accepted.length === 3) {
-      // All players accepted, proceed to team selection
-      await handleTeamSelection(interaction, gameId);
+      // All players accepted — move to betting
+      await startBettingPhase(interaction, gameId);
     } else {
       // Update embed to show new acceptance
       const updatedEmbed = createInvitationEmbed(game);
@@ -3357,54 +3363,6 @@ async function handleComponentInteraction(interaction) {
       );
 
     await interaction.showModal(modal);
-
-  } else if (customId.startsWith('bet_modal_')) {
-    const gameId = customId.replace('bet_modal_', '');
-    const game = global.activeMarbleGames[gameId];
-    if (!game) return;
-
-    const userId = interaction.user.id;
-    const betAmount = parseInt(interaction.fields.getTextInputValue('bet_amount_input'));
-
-    if (isNaN(betAmount) || betAmount <= 0) {
-      return await interaction.reply({ content: '❌ Invalid bet amount! Please enter a positive number.', ephemeral: true });
-    }
-
-    if (userData[userId].cash < betAmount) {
-      return await interaction.reply({ content: `❌ You don\'t have enough cash to bet $${betAmount.toLocaleString()}! You have $${userData[userId].cash.toLocaleString()}.`, ephemeral: true });
-    }
-
-    // Store the bet temporarily
-    if (!game.pendingBets) game.pendingBets = {};
-    game.pendingBets[userId] = betAmount;
-
-    // Update the embed to show the pending bet
-    const updatedEmbed = createBettingEmbed(game, userId, betAmount);
-    await interaction.update({ embeds: [updatedEmbed] });
-
-    // Check if all players have placed their bets
-    if (Object.keys(game.pendingBets).length === game.players.length) {
-      const allBets = Object.values(game.pendingBets);
-      const firstBet = allBets[0];
-
-      if (allBets.every(bet => bet === firstBet)) {
-        // All bets match, proceed to collect bets and start the game
-        game.betAmount = firstBet;
-        game.totalPot = firstBet * game.players.length;
-        await collectBets(game); // Deduct bets from players
-        await startMarbleGame(interaction, gameId);
-      } else {
-        // Bets do not match, reset and prompt again
-        const mismatchEmbed = new EmbedBuilder()
-          .setTitle('💸 Bets Do Not Match!')
-          .setDescription('**Bets do not match!** Please place your bets again.')
-          .setColor(0xFF6B6B)
-          .setTimestamp();
-
-        await interaction.message.edit({ embeds: [mismatchEmbed], components: [] });
-        delete global.activeMarbleGames[gameId]; // Clean up this game instance
-      }
-    }
 
   } else if (customId.startsWith('trade_add_cash_')) {
     await handleTradeAddCash(interaction, customId);
@@ -4008,225 +3966,275 @@ async function handleMarbleGame(interaction) {
   const player3 = interaction.options.getUser('player3');
   const player4 = interaction.options.getUser('player4');
 
-  // Validation checks
   const players = [interaction.user, player2, player3, player4];
   const uniquePlayerIds = new Set(players.map(p => p.id));
 
   if (uniquePlayerIds.size !== 4) {
-    return await interaction.reply({ 
-      content: '❌ **Error:** All four players must be different users!', 
-      ephemeral: true 
-    });
+    return await interaction.reply({ content: '❌ All four players must be different users!', ephemeral: true });
   }
-
   if (players.some(p => p.bot)) {
-    return await interaction.reply({ 
-      content: '❌ **Error:** Bots cannot participate in marble games!', 
-      ephemeral: true 
-    });
+    return await interaction.reply({ content: '❌ Bots cannot participate in marble games!', ephemeral: true });
   }
 
-  // Check if any player is already in a game
-  const existingGame = Object.values(global.activeMarbleGames).find(game => 
+  const existingGame = Object.values(global.activeMarbleGames).find(game =>
     game.players.some(p => players.some(player => player.id === p.id))
   );
-
   if (existingGame) {
-    return await interaction.reply({ 
-      content: '❌ **Error:** One or more players are already in an active marble game!', 
-      ephemeral: true 
-    });
+    return await interaction.reply({ content: '❌ One or more players are already in an active marble game!', ephemeral: true });
   }
 
-  // Create game ID and initialize game
   const gameId = `${userId}_${Date.now()}`;
   global.activeMarbleGames[gameId] = {
     gameId,
     initiator: interaction.user,
-    players: players,
+    players,
     invited: [player2, player3, player4],
     accepted: [],
     declined: [],
-    pendingBets: {}, // To store individual player bets before they match
-    betAmount: 0, // Will be set once bets match
+    pendingBets: {},
+    betAmount: 0,
     totalPot: 0,
     betsCollected: false,
     phase: 'invitation',
-    createdAt: Date.now()
+    round: 0,
+    createdAt: Date.now(),
+    gameMessage: null,
+    roundHistory: []
   };
 
   const invitationEmbed = createInvitationEmbed(global.activeMarbleGames[gameId]);
   const buttons = createInvitationButtons(gameId);
 
-  await interaction.reply({ 
-    embeds: [invitationEmbed], 
-    components: [buttons],
-    ephemeral: false 
-  });
+  await interaction.reply({ embeds: [invitationEmbed], components: [buttons] });
+
+  // Auto-expire invitation after 2 minutes
+  setTimeout(() => {
+    const game = global.activeMarbleGames[gameId];
+    if (game && game.phase === 'invitation') {
+      delete global.activeMarbleGames[gameId];
+      interaction.editReply({
+        embeds: [
+          new EmbedBuilder()
+            .setTitle('⏰ Marble Game Expired')
+            .setDescription('The invitation was not accepted by all players in time.')
+            .setColor(0x99AAB5)
+            .setTimestamp()
+        ],
+        components: []
+      }).catch(() => {});
+    }
+  }, 120000);
+}
+
+function marbleBar(count, max = 20) {
+  const filled = Math.round((count / max) * 10);
+  const empty = 10 - filled;
+  return '🟣'.repeat(filled) + '⬛'.repeat(empty) + ` **${count}**`;
 }
 
 function createInvitationEmbed(game) {
-  const pending = game.invited.filter(p => 
+  const pending = game.invited.filter(p =>
     !game.accepted.includes(p.id) && !game.declined.includes(p.id)
   );
+  const accepted = game.accepted;
 
   return new EmbedBuilder()
-    .setTitle('🎲 Marble Gambling Challenge')
-    .setDescription(`**${game.initiator.displayName}** has challenged you to a marble gambling contest!`)
+    .setTitle('🎲 Marble Game — Challenge Issued')
+    .setDescription(
+      `**${game.initiator.displayName}** has challenged three players to a marble gambling match!\n\n` +
+      `All invited players must accept within **2 minutes** to begin.`
+    )
     .addFields(
-      { 
-        name: '👥 Players Invited', 
-        value: game.invited.map(p => `<@${p.id}>`).join(', '), 
-        inline: false 
-      },
-      { 
-        name: '💰 Betting Details', 
-        value: `**Bet per Player:** To be determined\\n**Total Pot:** To be determined`, 
-        inline: false 
-      },
-      { 
-        name: '⏳ Pending Responses', 
-        value: pending.length > 0 ? pending.map(p => `<@${p.id}>`).join(', ') : '*None*', 
-        inline: true 
-      },
-      { 
-        name: '✅ Accepted', 
-        value: game.accepted.length > 0 ? game.accepted.map(id => `<@${id}>`).join(', ') : '*None*', 
-        inline: true 
+      {
+        name: '👑 Host',
+        value: `<@${game.initiator.id}>`,
+        inline: true
       },
       {
-        name: '🎯 Game Rules',
-        value: '• **4 players** split into 2 teams\\n• Each team starts with **10 marbles**\\n• Guess numbers 1-20 to win marbles\\n• First team to **0 marbles loses**, other team wins with **20 marbles**\\n• **Winning team splits the entire pot!**',
+        name: '✅ Accepted',
+        value: accepted.length > 0 ? accepted.map(id => `<@${id}>`).join('\n') : '*None yet*',
+        inline: true
+      },
+      {
+        name: '⏳ Waiting On',
+        value: pending.length > 0 ? pending.map(p => `<@${p.id}>`).join('\n') : '*All responded!*',
+        inline: true
+      },
+      {
+        name: '📖 How It Works',
+        value:
+          '> • 4 players split into **2 teams of 2**\n' +
+          '> • Each team starts with **10 marbles**\n' +
+          '> • Each round, both teams pick secret numbers **(1–20)**\n' +
+          '> • A random number is drawn — whoever guessed it **wins a marble** from the other team\n' +
+          '> • First team to reach **0** loses; the other team wins the entire pot\n' +
+          '> • Ties are re-rolled until one team wins',
         inline: false
       }
     )
     .setColor(0xFF6B35)
-    .setFooter({ text: '⏰ This invitation expires after 2 minutes' })
+    .setFooter({ text: '⏰ Invitation expires in 2 minutes' })
     .setTimestamp();
 }
 
 function createInvitationButtons(gameId) {
-  return new ActionRowBuilder()
-    .addComponents(
-      new ButtonBuilder()
-        .setCustomId(`marble_accept_${gameId}`)
-        .setLabel('Accept Challenge')
-        .setStyle(ButtonStyle.Success),
-      new ButtonBuilder()
-        .setCustomId(`marble_decline_${gameId}`)
-        .setLabel('Decline')
-        .setStyle(ButtonStyle.Danger)
-    );
-}
-
-async function handleTeamSelection(interaction, gameId) {
-  const game = global.activeMarbleGames[gameId];
-  if (!game) return;
-
-  // Move to betting phase
-  game.phase = 'betting';
-
-  await startBettingPhase(interaction, gameId);
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`marble_accept_${gameId}`)
+      .setLabel('✅ Accept Challenge')
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId(`marble_decline_${gameId}`)
+      .setLabel('❌ Decline')
+      .setStyle(ButtonStyle.Danger)
+  );
 }
 
 async function startBettingPhase(interaction, gameId) {
   const game = global.activeMarbleGames[gameId];
   if (!game) return;
 
+  game.phase = 'betting';
+
   const bettingEmbed = new EmbedBuilder()
-    .setTitle('Betting Phase')
-    .setDescription('**All players must place their bets now!** Each player can bet any amount they want, but all bets must match to proceed.')
+    .setTitle('💰 Betting Phase')
+    .setDescription(
+      'All **4 players** must place their bets.\n' +
+      'Every player must bet the **same amount** — if bets mismatch, they reset and you try again.'
+    )
     .addFields(
-      { 
-        name: '🎮 Players', 
-        value: game.players.map(p => `<@${p.id}>`).join(', '), 
-        inline: false 
+      {
+        name: '🎮 Players',
+        value: game.players.map(p => `<@${p.id}>`).join('\n'),
+        inline: true
       },
-      { 
-        name: '📋 Instructions', 
-        value: '• Each player must click "Place Bet" below\n• Enter your desired bet amount (minimum $50)\n• All players must bet the same amount\n• Game will start once all bets match', 
-        inline: false 
+      {
+        name: '🎯 Bets Placed',
+        value: '*None yet*',
+        inline: true
       },
-      { 
-        name: '🎯 Current Bets', 
-        value: 'No bets placed yet', 
-        inline: false 
+      {
+        name: '📋 Rules',
+        value: '• Minimum bet: **$50**\n• All bets must match\n• Winning team splits the **full pot**',
+        inline: false
       }
     )
     .setColor(0xFFD700)
     .setTimestamp();
 
-  const betButton = new ActionRowBuilder()
-    .addComponents(
-      new ButtonBuilder()
-        .setCustomId(`place_bet_${gameId}`)
-        .setLabel('Place Bet')
-        .setStyle(ButtonStyle.Primary)
-    );
+  const betButton = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`place_bet_${gameId}`)
+      .setLabel('💸 Place Bet')
+      .setStyle(ButtonStyle.Primary)
+  );
 
-  await interaction.editReply({ 
-    embeds: [bettingEmbed], 
-    components: [betButton] 
-  });
+  // interaction here is a button interaction (accept button) — must use update()
+  await interaction.update({ embeds: [bettingEmbed], components: [betButton] });
 }
 
-function createBettingEmbed(game, userId, betAmount) {
-  const pendingBets = game.pendingBets || {};
-  const userBet = pendingBets[userId];
-
-  let currentBetsDescription = 'No bets placed yet';
-  if (Object.keys(pendingBets).length > 0) {
-    currentBetsDescription = Object.entries(pendingBets)
-      .map(([id, bet]) => `<@${id}> - $${bet.toLocaleString()}`)
-      .join('\n');
+async function handleBetModalSubmit(interaction, gameId) {
+  const game = global.activeMarbleGames[gameId];
+  if (!game) {
+    return interaction.reply({ content: '❌ This game is no longer active.', ephemeral: true });
   }
 
-  let statusMessage = 'Waiting for all players to place their bets...';
-  let color = 0xFFD700; // Yellow for pending
+  const userId = interaction.user.id;
 
-  if (Object.keys(pendingBets).length === game.players.length) {
-    const allBets = Object.values(pendingBets);
-    if (allBets.every(bet => bet === allBets[0])) {
-      statusMessage = `**All bets match!** $${allBets[0].toLocaleString()} per player. Game starting soon!`;
-      color = 0x00FF7F; // Green for matched bets
-    } else {
-      statusMessage = 'Bets do not match! Please try again.';
-      color = 0xFF6B6B; // Red for mismatch
-    }
+  if (!game.players.some(p => p.id === userId)) {
+    return interaction.reply({ content: '❌ You are not part of this game.', ephemeral: true });
   }
 
-  return new EmbedBuilder()
-    .setTitle('Betting Phase')
-    .setDescription(statusMessage)
+  if (game.pendingBets[userId] !== undefined) {
+    return interaction.reply({ content: '❌ You have already placed your bet for this round.', ephemeral: true });
+  }
+
+  const betAmount = parseInt(interaction.fields.getTextInputValue('bet_amount_input'));
+
+  if (isNaN(betAmount) || betAmount < 50) {
+    return interaction.reply({ content: '❌ Minimum bet is **$50**. Please try again.', ephemeral: true });
+  }
+
+  await getUser(userId);
+  if (userData[userId].cash < betAmount) {
+    return interaction.reply({
+      content: `❌ You only have **$${userData[userId].cash.toLocaleString()}** — not enough to bet $${betAmount.toLocaleString()}.`,
+      ephemeral: true
+    });
+  }
+
+  game.pendingBets[userId] = betAmount;
+
+  const betsPlaced = Object.entries(game.pendingBets)
+    .map(([id, bet]) => `<@${id}> → **$${bet.toLocaleString()}**`)
+    .join('\n');
+  const waiting = game.players.filter(p => game.pendingBets[p.id] === undefined);
+
+  const updatedEmbed = new EmbedBuilder()
+    .setTitle('💰 Betting Phase')
+    .setDescription(
+      Object.keys(game.pendingBets).length === game.players.length
+        ? '✅ All bets received! Checking if they match...'
+        : `Waiting for **${waiting.length}** more player(s) to bet...`
+    )
     .addFields(
-      { 
-        name: '🎮 Players', 
-        value: game.players.map(p => `<@${p.id}>`).join(', '), 
-        inline: false 
-      },
-      { 
-        name: '🎯 Current Bets', 
-        value: currentBetsDescription, 
-        inline: false 
+      {
+        name: '✅ Bets Placed',
+        value: betsPlaced,
+        inline: true
       },
       {
-        name: '📋 Next Steps',
-        value: '• All players must bet the same amount\n• If bets do not match, the game will be cancelled.',
-        inline: false
+        name: '⏳ Still Waiting',
+        value: waiting.length > 0 ? waiting.map(p => `<@${p.id}>`).join('\n') : '*All in!*',
+        inline: true
       }
     )
-    .setColor(color)
+    .setColor(0xFFD700)
     .setTimestamp();
+
+  // Use deferUpdate + message edit since this is a modal submit from a component
+  await interaction.deferUpdate();
+  await interaction.message.edit({ embeds: [updatedEmbed] });
+
+  if (Object.keys(game.pendingBets).length === game.players.length) {
+    const allBets = Object.values(game.pendingBets);
+    const firstBet = allBets[0];
+
+    if (allBets.every(b => b === firstBet)) {
+      game.betAmount = firstBet;
+      game.totalPot = firstBet * game.players.length;
+      await collectBets(game);
+
+      setTimeout(() => startMarbleGame(interaction, gameId), 1500);
+    } else {
+      game.pendingBets = {};
+      const mismatchEmbed = new EmbedBuilder()
+        .setTitle('💸 Bets Mismatch!')
+        .setDescription(
+          `Bets were not equal — all bets have been **reset**.\n` +
+          `Everyone must bet the **same amount**. Click **Place Bet** to try again.`
+        )
+        .addFields({ name: 'Previous Bets', value: betsPlaced })
+        .setColor(0xFF6B6B)
+        .setTimestamp();
+
+      const betButton = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`place_bet_${gameId}`)
+          .setLabel('💸 Place Bet')
+          .setStyle(ButtonStyle.Primary)
+      );
+
+      await interaction.message.edit({ embeds: [mismatchEmbed], components: [betButton] });
+    }
+  }
 }
 
 async function collectBets(game) {
   if (game.betsCollected) return;
-
-  // Deduct bet amount from all players
   for (const player of game.players) {
-    userData[player.id].cash -= game.betAmount;
+    if (userData[player.id]) userData[player.id].cash -= game.betAmount;
   }
-
   game.betsCollected = true;
   await saveUserData();
 }
@@ -4235,7 +4243,6 @@ async function startMarbleGame(interaction, gameId) {
   const game = global.activeMarbleGames[gameId];
   if (!game) return;
 
-  // For simplicity, randomly assign teams
   const shuffledPlayers = [...game.players].sort(() => Math.random() - 0.5);
   game.teamA = shuffledPlayers.slice(0, 2);
   game.teamB = shuffledPlayers.slice(2, 4);
@@ -4244,8 +4251,8 @@ async function startMarbleGame(interaction, gameId) {
   game.phase = 'game';
   game.round = 1;
   game.playerGuesses = {};
+  game.roundHistory = [];
 
-  // Coin flip to determine starting team
   const coinFlip = Math.random() < 0.5 ? 'heads' : 'tails';
   game.currentTeam = coinFlip === 'heads' ? 'A' : 'B';
   game.currentPlayerIndex = 0;
@@ -4254,73 +4261,71 @@ async function startMarbleGame(interaction, gameId) {
   const numberButton = createNumberSelectionButton(gameId);
 
   const channel = interaction.channel;
-  await channel.send({ 
-    embeds: [gameStartEmbed], 
-    components: [numberButton] 
-  });
+  const msg = await channel.send({ embeds: [gameStartEmbed], components: [numberButton] });
+  game.gameMessage = msg;
 }
 
 function createGameEmbed(game, coinFlip = null) {
-  const currentTeam = game.currentTeam === 'A' ? game.teamA : game.teamB;
-  const currentPlayer = currentTeam[game.currentPlayerIndex];
+  const currentTeamArr = game.currentTeam === 'A' ? game.teamA : game.teamB;
+  const currentPlayer = currentTeamArr[game.currentPlayerIndex];
 
-  let description = `**Round ${game.round}** - Marble Gambling in Progress!`;
+  const guessedA = game.teamA.filter(p => game.playerGuesses[p.id] !== undefined).length;
+  const guessedB = game.teamB.filter(p => game.playerGuesses[p.id] !== undefined).length;
+
+  let description = `**Round ${game.round}**`;
   if (coinFlip) {
-    description += `\n\n🪙 **Coin Flip Result:** ${coinFlip.toUpperCase()}\n**Team ${game.currentTeam}** goes first!`;
+    description += `\n\n🪙 Coin flip: **${coinFlip.toUpperCase()}** — Team ${game.currentTeam} goes first!`;
   }
+  description += `\n\n🔴 Team A guessed: **${guessedA}/2** | 🔵 Team B guessed: **${guessedB}/2**`;
 
   return new EmbedBuilder()
-    .setTitle('🎲 Marble Game - Active')
+    .setTitle('🎲 Marble Game — In Progress')
     .setDescription(description)
     .addFields(
-      { 
-        name: '🔴 Team A', 
-        value: `**Players:** ${game.teamA.map(p => p.displayName).join(', ')}\n**Marbles:** ${game.teamAMarbles}/20`, 
-        inline: true 
+      {
+        name: '🔴 Team A',
+        value: `${game.teamA.map(p => `<@${p.id}>`).join(' & ')}\n${marbleBar(game.teamAMarbles)}`,
+        inline: true
       },
-      { 
-        name: '🔵 Team B', 
-        value: `**Players:** ${game.teamB.map(p => p.displayName).join(', ')}\n**Marbles:** ${game.teamBMarbles}/20`, 
-        inline: true 
+      {
+        name: '🔵 Team B',
+        value: `${game.teamB.map(p => `<@${p.id}>`).join(' & ')}\n${marbleBar(game.teamBMarbles)}`,
+        inline: true
       },
-      { 
-        name: '🎯 Current Turn', 
-        value: `**${currentPlayer.displayName}** (Team ${game.currentTeam})\nChoose a number from 1-20!`, 
-        inline: false 
+      {
+        name: `🎯 It's ${currentPlayer.displayName}'s Turn (Team ${game.currentTeam})`,
+        value: 'Click the button below to secretly choose your number **(1–20)**.',
+        inline: false
       }
     )
-    .setColor(game.currentTeam === 'A' ? 0xFF4444 : 0x4444FF)
-    .setFooter({ text: `🎲 Round ${game.round} • Waiting for number selection` })
+    .setColor(game.currentTeam === 'A' ? 0xFF4444 : 0x4466FF)
+    .setFooter({ text: `Round ${game.round} • Pot: $${game.totalPot.toLocaleString()} • ${game.roundHistory.length} rounds played` })
     .setTimestamp();
 }
 
 function createNumberSelectionButton(gameId) {
-  return new ActionRowBuilder()
-    .addComponents(
-      new ButtonBuilder()
-        .setCustomId(`select_number_${gameId}`)
-        .setLabel('Select Number (1-20)')
-        .setStyle(ButtonStyle.Primary)
-    );
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`select_number_${gameId}`)
+      .setLabel('🎯 Choose Your Number (1–20)')
+      .setStyle(ButtonStyle.Primary)
+  );
 }
 
 async function handleNumberSelection(interaction, gameId) {
   const game = global.activeMarbleGames[gameId];
-  if (!game) return;
+  if (!game || game.phase !== 'game') return;
 
-  const currentTeam = game.currentTeam === 'A' ? game.teamA : game.teamB;
-  const currentPlayer = currentTeam[game.currentPlayerIndex];
+  const currentTeamArr = game.currentTeam === 'A' ? game.teamA : game.teamB;
+  const currentPlayer = currentTeamArr[game.currentPlayerIndex];
 
   if (interaction.user.id !== currentPlayer.id) {
-    return await interaction.reply({ 
-      content: '❌ **It\'s not your turn!**', 
-      ephemeral: true 
-    });
+    return interaction.reply({ content: `❌ It's not your turn! Waiting for **${currentPlayer.displayName}**.`, ephemeral: true });
   }
 
   const modal = new ModalBuilder()
     .setCustomId(`number_modal_${gameId}`)
-    .setTitle('Choose Your Number')
+    .setTitle(`Round ${game.round} — Pick Your Number`)
     .addComponents(
       new ActionRowBuilder().addComponents(
         new TextInputBuilder()
@@ -4330,6 +4335,7 @@ async function handleNumberSelection(interaction, gameId) {
           .setMinLength(1)
           .setMaxLength(2)
           .setRequired(true)
+          .setPlaceholder('e.g. 7')
       )
     );
 
@@ -4338,94 +4344,128 @@ async function handleNumberSelection(interaction, gameId) {
 
 async function processNumberGuess(interaction, gameId) {
   const game = global.activeMarbleGames[gameId];
-  if (!game) return;
+  if (!game || game.phase !== 'game') return;
 
   const number = parseInt(interaction.fields.getTextInputValue('number_input'));
 
   if (isNaN(number) || number < 1 || number > 20) {
-    return await interaction.reply({ 
-      content: '❌ **Invalid number!** Please enter a number between 1 and 20.', 
-      ephemeral: true 
-    });
+    return interaction.reply({ content: '❌ Invalid number — must be between **1 and 20**.', ephemeral: true });
   }
 
   const playerId = interaction.user.id;
+
+  // Verify it's actually this player's turn (prevent duplicate submits)
+  const currentTeamArr = game.currentTeam === 'A' ? game.teamA : game.teamB;
+  const currentPlayer = currentTeamArr[game.currentPlayerIndex];
+  if (playerId !== currentPlayer.id) {
+    return interaction.reply({ content: '❌ It\'s not your turn right now.', ephemeral: true });
+  }
+
   game.playerGuesses[playerId] = number;
 
-  await interaction.reply({ 
-    content: `✅ **You selected ${number}!** Waiting for other players...`, 
-    ephemeral: true 
-  });
+  await interaction.reply({ content: `✅ You locked in **${number}**. Keep it secret!`, ephemeral: true });
 
-  // Move to next player
-  const currentTeamArray = game.currentTeam === 'A' ? game.teamA : game.teamB;
   game.currentPlayerIndex++;
 
-  // Check if all players in current team have guessed
-  if (game.currentPlayerIndex >= currentTeamArray.length) {
-    // Switch to other team
+  if (game.currentPlayerIndex >= currentTeamArr.length) {
     if (game.currentTeam === 'A') {
       game.currentTeam = 'B';
       game.currentPlayerIndex = 0;
     } else {
-      // All players have guessed, run the randomizer
-      await runRandomizer(interaction, gameId);
+      // All 4 players have guessed — run the draw
+      if (game.gameMessage) {
+        await game.gameMessage.edit({ components: [] }); // Disable button while rolling
+      }
+      await runRandomizer(gameId);
       return;
     }
   }
 
-  // Update embed for next player
   const updatedEmbed = createGameEmbed(game);
   const numberButton = createNumberSelectionButton(gameId);
-
-  await interaction.message.edit({ 
-    embeds: [updatedEmbed], 
-    components: [numberButton] 
-  });
+  if (game.gameMessage) {
+    await game.gameMessage.edit({ embeds: [updatedEmbed], components: [numberButton] });
+  }
 }
 
-async function runRandomizer(interaction, gameId) {
+async function runRandomizer(gameId) {
   const game = global.activeMarbleGames[gameId];
   if (!game) return;
 
-  const allGuesses = Object.values(game.playerGuesses);
-  let randomNumber;
-  let attempts = 0;
-  const maxAttempts = 100; // Prevent infinite loops
+  const guesses = game.playerGuesses;
+  const allGuessedNumbers = Object.values(guesses);
+  const uniqueGuesses = [...new Set(allGuessedNumbers)];
 
-  // Keep rolling until we hit a guessed number or max attempts
+  let drawnNumber;
+  let rollLog = [];
+  let attempts = 0;
+
   do {
-    randomNumber = Math.floor(Math.random() * 20) + 1;
+    drawnNumber = Math.floor(Math.random() * 20) + 1;
     attempts++;
 
-    if (attempts >= maxAttempts) {
-      // Force a hit to prevent infinite loops
-      randomNumber = allGuesses[Math.floor(Math.random() * allGuesses.length)];
+    if (!uniqueGuesses.includes(drawnNumber)) {
+      rollLog.push(`~~${drawnNumber}~~`);
+
+      if (rollLog.length <= 8 && game.gameMessage) {
+        const rollingEmbed = new EmbedBuilder()
+          .setTitle('🎲 Drawing...')
+          .setDescription(
+            `Rolling... ${rollLog.join('  ')}\n\nNo match yet — re-rolling!`
+          )
+          .setColor(0xFFA500)
+          .setTimestamp();
+        await game.gameMessage.edit({ embeds: [rollingEmbed], components: [] });
+        await new Promise(r => setTimeout(r, 1200));
+      }
+    }
+
+    if (attempts >= 80) {
+      drawnNumber = uniqueGuesses[Math.floor(Math.random() * uniqueGuesses.length)];
       break;
     }
+  } while (!uniqueGuesses.includes(drawnNumber));
 
-    if (!allGuesses.includes(randomNumber)) {
-      // Show re-roll message
-      const rerollEmbed = new EmbedBuilder()
-        .setTitle('🎲 Randomizer Rolling...')
-        .setDescription(`**Number ${randomNumber}** - No hits! Re-rolling in 3 seconds...`)
-        .setColor(0xFFA500)
-        .setTimestamp();
+  // Find all players who guessed this number
+  const winnerIds = Object.keys(guesses).filter(id => guesses[id] === drawnNumber);
 
-      await interaction.message.edit({ embeds: [rerollEmbed], components: [] });
-      await new Promise(resolve => setTimeout(resolve, 3000));
-    }
-  } while (!allGuesses.includes(randomNumber));
+  // Check if it's a cross-team tie (one from each team)
+  const teamAWinners = winnerIds.filter(id => game.teamA.some(p => p.id === id));
+  const teamBWinners = winnerIds.filter(id => game.teamB.some(p => p.id === id));
+  const isTie = teamAWinners.length > 0 && teamBWinners.length > 0;
 
-  // Find the winner
-  const winnerId = Object.keys(game.playerGuesses).find(
-    playerId => game.playerGuesses[playerId] === randomNumber
-  );
-  const winnerUser = game.players.find(p => p.id === winnerId);
-  const winnerTeam = game.teamA.some(p => p.id === winnerId) ? 'A' : 'B';
-  const loserTeam = winnerTeam === 'A' ? 'B' : 'A';
+  let winnerTeam, winnerUser;
 
-  // Transfer marble
+  if (isTie) {
+    // Both teams guessed this number — it's a draw, no marble transfer
+    const tieEmbed = new EmbedBuilder()
+      .setTitle('🤝 It\'s a Tie!')
+      .setDescription(
+        `Both teams guessed **${drawnNumber}**!\n\nNo marbles are transferred — the round is a draw.`
+      )
+      .addFields(buildScoreField(game), buildGuessField(game, guesses))
+      .setColor(0xFFD700)
+      .setTimestamp();
+
+    if (game.gameMessage) await game.gameMessage.edit({ embeds: [tieEmbed], components: [] });
+
+    game.roundHistory.push({ round: game.round, drawn: drawnNumber, result: 'tie' });
+    setTimeout(() => nextRound(gameId), 4000);
+    return;
+  }
+
+  // Normal win
+  if (winnerIds.length === 0) {
+    // No one guessed this number (shouldn't happen after loop, but safeguard)
+    game.roundHistory.push({ round: game.round, drawn: drawnNumber, result: 'no_match' });
+    setTimeout(() => nextRound(gameId), 4000);
+    return;
+  }
+
+  const winnerId = winnerIds[0];
+  winnerUser = game.players.find(p => p.id === winnerId);
+  winnerTeam = teamAWinners.length > 0 ? 'A' : 'B';
+
   if (winnerTeam === 'A') {
     game.teamAMarbles++;
     game.teamBMarbles--;
@@ -4434,104 +4474,115 @@ async function runRandomizer(interaction, gameId) {
     game.teamAMarbles--;
   }
 
+  game.roundHistory.push({ round: game.round, drawn: drawnNumber, winner: winnerUser.displayName, team: winnerTeam });
+
   const resultEmbed = new EmbedBuilder()
-    .setTitle('Randomiser Result!')
-    .setDescription(`**Number ${randomNumber}** was chosen!\n**${winnerUser.displayName}** (Team ${winnerTeam}) wins this round!`)
-    .addFields(
-      { 
-        name: 'Round Winner', 
-        value: `**${winnerUser.displayName}** guessed **${randomNumber}**`, 
-        inline: false 
-      },
-      { 
-        name: 'Current Scores', 
-        value: `🔴 **Team A:** ${game.teamAMarbles} marbles\n🔵 **Team B:** ${game.teamBMarbles} marbles`, 
-        inline: false 
-      }
+    .setTitle(`🎯 Round ${game.round} Result`)
+    .setDescription(
+      `The draw landed on **${drawnNumber}**!\n\n` +
+      `**${winnerUser.displayName}** (Team ${winnerTeam}) guessed correctly and wins a marble!`
     )
-    .setColor(winnerTeam === 'A' ? 0xFF4444 : 0x4444FF)
+    .addFields(
+      buildScoreField(game),
+      buildGuessField(game, guesses)
+    )
+    .setColor(winnerTeam === 'A' ? 0xFF4444 : 0x4466FF)
     .setTimestamp();
 
-  await interaction.message.edit({ embeds: [resultEmbed], components: [] });
+  if (game.gameMessage) await game.gameMessage.edit({ embeds: [resultEmbed], components: [] });
 
-  // Check win condition
-  if (game.teamAMarbles === 0 || game.teamBMarbles === 0 || game.teamAMarbles === 20 || game.teamBMarbles === 20) {
-    setTimeout(() => endGame(interaction, gameId), 3000);
+  const isOver = game.teamAMarbles <= 0 || game.teamBMarbles <= 0 || game.teamAMarbles >= 20 || game.teamBMarbles >= 20;
+  if (isOver) {
+    setTimeout(() => endGame(gameId), 3500);
   } else {
-    setTimeout(() => nextRound(interaction, gameId), 5000);
+    setTimeout(() => nextRound(gameId), 4500);
   }
 }
 
-async function nextRound(interaction, gameId) {
+function buildScoreField(game) {
+  return {
+    name: '📊 Current Scores',
+    value: `🔴 Team A: ${marbleBar(game.teamAMarbles)}\n🔵 Team B: ${marbleBar(game.teamBMarbles)}`,
+    inline: false
+  };
+}
+
+function buildGuessField(game, guesses) {
+  const lines = [...game.teamA, ...game.teamB].map(p => {
+    const g = guesses[p.id];
+    return `<@${p.id}> → **${g !== undefined ? g : '?'}**`;
+  });
+  return { name: '🔢 All Guesses This Round', value: lines.join('\n'), inline: false };
+}
+
+async function nextRound(gameId) {
   const game = global.activeMarbleGames[gameId];
   if (!game) return;
 
-  // Reset for next round
   game.round++;
   game.playerGuesses = {};
 
-  // Flip coin for next round
   const coinFlip = Math.random() < 0.5 ? 'heads' : 'tails';
   game.currentTeam = coinFlip === 'heads' ? 'A' : 'B';
   game.currentPlayerIndex = 0;
 
   const nextRoundEmbed = createGameEmbed(game, coinFlip);
-  const numberButton = createNumberSelectionButton(gameId);
+  const numberButton = createNumberSelectionButton(game.gameId);
 
-  await interaction.message.edit({ 
-    embeds: [nextRoundEmbed], 
-    components: [numberButton] 
-  });
+  if (game.gameMessage) {
+    await game.gameMessage.edit({ embeds: [nextRoundEmbed], components: [numberButton] });
+  }
 }
 
-async function endGame(interaction, gameId) {
+async function endGame(gameId) {
   const game = global.activeMarbleGames[gameId];
   if (!game) return;
 
-  const winningTeam = game.teamAMarbles === 20 || game.teamBMarbles === 0 ? 'A' : 'B';
+  const winningTeam = (game.teamAMarbles >= 20 || game.teamBMarbles <= 0) ? 'A' : 'B';
+  const losingTeam = winningTeam === 'A' ? 'B' : 'A';
   const winningPlayers = winningTeam === 'A' ? game.teamA : game.teamB;
+  const losingPlayers = losingTeam === 'A' ? game.teamA : game.teamB;
   const finalScoreA = game.teamAMarbles;
   const finalScoreB = game.teamBMarbles;
 
-  // Distribute winnings to winning team
-  const winningsPerPlayer = game.totalPot / 2; // Split pot between 2 winners
+  const winningsPerPlayer = game.totalPot / 2;
   for (const player of winningPlayers) {
-    userData[player.id].cash += winningsPerPlayer;
+    if (userData[player.id]) userData[player.id].cash += winningsPerPlayer;
   }
   await saveUserData();
 
+  const duration = Math.max(1, Math.round((Date.now() - game.createdAt) / 60000));
+
   const gameEndEmbed = new EmbedBuilder()
-    .setTitle('Marble Game Complete!')
-    .setDescription(`**Team ${winningTeam} Wins!**\n\nCongratulations to the victorious players!`)
+    .setTitle(`🏆 Team ${winningTeam} Wins the Marble Game!`)
+    .setDescription(
+      `After **${game.round} rounds**, Team ${winningTeam} dominated!\n\n` +
+      `🏅 **Winners:** ${winningPlayers.map(p => `<@${p.id}>`).join(' & ')}\n` +
+      `💀 **Eliminated:** ${losingPlayers.map(p => `<@${p.id}>`).join(' & ')}`
+    )
     .addFields(
-      { 
-        name: 'Winners', 
-        value: winningPlayers.map(p => `**${p.displayName}**`).join('\\n'), 
-        inline: true 
+      {
+        name: '📊 Final Score',
+        value: `🔴 Team A: ${marbleBar(finalScoreA)}\n🔵 Team B: ${marbleBar(finalScoreB)}`,
+        inline: false
       },
-      { 
-        name: 'Final Score', 
-        value: `🔴 **Team A:** ${finalScoreA} marbles\n🔵 **Team B:** ${finalScoreB} marbles`, 
-        inline: true 
+      {
+        name: '💰 Prize',
+        value: `Each winner receives **$${winningsPerPlayer.toLocaleString()}**\nTotal pot: **$${game.totalPot.toLocaleString()}**`,
+        inline: true
       },
-      { 
-        name: 'Prize Distribution', 
-        value: `**Each Winner Receives:** $${winningsPerPlayer.toLocaleString()}\n**Total Pot:** $${game.totalPot.toLocaleString()}`, 
-        inline: false 
-      },
-      { 
-        name: 'Game Stats', 
-        value: `**Rounds Played:** ${game.round}\n**Duration:** ${Math.round((Date.now() - game.createdAt) / 60000)} minutes`, 
-        inline: false 
+      {
+        name: '📈 Game Stats',
+        value: `Rounds played: **${game.round}**\nDuration: **${duration} min**`,
+        inline: true
       }
     )
-    .setColor(0x00FF7F)
-    .setFooter({ text: 'Winnings have been distributed! Thanks for playing!' })
+    .setColor(0xFFD700)
+    .setFooter({ text: 'Winnings distributed! Thanks for playing.' })
     .setTimestamp();
 
-  await interaction.message.edit({ embeds: [gameEndEmbed], components: [] });
+  if (game.gameMessage) await game.gameMessage.edit({ embeds: [gameEndEmbed], components: [] });
 
-  // Clean up
   delete global.activeMarbleGames[gameId];
 }
 
