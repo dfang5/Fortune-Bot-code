@@ -4255,14 +4255,26 @@ async function startMarbleGame(interaction, gameId) {
 
   const coinFlip = Math.random() < 0.5 ? 'heads' : 'tails';
   game.currentTeam = coinFlip === 'heads' ? 'A' : 'B';
+  game.firstTeam = game.currentTeam; // track which team voted first this round
   game.currentPlayerIndex = 0;
+  game.channel = interaction.channel;
 
   const gameStartEmbed = createGameEmbed(game, coinFlip);
   const numberButton = createNumberSelectionButton(gameId);
 
-  const channel = interaction.channel;
-  const msg = await channel.send({ embeds: [gameStartEmbed], components: [numberButton] });
+  const msg = await game.channel.send({ embeds: [gameStartEmbed], components: [numberButton] });
   game.gameMessage = msg;
+}
+
+// Delete existing game message and send a fresh one at the bottom of the channel
+async function refreshGameMessage(game, embeds, components) {
+  if (game.gameMessage) {
+    try { await game.gameMessage.delete(); } catch (_) {}
+    game.gameMessage = null;
+  }
+  if (game.channel) {
+    game.gameMessage = await game.channel.send({ embeds, components: components ?? [] });
+  }
 }
 
 function createGameEmbed(game, coinFlip = null) {
@@ -4354,11 +4366,11 @@ async function processNumberGuess(interaction, gameId) {
 
   const playerId = interaction.user.id;
 
-  // Verify it's actually this player's turn (prevent duplicate submits)
+  // Verify it is actually this player's turn
   const currentTeamArr = game.currentTeam === 'A' ? game.teamA : game.teamB;
   const currentPlayer = currentTeamArr[game.currentPlayerIndex];
   if (playerId !== currentPlayer.id) {
-    return interaction.reply({ content: '❌ It\'s not your turn right now.', ephemeral: true });
+    return interaction.reply({ content: `❌ It's not your turn right now. Waiting for **${currentPlayer.displayName}**.`, ephemeral: true });
   }
 
   game.playerGuesses[playerId] = number;
@@ -4368,24 +4380,24 @@ async function processNumberGuess(interaction, gameId) {
   game.currentPlayerIndex++;
 
   if (game.currentPlayerIndex >= currentTeamArr.length) {
-    if (game.currentTeam === 'A') {
-      game.currentTeam = 'B';
+    // Current team has finished voting
+    const otherTeam = game.currentTeam === 'A' ? 'B' : 'A';
+
+    if (game.currentTeam === game.firstTeam) {
+      // First team is done — switch to the second team
+      game.currentTeam = otherTeam;
       game.currentPlayerIndex = 0;
     } else {
-      // All 4 players have guessed — run the draw
-      if (game.gameMessage) {
-        await game.gameMessage.edit({ components: [] }); // Disable button while rolling
-      }
+      // Second team is done — all 4 players have voted, run the draw
       await runRandomizer(gameId);
       return;
     }
   }
 
+  // Update the game message: delete old and resend at bottom
   const updatedEmbed = createGameEmbed(game);
   const numberButton = createNumberSelectionButton(gameId);
-  if (game.gameMessage) {
-    await game.gameMessage.edit({ embeds: [updatedEmbed], components: [numberButton] });
-  }
+  await refreshGameMessage(game, [updatedEmbed], [numberButton]);
 }
 
 async function runRandomizer(gameId) {
@@ -4396,9 +4408,25 @@ async function runRandomizer(gameId) {
   const allGuessedNumbers = Object.values(guesses);
   const uniqueGuesses = [...new Set(allGuessedNumbers)];
 
+  // Delete old message and send fresh one for the rolling animation
+  if (game.gameMessage) {
+    try { await game.gameMessage.delete(); } catch (_) {}
+    game.gameMessage = null;
+  }
+
   let drawnNumber;
   let rollLog = [];
   let attempts = 0;
+
+  // Send initial rolling message
+  if (game.channel) {
+    const initialEmbed = new EmbedBuilder()
+      .setTitle('🎲 Drawing Numbers...')
+      .setDescription('All players have cast their votes!\n\nRolling...')
+      .setColor(0xFFA500)
+      .setTimestamp();
+    game.gameMessage = await game.channel.send({ embeds: [initialEmbed], components: [] });
+  }
 
   do {
     drawnNumber = Math.floor(Math.random() * 20) + 1;
@@ -4407,16 +4435,17 @@ async function runRandomizer(gameId) {
     if (!uniqueGuesses.includes(drawnNumber)) {
       rollLog.push(`~~${drawnNumber}~~`);
 
-      if (rollLog.length <= 8 && game.gameMessage) {
+      if (game.gameMessage) {
         const rollingEmbed = new EmbedBuilder()
-          .setTitle('🎲 Drawing...')
+          .setTitle('🎲 Drawing Numbers...')
           .setDescription(
-            `Rolling... ${rollLog.join('  ')}\n\nNo match yet — re-rolling!`
+            `Rolled: ${rollLog.join('  ')}\n\n` +
+            `**${drawnNumber}** — no match! Re-rolling...`
           )
           .setColor(0xFFA500)
           .setTimestamp();
         await game.gameMessage.edit({ embeds: [rollingEmbed], components: [] });
-        await new Promise(r => setTimeout(r, 1200));
+        await new Promise(r => setTimeout(r, 1100));
       }
     }
 
@@ -4429,42 +4458,39 @@ async function runRandomizer(gameId) {
   // Find all players who guessed this number
   const winnerIds = Object.keys(guesses).filter(id => guesses[id] === drawnNumber);
 
-  // Check if it's a cross-team tie (one from each team)
+  // Check if it's a cross-team tie
   const teamAWinners = winnerIds.filter(id => game.teamA.some(p => p.id === id));
   const teamBWinners = winnerIds.filter(id => game.teamB.some(p => p.id === id));
   const isTie = teamAWinners.length > 0 && teamBWinners.length > 0;
 
-  let winnerTeam, winnerUser;
-
   if (isTie) {
-    // Both teams guessed this number — it's a draw, no marble transfer
+    game.roundHistory.push({ round: game.round, drawn: drawnNumber, result: 'tie' });
+
+    const missedLog = rollLog.length > 0 ? `\nMisses: ${rollLog.join('  ')}` : '';
     const tieEmbed = new EmbedBuilder()
-      .setTitle('🤝 It\'s a Tie!')
+      .setTitle('🤝 Tie Round!')
       .setDescription(
-        `Both teams guessed **${drawnNumber}**!\n\nNo marbles are transferred — the round is a draw.`
+        `The draw landed on **${drawnNumber}** — but **both teams** had someone guess it!\n` +
+        `No marbles are transferred.${missedLog}`
       )
       .addFields(buildScoreField(game), buildGuessField(game, guesses))
       .setColor(0xFFD700)
       .setTimestamp();
 
     if (game.gameMessage) await game.gameMessage.edit({ embeds: [tieEmbed], components: [] });
-
-    game.roundHistory.push({ round: game.round, drawn: drawnNumber, result: 'tie' });
     setTimeout(() => nextRound(gameId), 4000);
     return;
   }
 
-  // Normal win
   if (winnerIds.length === 0) {
-    // No one guessed this number (shouldn't happen after loop, but safeguard)
     game.roundHistory.push({ round: game.round, drawn: drawnNumber, result: 'no_match' });
     setTimeout(() => nextRound(gameId), 4000);
     return;
   }
 
   const winnerId = winnerIds[0];
-  winnerUser = game.players.find(p => p.id === winnerId);
-  winnerTeam = teamAWinners.length > 0 ? 'A' : 'B';
+  const winnerUser = game.players.find(p => p.id === winnerId);
+  const winnerTeam = teamAWinners.length > 0 ? 'A' : 'B';
 
   if (winnerTeam === 'A') {
     game.teamAMarbles++;
@@ -4476,16 +4502,14 @@ async function runRandomizer(gameId) {
 
   game.roundHistory.push({ round: game.round, drawn: drawnNumber, winner: winnerUser.displayName, team: winnerTeam });
 
+  const missedLog = rollLog.length > 0 ? `\nMisses: ${rollLog.join('  ')}` : '';
   const resultEmbed = new EmbedBuilder()
-    .setTitle(`🎯 Round ${game.round} Result`)
+    .setTitle(`🎯 Round ${game.round} — Result`)
     .setDescription(
-      `The draw landed on **${drawnNumber}**!\n\n` +
-      `**${winnerUser.displayName}** (Team ${winnerTeam}) guessed correctly and wins a marble!`
+      `The draw landed on **${drawnNumber}**!${missedLog}\n\n` +
+      `**${winnerUser.displayName}** (Team ${winnerTeam}) wins the round and steals a marble! 🪙`
     )
-    .addFields(
-      buildScoreField(game),
-      buildGuessField(game, guesses)
-    )
+    .addFields(buildScoreField(game), buildGuessField(game, guesses))
     .setColor(winnerTeam === 'A' ? 0xFF4444 : 0x4466FF)
     .setTimestamp();
 
@@ -4493,9 +4517,9 @@ async function runRandomizer(gameId) {
 
   const isOver = game.teamAMarbles <= 0 || game.teamBMarbles <= 0 || game.teamAMarbles >= 20 || game.teamBMarbles >= 20;
   if (isOver) {
-    setTimeout(() => endGame(gameId), 3500);
+    setTimeout(() => endGame(gameId), 4000);
   } else {
-    setTimeout(() => nextRound(gameId), 4500);
+    setTimeout(() => nextRound(gameId), 5000);
   }
 }
 
@@ -4524,14 +4548,14 @@ async function nextRound(gameId) {
 
   const coinFlip = Math.random() < 0.5 ? 'heads' : 'tails';
   game.currentTeam = coinFlip === 'heads' ? 'A' : 'B';
+  game.firstTeam = game.currentTeam; // reset first team for this round
   game.currentPlayerIndex = 0;
 
   const nextRoundEmbed = createGameEmbed(game, coinFlip);
   const numberButton = createNumberSelectionButton(game.gameId);
 
-  if (game.gameMessage) {
-    await game.gameMessage.edit({ embeds: [nextRoundEmbed], components: [numberButton] });
-  }
+  // Delete old message and send fresh one at the bottom
+  await refreshGameMessage(game, [nextRoundEmbed], [numberButton]);
 }
 
 async function endGame(gameId) {
@@ -4581,7 +4605,8 @@ async function endGame(gameId) {
     .setFooter({ text: 'Winnings distributed! Thanks for playing.' })
     .setTimestamp();
 
-  if (game.gameMessage) await game.gameMessage.edit({ embeds: [gameEndEmbed], components: [] });
+  // Send final message fresh at the bottom
+  await refreshGameMessage(game, [gameEndEmbed], []);
 
   delete global.activeMarbleGames[gameId];
 }
