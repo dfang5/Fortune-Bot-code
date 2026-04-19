@@ -15,7 +15,8 @@ const {
   TextInputStyle,
   ButtonBuilder,
   ButtonStyle,
-  ComponentType
+  ComponentType,
+  PermissionFlagsBits
 } = require('discord.js');
 require('dotenv').config();
 const DEVELOPER_ID = '1299875574894039184';
@@ -926,6 +927,67 @@ client.once('clientReady', async () => {
       .setName('collection')
       .setDescription('Browse your artefact field guide — see what you have and have not discovered'),
 
+    new SlashCommandBuilder()
+      .setName('give-roles')
+      .setDescription('View all roles this bot can assign in this server (Admin only)')
+      .setDMPermission(false),
+
+    new SlashCommandBuilder()
+      .setName('timeout')
+      .setDescription('Timeout a member (Admin only)')
+      .addUserOption(option =>
+        option.setName('user')
+          .setDescription('User to timeout')
+          .setRequired(true))
+      .addIntegerOption(option =>
+        option.setName('duration')
+          .setDescription('Timeout duration in minutes (max 40320 = 28 days)')
+          .setRequired(true)
+          .setMinValue(1)
+          .setMaxValue(40320))
+      .addStringOption(option =>
+        option.setName('reason')
+          .setDescription('Reason for the timeout')
+          .setRequired(false))
+      .setDMPermission(false),
+
+    new SlashCommandBuilder()
+      .setName('kick')
+      .setDescription('Kick a member from the server (Admin only)')
+      .addUserOption(option =>
+        option.setName('user')
+          .setDescription('User to kick')
+          .setRequired(true))
+      .addStringOption(option =>
+        option.setName('reason')
+          .setDescription('Reason for the kick')
+          .setRequired(false))
+      .setDMPermission(false),
+
+    new SlashCommandBuilder()
+      .setName('ban')
+      .setDescription('Ban a member from the server (Admin only)')
+      .addUserOption(option =>
+        option.setName('user')
+          .setDescription('User to ban')
+          .setRequired(true))
+      .addIntegerOption(option =>
+        option.setName('duration')
+          .setDescription('Temporary ban duration in hours (leave empty or 0 for permanent)')
+          .setRequired(false)
+          .setMinValue(0))
+      .addIntegerOption(option =>
+        option.setName('delete_messages')
+          .setDescription('Days of messages to delete (0–7, default 0)')
+          .setRequired(false)
+          .setMinValue(0)
+          .setMaxValue(7))
+      .addStringOption(option =>
+        option.setName('reason')
+          .setDescription('Reason for the ban')
+          .setRequired(false))
+      .setDMPermission(false),
+
   ];
 
   // Developer-only commands (registered separately)
@@ -1305,6 +1367,22 @@ client.on('interactionCreate', async interaction => {
       case 'collection':
         await handleCollectionCommand(interaction, userId);
         break;
+
+      case 'give-roles':
+        await handleGiveRolesCommand(interaction);
+        break;
+
+      case 'timeout':
+        await handleTimeoutCommand(interaction);
+        break;
+
+      case 'kick':
+        await handleKickCommand(interaction);
+        break;
+
+      case 'ban':
+        await handleBanCommand(interaction);
+        break;
     }
   } catch (error) {
     console.error('Error handling slash command:', error);
@@ -1326,6 +1404,225 @@ client.on('interactionCreate', async interaction => {
     }
   }
 });
+
+// === MODERATION COMMAND HANDLERS ===
+
+async function handleGiveRolesCommand(interaction) {
+  if (!isDeveloper(interaction.user.id) && !interaction.member?.permissions.has(PermissionFlagsBits.Administrator)) {
+    return interaction.reply({
+      embeds: [
+        new EmbedBuilder()
+          .setTitle('Access Denied')
+          .setDescription('You need **Administrator** permissions or must be a bot developer to use this command.')
+          .setColor(0xFF6B6B)
+          .setTimestamp()
+      ],
+      ephemeral: true
+    });
+  }
+
+  const botMember = interaction.guild.members.me;
+  if (!botMember) {
+    return interaction.reply({ content: 'Unable to retrieve bot member data.', ephemeral: true });
+  }
+
+  const botHighestRole = botMember.roles.highest;
+
+  const assignableRoles = interaction.guild.roles.cache
+    .filter(role => role.position < botHighestRole.position && role.id !== interaction.guild.id)
+    .sort((a, b) => b.position - a.position);
+
+  if (assignableRoles.size === 0) {
+    return interaction.reply({
+      embeds: [
+        new EmbedBuilder()
+          .setTitle('No Assignable Roles')
+          .setDescription('There are no roles below the bot\'s highest role that it can assign.')
+          .setColor(0xFF6B6B)
+          .setTimestamp()
+      ],
+      ephemeral: true
+    });
+  }
+
+  const roleList = assignableRoles.map(role => `<@&${role.id}> — \`${role.name}\``).join('\n');
+
+  const embed = new EmbedBuilder()
+    .setTitle('Roles This Bot Can Assign')
+    .setDescription(roleList)
+    .setColor(0x5865F2)
+    .setFooter({ text: `${assignableRoles.size} assignable role(s) • Read-only view` })
+    .setTimestamp();
+
+  await interaction.reply({ embeds: [embed], ephemeral: true });
+}
+
+async function handleTimeoutCommand(interaction) {
+  if (!isDeveloper(interaction.user.id) && !interaction.member?.permissions.has(PermissionFlagsBits.Administrator)) {
+    return interaction.reply({
+      embeds: [
+        new EmbedBuilder()
+          .setTitle('Access Denied')
+          .setDescription('You need **Administrator** permissions or must be a bot developer to use this command.')
+          .setColor(0xFF6B6B)
+          .setTimestamp()
+      ],
+      ephemeral: true
+    });
+  }
+
+  const target = interaction.options.getMember('user');
+  const durationMinutes = interaction.options.getInteger('duration');
+  const reason = interaction.options.getString('reason') || 'No reason provided';
+
+  if (!target) {
+    return interaction.reply({ content: 'That user was not found in this server.', ephemeral: true });
+  }
+  if (target.id === interaction.user.id) {
+    return interaction.reply({ content: 'You cannot timeout yourself.', ephemeral: true });
+  }
+  if (target.id === interaction.client.user.id) {
+    return interaction.reply({ content: 'I cannot timeout myself.', ephemeral: true });
+  }
+  if (!target.moderatable) {
+    return interaction.reply({ content: 'I cannot timeout this user — they may have higher permissions than me.', ephemeral: true });
+  }
+
+  const durationMs = durationMinutes * 60 * 1000;
+
+  let durationLabel;
+  if (durationMinutes < 60) {
+    durationLabel = `${durationMinutes} minute(s)`;
+  } else if (durationMinutes < 1440) {
+    durationLabel = `${Math.round(durationMinutes / 60 * 10) / 10} hour(s)`;
+  } else {
+    durationLabel = `${Math.round(durationMinutes / 1440 * 10) / 10} day(s)`;
+  }
+
+  await target.timeout(durationMs, reason);
+
+  const embed = new EmbedBuilder()
+    .setTitle('Member Timed Out')
+    .setDescription(`<@${target.id}> has been timed out.`)
+    .addFields(
+      { name: 'Duration', value: durationLabel, inline: true },
+      { name: 'Moderator', value: `<@${interaction.user.id}>`, inline: true },
+      { name: 'Reason', value: reason }
+    )
+    .setColor(0xFFA500)
+    .setTimestamp();
+
+  await interaction.reply({ embeds: [embed] });
+}
+
+async function handleKickCommand(interaction) {
+  if (!isDeveloper(interaction.user.id) && !interaction.member?.permissions.has(PermissionFlagsBits.Administrator)) {
+    return interaction.reply({
+      embeds: [
+        new EmbedBuilder()
+          .setTitle('Access Denied')
+          .setDescription('You need **Administrator** permissions or must be a bot developer to use this command.')
+          .setColor(0xFF6B6B)
+          .setTimestamp()
+      ],
+      ephemeral: true
+    });
+  }
+
+  const target = interaction.options.getMember('user');
+  const reason = interaction.options.getString('reason') || 'No reason provided';
+
+  if (!target) {
+    return interaction.reply({ content: 'That user was not found in this server.', ephemeral: true });
+  }
+  if (target.id === interaction.user.id) {
+    return interaction.reply({ content: 'You cannot kick yourself.', ephemeral: true });
+  }
+  if (target.id === interaction.client.user.id) {
+    return interaction.reply({ content: 'I cannot kick myself.', ephemeral: true });
+  }
+  if (!target.kickable) {
+    return interaction.reply({ content: 'I cannot kick this user — they may have higher permissions than me.', ephemeral: true });
+  }
+
+  await target.kick(reason);
+
+  const embed = new EmbedBuilder()
+    .setTitle('Member Kicked')
+    .setDescription(`<@${target.id}> has been kicked from the server.`)
+    .addFields(
+      { name: 'Moderator', value: `<@${interaction.user.id}>`, inline: true },
+      { name: 'Reason', value: reason }
+    )
+    .setColor(0xFF6B6B)
+    .setTimestamp();
+
+  await interaction.reply({ embeds: [embed] });
+}
+
+async function handleBanCommand(interaction) {
+  if (!isDeveloper(interaction.user.id) && !interaction.member?.permissions.has(PermissionFlagsBits.Administrator)) {
+    return interaction.reply({
+      embeds: [
+        new EmbedBuilder()
+          .setTitle('Access Denied')
+          .setDescription('You need **Administrator** permissions or must be a bot developer to use this command.')
+          .setColor(0xFF6B6B)
+          .setTimestamp()
+      ],
+      ephemeral: true
+    });
+  }
+
+  const target = interaction.options.getMember('user');
+  const durationHours = interaction.options.getInteger('duration') ?? 0;
+  const deleteMessages = interaction.options.getInteger('delete_messages') ?? 0;
+  const reason = interaction.options.getString('reason') || 'No reason provided';
+
+  if (!target) {
+    return interaction.reply({ content: 'That user was not found in this server.', ephemeral: true });
+  }
+  if (target.id === interaction.user.id) {
+    return interaction.reply({ content: 'You cannot ban yourself.', ephemeral: true });
+  }
+  if (target.id === interaction.client.user.id) {
+    return interaction.reply({ content: 'I cannot ban myself.', ephemeral: true });
+  }
+  if (!target.bannable) {
+    return interaction.reply({ content: 'I cannot ban this user — they may have higher permissions than me.', ephemeral: true });
+  }
+
+  const durationLabel = durationHours === 0 ? 'Permanent' : `${durationHours} hour(s)`;
+  const targetId = target.id;
+  const guild = interaction.guild;
+
+  await target.ban({ deleteMessageSeconds: deleteMessages * 86400, reason });
+
+  const embed = new EmbedBuilder()
+    .setTitle('Member Banned')
+    .setDescription(`<@${targetId}> has been banned from the server.`)
+    .addFields(
+      { name: 'Duration', value: durationLabel, inline: true },
+      { name: 'Moderator', value: `<@${interaction.user.id}>`, inline: true },
+      { name: 'Messages Deleted', value: `${deleteMessages} day(s)`, inline: true },
+      { name: 'Reason', value: reason }
+    )
+    .setColor(0x8B0000)
+    .setTimestamp();
+
+  await interaction.reply({ embeds: [embed] });
+
+  if (durationHours > 0) {
+    setTimeout(async () => {
+      try {
+        await guild.members.unban(targetId, 'Temporary ban expired');
+        console.log(`Auto-unbanned user ${targetId} from ${guild.name} after ${durationHours} hour(s).`);
+      } catch (err) {
+        console.error(`Failed to auto-unban user ${targetId}:`, err);
+      }
+    }, durationHours * 60 * 60 * 1000);
+  }
+}
 
 // Command handlers
 async function handleInfoCommand(interaction) {
