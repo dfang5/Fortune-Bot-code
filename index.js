@@ -1421,9 +1421,17 @@ async function handleGiveRolesCommand(interaction) {
     });
   }
 
-  const botMember = interaction.guild.members.me;
+  await interaction.deferReply({ ephemeral: true });
+
+  try {
+    await interaction.guild.roles.fetch();
+  } catch (e) {
+    console.error('Failed to fetch roles:', e);
+  }
+
+  const botMember = interaction.guild.members.me ?? await interaction.guild.members.fetchMe().catch(() => null);
   if (!botMember) {
-    return interaction.reply({ content: 'Unable to retrieve bot member data.', ephemeral: true });
+    return interaction.editReply({ content: 'Unable to retrieve bot member data.' });
   }
 
   const botHighestRole = botMember.roles.highest;
@@ -1433,28 +1441,43 @@ async function handleGiveRolesCommand(interaction) {
     .sort((a, b) => b.position - a.position);
 
   if (assignableRoles.size === 0) {
-    return interaction.reply({
+    return interaction.editReply({
       embeds: [
         new EmbedBuilder()
           .setTitle('No Assignable Roles')
           .setDescription('There are no roles below the bot\'s highest role that it can assign.')
           .setColor(0xFF6B6B)
           .setTimestamp()
-      ],
-      ephemeral: true
+      ]
     });
   }
 
-  const roleList = assignableRoles.map(role => `<@&${role.id}> — \`${role.name}\``).join('\n');
+  const roleLines = assignableRoles.map(role => `<@&${role.id}> — \`${role.name}\``);
+
+  const MAX_DESC = 4000;
+  let description = '';
+  let truncated = false;
+
+  for (const line of roleLines) {
+    if ((description + '\n' + line).length > MAX_DESC) {
+      truncated = true;
+      break;
+    }
+    description += (description ? '\n' : '') + line;
+  }
+
+  if (truncated) {
+    description += '\n*...and more roles not shown due to length.*';
+  }
 
   const embed = new EmbedBuilder()
     .setTitle('Roles This Bot Can Assign')
-    .setDescription(roleList)
+    .setDescription(description)
     .setColor(0x5865F2)
     .setFooter({ text: `${assignableRoles.size} assignable role(s) • Read-only view` })
     .setTimestamp();
 
-  await interaction.reply({ embeds: [embed], ephemeral: true });
+  await interaction.editReply({ embeds: [embed] });
 }
 
 async function handleTimeoutCommand(interaction) {
