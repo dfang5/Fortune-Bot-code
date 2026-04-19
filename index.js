@@ -929,7 +929,11 @@ client.once('clientReady', async () => {
 
     new SlashCommandBuilder()
       .setName('give-roles')
-      .setDescription('View all roles this bot can assign in this server (Admin only)')
+      .setDescription('Assign a role to a server member (Admin only)')
+      .addUserOption(option =>
+        option.setName('user')
+          .setDescription('Member to assign a role to')
+          .setRequired(true))
       .setDMPermission(false),
 
     new SlashCommandBuilder()
@@ -1423,6 +1427,11 @@ async function handleGiveRolesCommand(interaction) {
 
   await interaction.deferReply({ ephemeral: true });
 
+  const targetMember = interaction.options.getMember('user');
+  if (!targetMember) {
+    return interaction.editReply({ content: 'That user was not found in this server.' });
+  }
+
   try {
     await interaction.guild.roles.fetch();
   } catch (e) {
@@ -1436,11 +1445,12 @@ async function handleGiveRolesCommand(interaction) {
 
   const botHighestRole = botMember.roles.highest;
 
-  const assignableRoles = interaction.guild.roles.cache
+  const allRoles = [...interaction.guild.roles.cache
     .filter(role => role.position < botHighestRole.position && role.id !== interaction.guild.id)
-    .sort((a, b) => b.position - a.position);
+    .sort((a, b) => b.position - a.position)
+    .values()];
 
-  if (assignableRoles.size === 0) {
+  if (allRoles.length === 0) {
     return interaction.editReply({
       embeds: [
         new EmbedBuilder()
@@ -1452,32 +1462,128 @@ async function handleGiveRolesCommand(interaction) {
     });
   }
 
-  const roleLines = assignableRoles.map(role => `<@&${role.id}> — \`${role.name}\``);
+  const PAGE_SIZE = 25;
+  const totalPages = Math.ceil(allRoles.length / PAGE_SIZE);
+  let currentPage = 0;
 
-  const MAX_DESC = 4000;
-  let description = '';
-  let truncated = false;
+  function buildEmbed(page) {
+    const start = page * PAGE_SIZE + 1;
+    const end = Math.min((page + 1) * PAGE_SIZE, allRoles.length);
+    return new EmbedBuilder()
+      .setTitle('Give Role')
+      .setDescription(
+        `Select one or more roles to assign to <@${targetMember.id}>.\n\n` +
+        (totalPages > 1 ? `Showing **${start}–${end}** of **${allRoles.length}** roles (page ${page + 1}/${totalPages})` : `**${allRoles.length}** roles available`)
+      )
+      .setColor(0x5865F2)
+      .setFooter({ text: 'Only roles below the bot\'s own role are shown.' })
+      .setTimestamp();
+  }
 
-  for (const line of roleLines) {
-    if ((description + '\n' + line).length > MAX_DESC) {
-      truncated = true;
-      break;
+  function buildComponents(page) {
+    const pageRoles = allRoles.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+
+    const selectMenu = new StringSelectMenuBuilder()
+      .setCustomId(`gr_select_${interaction.id}`)
+      .setPlaceholder('Choose role(s) to assign...')
+      .setMinValues(1)
+      .setMaxValues(pageRoles.length)
+      .addOptions(pageRoles.map(role => ({
+        label: role.name.substring(0, 100),
+        value: role.id,
+        description: `Color: ${role.hexColor} • Position: ${role.position}`
+      })));
+
+    const rows = [new ActionRowBuilder().addComponents(selectMenu)];
+
+    if (totalPages > 1) {
+      const prevBtn = new ButtonBuilder()
+        .setCustomId(`gr_prev_${interaction.id}`)
+        .setLabel('◀ Previous')
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(page === 0);
+      const nextBtn = new ButtonBuilder()
+        .setCustomId(`gr_next_${interaction.id}`)
+        .setLabel('Next ▶')
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(page === totalPages - 1);
+      rows.push(new ActionRowBuilder().addComponents(prevBtn, nextBtn));
     }
-    description += (description ? '\n' : '') + line;
+
+    return rows;
   }
 
-  if (truncated) {
-    description += '\n*...and more roles not shown due to length.*';
-  }
+  const reply = await interaction.editReply({
+    embeds: [buildEmbed(0)],
+    components: buildComponents(0),
+    fetchReply: true
+  });
 
-  const embed = new EmbedBuilder()
-    .setTitle('Roles This Bot Can Assign')
-    .setDescription(description)
-    .setColor(0x5865F2)
-    .setFooter({ text: `${assignableRoles.size} assignable role(s) • Read-only view` })
-    .setTimestamp();
+  const collector = reply.createMessageComponentCollector({
+    filter: i => i.user.id === interaction.user.id,
+    time: 120000
+  });
 
-  await interaction.editReply({ embeds: [embed] });
+  collector.on('collect', async i => {
+    if (i.customId === `gr_prev_${interaction.id}`) {
+      currentPage = Math.max(0, currentPage - 1);
+      await i.update({ embeds: [buildEmbed(currentPage)], components: buildComponents(currentPage) });
+
+    } else if (i.customId === `gr_next_${interaction.id}`) {
+      currentPage = Math.min(totalPages - 1, currentPage + 1);
+      await i.update({ embeds: [buildEmbed(currentPage)], components: buildComponents(currentPage) });
+
+    } else if (i.customId === `gr_select_${interaction.id}`) {
+      const selectedIds = i.values;
+      const assigned = [];
+      const alreadyHas = [];
+      const failed = [];
+
+      for (const roleId of selectedIds) {
+        const role = interaction.guild.roles.cache.get(roleId);
+        if (targetMember.roles.cache.has(roleId)) {
+          alreadyHas.push(role ? `\`${role.name}\`` : `\`${roleId}\``);
+          continue;
+        }
+        try {
+          await targetMember.roles.add(roleId, `Assigned by ${interaction.user.tag} via /give-roles`);
+          assigned.push(role ? `\`${role.name}\`` : `\`${roleId}\``);
+        } catch (err) {
+          console.error(`Failed to assign role ${roleId}:`, err);
+          failed.push(role ? `\`${role.name}\`` : `\`${roleId}\``);
+        }
+      }
+
+      const lines = [];
+      if (assigned.length) lines.push(`✅ **Assigned:** ${assigned.join(', ')}`);
+      if (alreadyHas.length) lines.push(`ℹ️ **Already had:** ${alreadyHas.join(', ')}`);
+      if (failed.length) lines.push(`❌ **Failed:** ${failed.join(', ')}`);
+
+      const confirmEmbed = new EmbedBuilder()
+        .setTitle('Roles Updated')
+        .setDescription(`<@${targetMember.id}>\n\n${lines.join('\n')}`)
+        .setColor(failed.length && !assigned.length ? 0xFF6B6B : 0x57F287)
+        .setTimestamp();
+
+      collector.stop('done');
+      await i.update({ embeds: [confirmEmbed], components: [] });
+    }
+  });
+
+  collector.on('end', (_, reason) => {
+    if (reason === 'time') {
+      interaction.editReply({
+        embeds: [
+          new EmbedBuilder()
+            .setTitle('Timed Out')
+            .setDescription('The role selection menu expired after 2 minutes.')
+            .setColor(0x99AAB5)
+            .setTimestamp()
+        ],
+        components: []
+      }).catch(() => {});
+    }
+  });
 }
 
 async function handleTimeoutCommand(interaction) {
