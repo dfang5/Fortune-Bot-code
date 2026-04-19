@@ -1434,8 +1434,9 @@ async function handleGiveRolesCommand(interaction) {
 
   try {
     await interaction.guild.roles.fetch();
+    await targetMember.fetch();
   } catch (e) {
-    console.error('Failed to fetch roles:', e);
+    console.error('Failed to fetch data:', e);
   }
 
   const botMember = interaction.guild.members.me ?? await interaction.guild.members.fetchMe().catch(() => null);
@@ -1445,70 +1446,125 @@ async function handleGiveRolesCommand(interaction) {
 
   const botHighestRole = botMember.roles.highest;
 
+  // ALL roles except @everyone, sorted highest to lowest
   const allRoles = [...interaction.guild.roles.cache
-    .filter(role => role.position < botHighestRole.position && role.id !== interaction.guild.id)
+    .filter(role => role.id !== interaction.guild.id)
     .sort((a, b) => b.position - a.position)
     .values()];
 
   if (allRoles.length === 0) {
-    return interaction.editReply({
-      embeds: [
-        new EmbedBuilder()
-          .setTitle('No Assignable Roles')
-          .setDescription('There are no roles below the bot\'s highest role that it can assign.')
-          .setColor(0xFF6B6B)
-          .setTimestamp()
-      ]
-    });
+    return interaction.editReply({ content: 'This server has no roles.' });
   }
 
   const PAGE_SIZE = 25;
-  const totalPages = Math.ceil(allRoles.length / PAGE_SIZE);
   let currentPage = 0;
+  let mode = 'add'; // 'add' or 'remove'
+
+  function canManage(role) {
+    return role.position < botHighestRole.position && !role.managed;
+  }
+
+  function getMemberRoles() {
+    return targetMember.roles.cache
+      .filter(r => r.id !== interaction.guild.id)
+      .sort((a, b) => b.position - a.position);
+  }
 
   function buildEmbed(page) {
+    const totalPages = Math.ceil(allRoles.length / PAGE_SIZE);
     const start = page * PAGE_SIZE + 1;
     const end = Math.min((page + 1) * PAGE_SIZE, allRoles.length);
+
+    const memberRoles = getMemberRoles();
+    const roleList = memberRoles.size > 0
+      ? [...memberRoles.values()].map(r => `<@&${r.id}>`).join(' ')
+      : '*No roles assigned*';
+
+    const modeColor = mode === 'add' ? 0x57F287 : 0xFF6B6B;
+    const modeLabel = mode === 'add' ? '➕ Add Role' : '➖ Remove Role';
+
     return new EmbedBuilder()
-      .setTitle('Give Role')
+      .setTitle(`Role Manager — ${targetMember.displayName}`)
+      .setThumbnail(targetMember.user.displayAvatarURL({ dynamic: true }))
       .setDescription(
-        `Select one or more roles to assign to <@${targetMember.id}>.\n\n` +
-        (totalPages > 1 ? `Showing **${start}–${end}** of **${allRoles.length}** roles (page ${page + 1}/${totalPages})` : `**${allRoles.length}** roles available`)
+        `**Target:** <@${targetMember.id}>\n` +
+        `**Mode:** ${modeLabel}\n\n` +
+        `**Current Roles (${memberRoles.size}):**\n${roleList}`
       )
-      .setColor(0x5865F2)
-      .setFooter({ text: 'Only roles below the bot\'s own role are shown.' })
+      .addFields({
+        name: `All Server Roles — Page ${page + 1} / ${totalPages}`,
+        value: `Showing **${start}–${end}** of **${allRoles.length}** roles.\n` +
+               `⚠️ = above bot (cannot manage) • 🔒 = managed/integration`
+      })
+      .setColor(modeColor)
+      .setFooter({ text: `Menu expires in 2 minutes • Bot\'s highest role: ${botHighestRole.name}` })
       .setTimestamp();
   }
 
   function buildComponents(page) {
+    const totalPages = Math.ceil(allRoles.length / PAGE_SIZE);
     const pageRoles = allRoles.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+
+    const placeholder = mode === 'add'
+      ? 'Select role(s) to add...'
+      : 'Select role(s) to remove...';
 
     const selectMenu = new StringSelectMenuBuilder()
       .setCustomId(`gr_select_${interaction.id}`)
-      .setPlaceholder('Choose role(s) to assign...')
+      .setPlaceholder(placeholder)
       .setMinValues(1)
       .setMaxValues(pageRoles.length)
-      .addOptions(pageRoles.map(role => ({
-        label: role.name.substring(0, 100),
-        value: role.id,
-        description: `Color: ${role.hexColor} • Position: ${role.position}`
-      })));
+      .addOptions(pageRoles.map(role => {
+        const memberHas = targetMember.roles.cache.has(role.id);
+        const manageable = canManage(role);
+        let statusIcon = manageable ? (memberHas ? '✅' : '◻️') : (role.managed ? '🔒' : '⚠️');
+        let desc = ``;
+        if (!manageable && role.managed) desc = 'Managed by integration';
+        else if (!manageable) desc = 'Above bot — cannot assign';
+        else if (memberHas) desc = 'Member already has this role';
+        else desc = `Position ${role.position} • ${role.hexColor}`;
+
+        return {
+          label: `${statusIcon} ${role.name}`.substring(0, 100),
+          value: role.id,
+          description: desc.substring(0, 100)
+        };
+      }));
 
     const rows = [new ActionRowBuilder().addComponents(selectMenu)];
 
-    if (totalPages > 1) {
-      const prevBtn = new ButtonBuilder()
-        .setCustomId(`gr_prev_${interaction.id}`)
-        .setLabel('◀ Previous')
-        .setStyle(ButtonStyle.Secondary)
-        .setDisabled(page === 0);
-      const nextBtn = new ButtonBuilder()
-        .setCustomId(`gr_next_${interaction.id}`)
-        .setLabel('Next ▶')
-        .setStyle(ButtonStyle.Secondary)
-        .setDisabled(page === totalPages - 1);
-      rows.push(new ActionRowBuilder().addComponents(prevBtn, nextBtn));
-    }
+    // Mode toggle + pagination row
+    const addBtn = new ButtonBuilder()
+      .setCustomId(`gr_mode_add_${interaction.id}`)
+      .setLabel('➕ Add')
+      .setStyle(mode === 'add' ? ButtonStyle.Success : ButtonStyle.Secondary)
+      .setDisabled(mode === 'add');
+
+    const removeBtn = new ButtonBuilder()
+      .setCustomId(`gr_mode_remove_${interaction.id}`)
+      .setLabel('➖ Remove')
+      .setStyle(mode === 'remove' ? ButtonStyle.Danger : ButtonStyle.Secondary)
+      .setDisabled(mode === 'remove');
+
+    const prevBtn = new ButtonBuilder()
+      .setCustomId(`gr_prev_${interaction.id}`)
+      .setLabel('◀')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(page === 0);
+
+    const pageBtn = new ButtonBuilder()
+      .setCustomId(`gr_page_${interaction.id}`)
+      .setLabel(`${page + 1} / ${totalPages}`)
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(true);
+
+    const nextBtn = new ButtonBuilder()
+      .setCustomId(`gr_next_${interaction.id}`)
+      .setLabel('▶')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(page === totalPages - 1);
+
+    rows.push(new ActionRowBuilder().addComponents(addBtn, removeBtn, prevBtn, pageBtn, nextBtn));
 
     return rows;
   }
@@ -1530,43 +1586,84 @@ async function handleGiveRolesCommand(interaction) {
       await i.update({ embeds: [buildEmbed(currentPage)], components: buildComponents(currentPage) });
 
     } else if (i.customId === `gr_next_${interaction.id}`) {
+      const totalPages = Math.ceil(allRoles.length / PAGE_SIZE);
       currentPage = Math.min(totalPages - 1, currentPage + 1);
+      await i.update({ embeds: [buildEmbed(currentPage)], components: buildComponents(currentPage) });
+
+    } else if (i.customId === `gr_mode_add_${interaction.id}`) {
+      mode = 'add';
+      await i.update({ embeds: [buildEmbed(currentPage)], components: buildComponents(currentPage) });
+
+    } else if (i.customId === `gr_mode_remove_${interaction.id}`) {
+      mode = 'remove';
       await i.update({ embeds: [buildEmbed(currentPage)], components: buildComponents(currentPage) });
 
     } else if (i.customId === `gr_select_${interaction.id}`) {
       const selectedIds = i.values;
-      const assigned = [];
-      const alreadyHas = [];
+      const succeeded = [];
+      const skipped = [];
       const failed = [];
 
       for (const roleId of selectedIds) {
         const role = interaction.guild.roles.cache.get(roleId);
-        if (targetMember.roles.cache.has(roleId)) {
-          alreadyHas.push(role ? `\`${role.name}\`` : `\`${roleId}\``);
+        const roleName = role ? `\`${role.name}\`` : `\`${roleId}\``;
+
+        if (!role || !canManage(role)) {
+          failed.push(`${roleName} *(unmanageable)*`);
           continue;
         }
-        try {
-          await targetMember.roles.add(roleId, `Assigned by ${interaction.user.tag} via /give-roles`);
-          assigned.push(role ? `\`${role.name}\`` : `\`${roleId}\``);
-        } catch (err) {
-          console.error(`Failed to assign role ${roleId}:`, err);
-          failed.push(role ? `\`${role.name}\`` : `\`${roleId}\``);
+
+        if (mode === 'add') {
+          if (targetMember.roles.cache.has(roleId)) {
+            skipped.push(`${roleName} *(already has)*`);
+            continue;
+          }
+          try {
+            await targetMember.roles.add(roleId, `Added by ${interaction.user.tag} via /give-roles`);
+            succeeded.push(roleName);
+          } catch (err) {
+            console.error(`Failed to add role ${roleId}:`, err);
+            failed.push(`${roleName} *(error)*`);
+          }
+        } else {
+          if (!targetMember.roles.cache.has(roleId)) {
+            skipped.push(`${roleName} *(doesn't have)*`);
+            continue;
+          }
+          try {
+            await targetMember.roles.remove(roleId, `Removed by ${interaction.user.tag} via /give-roles`);
+            succeeded.push(roleName);
+          } catch (err) {
+            console.error(`Failed to remove role ${roleId}:`, err);
+            failed.push(`${roleName} *(error)*`);
+          }
         }
       }
 
+      // Refresh member roles after change
+      try { await targetMember.fetch(); } catch (_) {}
+
+      const actionWord = mode === 'add' ? 'Added' : 'Removed';
       const lines = [];
-      if (assigned.length) lines.push(`✅ **Assigned:** ${assigned.join(', ')}`);
-      if (alreadyHas.length) lines.push(`ℹ️ **Already had:** ${alreadyHas.join(', ')}`);
+      if (succeeded.length) lines.push(`✅ **${actionWord}:** ${succeeded.join(', ')}`);
+      if (skipped.length) lines.push(`ℹ️ **Skipped:** ${skipped.join(', ')}`);
       if (failed.length) lines.push(`❌ **Failed:** ${failed.join(', ')}`);
 
+      const updatedRoles = getMemberRoles();
+      const updatedRoleList = updatedRoles.size > 0
+        ? [...updatedRoles.values()].map(r => `<@&${r.id}>`).join(' ')
+        : '*No roles*';
+
       const confirmEmbed = new EmbedBuilder()
-        .setTitle('Roles Updated')
-        .setDescription(`<@${targetMember.id}>\n\n${lines.join('\n')}`)
-        .setColor(failed.length && !assigned.length ? 0xFF6B6B : 0x57F287)
+        .setTitle(`Roles Updated — ${targetMember.displayName}`)
+        .setThumbnail(targetMember.user.displayAvatarURL({ dynamic: true }))
+        .setDescription(lines.join('\n'))
+        .addFields({ name: 'Current Roles', value: updatedRoleList })
+        .setColor(succeeded.length ? (mode === 'add' ? 0x57F287 : 0xFF6B6B) : 0x99AAB5)
         .setTimestamp();
 
-      collector.stop('done');
-      await i.update({ embeds: [confirmEmbed], components: [] });
+      // Keep menu open so they can keep managing
+      await i.update({ embeds: [confirmEmbed, buildEmbed(currentPage)], components: buildComponents(currentPage) });
     }
   });
 
@@ -1575,8 +1672,8 @@ async function handleGiveRolesCommand(interaction) {
       interaction.editReply({
         embeds: [
           new EmbedBuilder()
-            .setTitle('Timed Out')
-            .setDescription('The role selection menu expired after 2 minutes.')
+            .setTitle('Session Expired')
+            .setDescription(`Role management session for <@${targetMember.id}> ended after 2 minutes of inactivity.`)
             .setColor(0x99AAB5)
             .setTimestamp()
         ],
