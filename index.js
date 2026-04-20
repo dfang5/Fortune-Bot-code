@@ -106,6 +106,7 @@ let cooldowns = { scavenge: {}, labor: {}, steal: {} };
 global.tempItems = {};
 global.activeTrades = {};
 global.activeMarbleGames = {};
+global.activeDuelGames = {};
 global.messageTracker = {};
 global.giveArtefactSessions = {};
 global.massSellSessions = {};
@@ -904,6 +905,16 @@ client.once('clientReady', async () => {
       .setDMPermission(false),
 
     new SlashCommandBuilder()
+      .setName('marble-duel')
+      .setDescription('Challenge one player to a 1v1 marble duel with cash betting')
+      .addUserOption(option =>
+        option.setName('opponent')
+          .setDescription('The player you want to duel')
+          .setRequired(true)
+      )
+      .setDMPermission(false),
+
+    new SlashCommandBuilder()
       .setName('convert')
       .setDescription('Convert your XP into cash (1 XP = $2)'),
 
@@ -1176,6 +1187,18 @@ client.on('interactionCreate', async interaction => {
       return;
     }
 
+    if (customId.startsWith('duel_number_modal_')) {
+      const gameId = customId.replace('duel_number_modal_', '');
+      await processDuelGuess(interaction, gameId);
+      return;
+    }
+
+    if (customId.startsWith('duel_bet_modal_')) {
+      const gameId = customId.replace('duel_bet_modal_', '');
+      await handleDuelBetModal(interaction, gameId);
+      return;
+    }
+
     if (customId.startsWith('ms_amount_modal_')) {
       const sessionId = customId.replace('ms_amount_modal_', '');
       const session = global.massSellSessions[sessionId];
@@ -1332,6 +1355,10 @@ client.on('interactionCreate', async interaction => {
 
       case 'marble-game':
         await handleMarbleGame(interaction);
+        break;
+
+      case 'marble-duel':
+        await handleMarbleDuel(interaction);
         break;
 
       case 'convert':
@@ -3336,6 +3363,78 @@ async function handleComponentInteraction(interaction) {
     // Clean up the game
     delete global.activeMarbleGames[gameId];
 
+  // === MARBLE DUEL BUTTON HANDLERS ===
+
+  } else if (customId.startsWith('duel_accept_')) {
+    const gameId = customId.replace('duel_accept_', '');
+    const game = global.activeDuelGames[gameId];
+
+    if (!game) {
+      return interaction.reply({ content: '❌ This duel is no longer active.', ephemeral: true });
+    }
+    if (interaction.user.id !== game.players[1].id) {
+      return interaction.reply({ content: '❌ You were not invited to this duel.', ephemeral: true });
+    }
+    if (game.accepted) {
+      return interaction.reply({ content: '❌ You already responded to this invitation.', ephemeral: true });
+    }
+
+    game.accepted = true;
+    await startDuelBettingPhase(interaction, gameId);
+
+  } else if (customId.startsWith('duel_decline_')) {
+    const gameId = customId.replace('duel_decline_', '');
+    const game = global.activeDuelGames[gameId];
+
+    if (!game) {
+      return interaction.reply({ content: '❌ This duel is no longer active.', ephemeral: true });
+    }
+    if (interaction.user.id !== game.players[1].id) {
+      return interaction.reply({ content: '❌ You were not invited to this duel.', ephemeral: true });
+    }
+
+    delete global.activeDuelGames[gameId];
+
+    await interaction.update({
+      embeds: [
+        new EmbedBuilder()
+          .setTitle('Marble Duel Declined')
+          .setDescription(`**${interaction.user.displayName}** has declined the challenge. Duel cancelled.`)
+          .setColor(0xFF6B6B)
+          .setTimestamp()
+      ],
+      components: []
+    });
+
+  } else if (customId.startsWith('place_duel_bet_')) {
+    const gameId = customId.replace('place_duel_bet_', '');
+    const game = global.activeDuelGames[gameId];
+    if (!game) return;
+    if (!game.players.some(p => p.id === interaction.user.id)) {
+      return interaction.reply({ content: '❌ You are not part of this duel.', ephemeral: true });
+    }
+
+    const modal = new ModalBuilder()
+      .setCustomId(`duel_bet_modal_${gameId}`)
+      .setTitle('Place Your Bet')
+      .addComponents(
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId('bet_amount_input')
+            .setLabel('Bet Amount (min $50)')
+            .setStyle(TextInputStyle.Short)
+            .setPlaceholder('e.g. 1000')
+            .setRequired(true)
+            .setMinLength(1)
+            .setMaxLength(10)
+        )
+      );
+    await interaction.showModal(modal);
+
+  } else if (customId.startsWith('duel_pick_')) {
+    const gameId = customId.replace('duel_pick_', '');
+    await handleDuelPick(interaction, gameId);
+
   } else if (customId.startsWith('select_number_')) {
     const gameId = customId.replace('select_number_', '');
     await handleNumberSelection(interaction, gameId);
@@ -4026,10 +4125,10 @@ async function handleMarbleGame(interaction) {
   }, 120000);
 }
 
-function marbleBar(count, max = 20) {
+function marbleBar(count, max = 10) {
   const filled = Math.round((count / max) * 10);
   const empty = 10 - filled;
-  return '🟣'.repeat(filled) + '⬛'.repeat(empty) + ` **${count}**`;
+  return '🟣'.repeat(Math.max(0, filled)) + '⬛'.repeat(Math.max(0, empty)) + ` **${count}**`;
 }
 
 function createInvitationEmbed(game) {
@@ -4064,11 +4163,11 @@ function createInvitationEmbed(game) {
         name: '📖 How It Works',
         value:
           '> • 4 players split into **2 teams of 2**\n' +
-          '> • Each team starts with **10 marbles**\n' +
+          '> • Each team starts with **5 marbles** (10 total)\n' +
           '> • Each round, both teams pick secret numbers **(1–20)**\n' +
-          '> • A random number is drawn — whoever guessed it **wins a marble** from the other team\n' +
-          '> • First team to reach **0** loses; the other team wins the entire pot\n' +
-          '> • Ties are re-rolled until one team wins',
+          '> • A random number is drawn — whoever guessed it **steals a marble** from the other team\n' +
+          '> • First team to collect **all 10** (or drain the other to 0) wins the pot\n' +
+          '> • Matching guesses are a tie — no transfer that round',
         inline: false
       }
     )
@@ -4246,8 +4345,8 @@ async function startMarbleGame(interaction, gameId) {
   const shuffledPlayers = [...game.players].sort(() => Math.random() - 0.5);
   game.teamA = shuffledPlayers.slice(0, 2);
   game.teamB = shuffledPlayers.slice(2, 4);
-  game.teamAMarbles = 10;
-  game.teamBMarbles = 10;
+  game.teamAMarbles = 5;
+  game.teamBMarbles = 5;
   game.phase = 'game';
   game.round = 1;
   game.playerGuesses = {};
@@ -4515,7 +4614,7 @@ async function runRandomizer(gameId) {
 
   if (game.gameMessage) await game.gameMessage.edit({ embeds: [resultEmbed], components: [] });
 
-  const isOver = game.teamAMarbles <= 0 || game.teamBMarbles <= 0 || game.teamAMarbles >= 20 || game.teamBMarbles >= 20;
+  const isOver = game.teamAMarbles <= 0 || game.teamBMarbles <= 0 || game.teamAMarbles >= 10 || game.teamBMarbles >= 10;
   if (isOver) {
     setTimeout(() => endGame(gameId), 4000);
   } else {
@@ -4562,7 +4661,7 @@ async function endGame(gameId) {
   const game = global.activeMarbleGames[gameId];
   if (!game) return;
 
-  const winningTeam = (game.teamAMarbles >= 20 || game.teamBMarbles <= 0) ? 'A' : 'B';
+  const winningTeam = (game.teamAMarbles >= 10 || game.teamBMarbles <= 0) ? 'A' : 'B';
   const losingTeam = winningTeam === 'A' ? 'B' : 'A';
   const winningPlayers = winningTeam === 'A' ? game.teamA : game.teamB;
   const losingPlayers = losingTeam === 'A' ? game.teamA : game.teamB;
@@ -4609,6 +4708,624 @@ async function endGame(gameId) {
   await refreshGameMessage(game, [gameEndEmbed], []);
 
   delete global.activeMarbleGames[gameId];
+}
+
+// =============================================
+// === MARBLE DUEL — 1v1 GAME SYSTEM ===
+// =============================================
+
+async function handleMarbleDuel(interaction) {
+  const userId = interaction.user.id;
+  const opponent = interaction.options.getUser('opponent');
+
+  if (opponent.id === userId) {
+    return interaction.reply({ content: '❌ You cannot challenge yourself to a duel!', ephemeral: true });
+  }
+  if (opponent.bot) {
+    return interaction.reply({ content: '❌ Bots cannot participate in marble duels!', ephemeral: true });
+  }
+
+  const allPlayers = [interaction.user, opponent];
+  const alreadyInGame = allPlayers.some(u =>
+    Object.values(global.activeMarbleGames).some(g => g.players.some(p => p.id === u.id)) ||
+    Object.values(global.activeDuelGames).some(g => g.players.some(p => p.id === u.id))
+  );
+  if (alreadyInGame) {
+    return interaction.reply({ content: '❌ One or more players are already in an active marble game!', ephemeral: true });
+  }
+
+  const gameId = `duel_${userId}_${Date.now()}`;
+  global.activeDuelGames[gameId] = {
+    gameId,
+    players: [interaction.user, opponent], // [0]=P1 initiator, [1]=P2 opponent
+    pendingBets: {},
+    betAmount: 0,
+    totalPot: 0,
+    betsCollected: false,
+    phase: 'invitation',
+    round: 0,
+    createdAt: Date.now(),
+    gameMessage: null,
+    channel: null,
+    p1Marbles: 5,
+    p2Marbles: 5,
+    currentPlayerIndex: 0,
+    firstPlayerIndex: 0,
+    votedCount: 0,
+    playerGuesses: {},
+    roundHistory: []
+  };
+
+  const embed = createDuelInvitationEmbed(global.activeDuelGames[gameId]);
+  const buttons = createDuelInvitationButtons(gameId);
+  await interaction.reply({ embeds: [embed], components: [buttons] });
+
+  // Auto-expire after 2 minutes
+  setTimeout(() => {
+    const game = global.activeDuelGames[gameId];
+    if (game && game.phase === 'invitation') {
+      delete global.activeDuelGames[gameId];
+      interaction.editReply({
+        embeds: [
+          new EmbedBuilder()
+            .setTitle('⏰ Marble Duel Expired')
+            .setDescription('The duel invitation was not accepted in time.')
+            .setColor(0x99AAB5)
+            .setTimestamp()
+        ],
+        components: []
+      }).catch(() => {});
+    }
+  }, 120000);
+}
+
+function createDuelInvitationEmbed(game) {
+  const [p1, p2] = game.players;
+  return new EmbedBuilder()
+    .setTitle('⚔️ Marble Duel — Challenge Issued')
+    .setDescription(
+      `**${p1.displayName}** has challenged **${p2.displayName}** to a 1v1 marble duel!\n\n` +
+      `**${p2.displayName}** must accept within **2 minutes** to begin.`
+    )
+    .addFields(
+      {
+        name: '⚔️ Challenger',
+        value: `<@${p1.id}>`,
+        inline: true
+      },
+      {
+        name: '🎯 Opponent',
+        value: `<@${p2.id}>`,
+        inline: true
+      },
+      {
+        name: '📖 How It Works',
+        value:
+          '> • 2 players go head-to-head, each starting with **5 marbles** (10 total)\n' +
+          '> • Each round, both players secretly pick a number **(1–20)**\n' +
+          '> • A random number is drawn — whoever guessed it **steals a marble** from the other\n' +
+          '> • First to collect **all 10** (or drain your opponent to 0) wins the pot\n' +
+          '> • Both pick the same drawn number — it\'s a tie, no transfer',
+        inline: false
+      }
+    )
+    .setColor(0xA855F7)
+    .setFooter({ text: '⏰ Invitation expires in 2 minutes' })
+    .setTimestamp();
+}
+
+function createDuelInvitationButtons(gameId) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`duel_accept_${gameId}`)
+      .setLabel('✅ Accept Duel')
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId(`duel_decline_${gameId}`)
+      .setLabel('❌ Decline')
+      .setStyle(ButtonStyle.Danger)
+  );
+}
+
+async function startDuelBettingPhase(interaction, gameId) {
+  const game = global.activeDuelGames[gameId];
+  if (!game) return;
+
+  game.phase = 'betting';
+  const [p1, p2] = game.players;
+
+  const embed = new EmbedBuilder()
+    .setTitle('💰 Duel Betting Phase')
+    .setDescription(
+      'Both players must place a bet.\n' +
+      'Bets must **match exactly** — if they don\'t, they reset and you try again.'
+    )
+    .addFields(
+      {
+        name: '⚔️ Challenger',
+        value: `<@${p1.id}>`,
+        inline: true
+      },
+      {
+        name: '🎯 Opponent',
+        value: `<@${p2.id}>`,
+        inline: true
+      },
+      {
+        name: '🎯 Bets Placed',
+        value: '*None yet*',
+        inline: false
+      },
+      {
+        name: '📋 Rules',
+        value: '• Minimum bet: **$50**\n• Both bets must match\n• Winner takes **the full pot**',
+        inline: false
+      }
+    )
+    .setColor(0xFFD700)
+    .setTimestamp();
+
+  const betButton = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`place_duel_bet_${gameId}`)
+      .setLabel('💸 Place Bet')
+      .setStyle(ButtonStyle.Primary)
+  );
+
+  await interaction.update({ embeds: [embed], components: [betButton] });
+}
+
+async function handleDuelBetModal(interaction, gameId) {
+  const game = global.activeDuelGames[gameId];
+  if (!game) {
+    return interaction.reply({ content: '❌ This duel is no longer active.', ephemeral: true });
+  }
+
+  const userId = interaction.user.id;
+  if (!game.players.some(p => p.id === userId)) {
+    return interaction.reply({ content: '❌ You are not part of this duel.', ephemeral: true });
+  }
+  if (game.pendingBets[userId] !== undefined) {
+    return interaction.reply({ content: '❌ You have already placed your bet.', ephemeral: true });
+  }
+
+  const betAmount = parseInt(interaction.fields.getTextInputValue('bet_amount_input'));
+  if (isNaN(betAmount) || betAmount < 50) {
+    return interaction.reply({ content: '❌ Minimum bet is **$50**. Please try again.', ephemeral: true });
+  }
+
+  await getUser(userId);
+  if (userData[userId].cash < betAmount) {
+    return interaction.reply({
+      content: `❌ You only have **$${userData[userId].cash.toLocaleString()}** — not enough to bet $${betAmount.toLocaleString()}.`,
+      ephemeral: true
+    });
+  }
+
+  game.pendingBets[userId] = betAmount;
+
+  const [p1, p2] = game.players;
+  const betsPlaced = Object.entries(game.pendingBets)
+    .map(([id, b]) => `<@${id}> → **$${b.toLocaleString()}**`)
+    .join('\n');
+  const waiting = game.players.filter(p => game.pendingBets[p.id] === undefined);
+
+  const updatedEmbed = new EmbedBuilder()
+    .setTitle('💰 Duel Betting Phase')
+    .setDescription(
+      Object.keys(game.pendingBets).length === 2
+        ? '✅ Both bets received! Checking if they match...'
+        : `Waiting for **${waiting.map(p => p.displayName).join(', ')}** to bet...`
+    )
+    .addFields(
+      { name: '✅ Bets Placed', value: betsPlaced, inline: true },
+      {
+        name: '⏳ Still Waiting',
+        value: waiting.length > 0 ? waiting.map(p => `<@${p.id}>`).join('\n') : '*All in!*',
+        inline: true
+      }
+    )
+    .setColor(0xFFD700)
+    .setTimestamp();
+
+  await interaction.deferUpdate();
+  await interaction.message.edit({ embeds: [updatedEmbed] });
+
+  if (Object.keys(game.pendingBets).length === 2) {
+    const [bet1, bet2] = game.players.map(p => game.pendingBets[p.id]);
+
+    if (bet1 === bet2) {
+      game.betAmount = bet1;
+      game.totalPot = bet1 * 2;
+      await collectDuelBets(game);
+      setTimeout(() => startDuelGame(interaction, gameId), 1500);
+    } else {
+      game.pendingBets = {};
+      const mismatchEmbed = new EmbedBuilder()
+        .setTitle('💸 Bets Mismatch!')
+        .setDescription(
+          `Bets didn't match — **reset**.\nBoth players must bet the same amount. Click **Place Bet** to try again.`
+        )
+        .addFields({ name: 'Previous Bets', value: betsPlaced })
+        .setColor(0xFF6B6B)
+        .setTimestamp();
+
+      const betButton = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`place_duel_bet_${gameId}`)
+          .setLabel('💸 Place Bet')
+          .setStyle(ButtonStyle.Primary)
+      );
+      await interaction.message.edit({ embeds: [mismatchEmbed], components: [betButton] });
+    }
+  }
+}
+
+async function collectDuelBets(game) {
+  if (game.betsCollected) return;
+  for (const player of game.players) {
+    if (userData[player.id]) userData[player.id].cash -= game.betAmount;
+  }
+  game.betsCollected = true;
+  await saveUserData();
+}
+
+async function startDuelGame(interaction, gameId) {
+  const game = global.activeDuelGames[gameId];
+  if (!game) return;
+
+  game.p1Marbles = 5;
+  game.p2Marbles = 5;
+  game.phase = 'game';
+  game.round = 1;
+  game.playerGuesses = {};
+  game.roundHistory = [];
+  game.channel = interaction.channel;
+
+  const coinFlip = Math.random() < 0.5 ? 'heads' : 'tails';
+  // heads = P1 (index 0) goes first, tails = P2 (index 1) goes first
+  game.currentPlayerIndex = coinFlip === 'heads' ? 0 : 1;
+  game.firstPlayerIndex = game.currentPlayerIndex;
+  game.votedCount = 0;
+
+  const embed = createDuelGameEmbed(game, coinFlip);
+  const pickButton = createDuelPickButton(gameId);
+
+  const msg = await game.channel.send({ embeds: [embed], components: [pickButton] });
+  game.gameMessage = msg;
+}
+
+function createDuelGameEmbed(game, coinFlip = null) {
+  const [p1, p2] = game.players;
+  const currentPlayer = game.players[game.currentPlayerIndex];
+  const voted1 = game.playerGuesses[p1.id] !== undefined;
+  const voted2 = game.playerGuesses[p2.id] !== undefined;
+
+  let description = `**Round ${game.round}**`;
+  if (coinFlip) {
+    description += `\n\n🪙 Coin flip: **${coinFlip.toUpperCase()}** — **${currentPlayer.displayName}** goes first!`;
+  }
+  description += `\n\n${voted1 ? '✅' : '⏳'} **${p1.displayName}** | ${voted2 ? '✅' : '⏳'} **${p2.displayName}**`;
+
+  return new EmbedBuilder()
+    .setTitle('⚔️ Marble Duel — In Progress')
+    .setDescription(description)
+    .addFields(
+      {
+        name: `⚔️ ${p1.displayName}`,
+        value: marbleBar(game.p1Marbles),
+        inline: true
+      },
+      {
+        name: `🎯 ${p2.displayName}`,
+        value: marbleBar(game.p2Marbles),
+        inline: true
+      },
+      {
+        name: `🎯 It's ${currentPlayer.displayName}'s Turn`,
+        value: 'Click the button below to secretly pick your number **(1–20)**.',
+        inline: false
+      }
+    )
+    .setColor(game.currentPlayerIndex === 0 ? 0xA855F7 : 0x22D3EE)
+    .setFooter({ text: `Round ${game.round} • Pot: $${game.totalPot.toLocaleString()} • ${game.roundHistory.length} rounds played` })
+    .setTimestamp();
+}
+
+function createDuelPickButton(gameId) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`duel_pick_${gameId}`)
+      .setLabel('🎯 Pick Your Number (1–20)')
+      .setStyle(ButtonStyle.Primary)
+  );
+}
+
+async function handleDuelPick(interaction, gameId) {
+  const game = global.activeDuelGames[gameId];
+  if (!game || game.phase !== 'game') return;
+
+  const currentPlayer = game.players[game.currentPlayerIndex];
+  if (interaction.user.id !== currentPlayer.id) {
+    return interaction.reply({
+      content: `❌ It's not your turn! Waiting for **${currentPlayer.displayName}** to pick.`,
+      ephemeral: true
+    });
+  }
+
+  const modal = new ModalBuilder()
+    .setCustomId(`duel_number_modal_${gameId}`)
+    .setTitle(`Round ${game.round} — Pick Your Number`)
+    .addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId('number_input')
+          .setLabel('Your number (1–20)')
+          .setStyle(TextInputStyle.Short)
+          .setPlaceholder('Enter a number between 1 and 20')
+          .setRequired(true)
+          .setMinLength(1)
+          .setMaxLength(2)
+      )
+    );
+
+  await interaction.showModal(modal);
+}
+
+async function processDuelGuess(interaction, gameId) {
+  const game = global.activeDuelGames[gameId];
+  if (!game || game.phase !== 'game') return;
+
+  const number = parseInt(interaction.fields.getTextInputValue('number_input'));
+  if (isNaN(number) || number < 1 || number > 20) {
+    return interaction.reply({ content: '❌ Invalid number — must be between **1 and 20**.', ephemeral: true });
+  }
+
+  const playerId = interaction.user.id;
+  const currentPlayer = game.players[game.currentPlayerIndex];
+  if (playerId !== currentPlayer.id) {
+    return interaction.reply({
+      content: `❌ It's not your turn! Waiting for **${currentPlayer.displayName}**.`,
+      ephemeral: true
+    });
+  }
+  if (game.playerGuesses[playerId] !== undefined) {
+    return interaction.reply({ content: '❌ You have already locked in your number this round.', ephemeral: true });
+  }
+
+  game.playerGuesses[playerId] = number;
+  game.votedCount++;
+  await interaction.reply({ content: `✅ You locked in **${number}**. Keep it secret!`, ephemeral: true });
+
+  if (game.votedCount >= 2) {
+    // Both players have voted — run the draw
+    await runDuelRandomizer(gameId);
+    return;
+  }
+
+  // Switch to the other player
+  game.currentPlayerIndex = game.currentPlayerIndex === 0 ? 1 : 0;
+
+  // Delete old message and resend fresh at the bottom
+  const embed = createDuelGameEmbed(game);
+  const pickButton = createDuelPickButton(gameId);
+  await refreshDuelMessage(game, [embed], [pickButton]);
+}
+
+async function runDuelRandomizer(gameId) {
+  const game = global.activeDuelGames[gameId];
+  if (!game) return;
+
+  const [p1, p2] = game.players;
+  const guesses = game.playerGuesses;
+  const uniqueGuesses = [...new Set(Object.values(guesses))];
+
+  // Delete old pick message, send fresh rolling message
+  if (game.gameMessage) {
+    try { await game.gameMessage.delete(); } catch (_) {}
+    game.gameMessage = null;
+  }
+
+  let drawnNumber;
+  let rollLog = [];
+  let attempts = 0;
+
+  if (game.channel) {
+    const initialEmbed = new EmbedBuilder()
+      .setTitle('🎲 Drawing Numbers...')
+      .setDescription(`Both players have locked in! Rolling...\n\n**${p1.displayName}** vs **${p2.displayName}**`)
+      .setColor(0xFFA500)
+      .setTimestamp();
+    game.gameMessage = await game.channel.send({ embeds: [initialEmbed], components: [] });
+  }
+
+  do {
+    drawnNumber = Math.floor(Math.random() * 20) + 1;
+    attempts++;
+
+    if (!uniqueGuesses.includes(drawnNumber)) {
+      rollLog.push(`~~${drawnNumber}~~`);
+
+      if (game.gameMessage) {
+        const rollingEmbed = new EmbedBuilder()
+          .setTitle('🎲 Drawing Numbers...')
+          .setDescription(
+            `Rolled: ${rollLog.join('  ')}\n\n` +
+            `**${drawnNumber}** — no match! Re-rolling...`
+          )
+          .setColor(0xFFA500)
+          .setTimestamp();
+        await game.gameMessage.edit({ embeds: [rollingEmbed], components: [] });
+        await new Promise(r => setTimeout(r, 1100));
+      }
+    }
+
+    if (attempts >= 80) {
+      drawnNumber = uniqueGuesses[Math.floor(Math.random() * uniqueGuesses.length)];
+      break;
+    }
+  } while (!uniqueGuesses.includes(drawnNumber));
+
+  const p1Guess = guesses[p1.id];
+  const p2Guess = guesses[p2.id];
+  const missedLog = rollLog.length > 0 ? `\nMisses: ${rollLog.join('  ')}` : '';
+
+  // Both guessed the same number and it was drawn — tie
+  if (p1Guess === drawnNumber && p2Guess === drawnNumber) {
+    game.roundHistory.push({ round: game.round, drawn: drawnNumber, result: 'tie' });
+
+    const tieEmbed = new EmbedBuilder()
+      .setTitle('🤝 Tie Round!')
+      .setDescription(
+        `The draw landed on **${drawnNumber}** — and **both players** picked it!\n` +
+        `No marbles transferred this round.${missedLog}`
+      )
+      .addFields(buildDuelScoreField(game), buildDuelGuessField(game, guesses))
+      .setColor(0xFFD700)
+      .setTimestamp();
+
+    if (game.gameMessage) await game.gameMessage.edit({ embeds: [tieEmbed], components: [] });
+    setTimeout(() => nextDuelRound(gameId), 4000);
+    return;
+  }
+
+  // One player hit it (or neither — shouldn't happen after loop logic)
+  const p1Won = p1Guess === drawnNumber;
+  const p2Won = p2Guess === drawnNumber;
+
+  if (!p1Won && !p2Won) {
+    // Safeguard: no_match, advance without scoring
+    game.roundHistory.push({ round: game.round, drawn: drawnNumber, result: 'no_match' });
+    setTimeout(() => nextDuelRound(gameId), 4000);
+    return;
+  }
+
+  const winner = p1Won ? p1 : p2;
+  const loser = p1Won ? p2 : p1;
+
+  if (p1Won) {
+    game.p1Marbles++;
+    game.p2Marbles--;
+  } else {
+    game.p2Marbles++;
+    game.p1Marbles--;
+  }
+
+  game.roundHistory.push({ round: game.round, drawn: drawnNumber, winner: winner.displayName });
+
+  const resultEmbed = new EmbedBuilder()
+    .setTitle(`🎯 Round ${game.round} — Result`)
+    .setDescription(
+      `The draw landed on **${drawnNumber}**!${missedLog}\n\n` +
+      `**${winner.displayName}** guessed it and steals a marble from **${loser.displayName}**! 🪙`
+    )
+    .addFields(buildDuelScoreField(game), buildDuelGuessField(game, guesses))
+    .setColor(p1Won ? 0xA855F7 : 0x22D3EE)
+    .setTimestamp();
+
+  if (game.gameMessage) await game.gameMessage.edit({ embeds: [resultEmbed], components: [] });
+
+  const isOver = game.p1Marbles <= 0 || game.p2Marbles <= 0 || game.p1Marbles >= 10 || game.p2Marbles >= 10;
+  if (isOver) {
+    setTimeout(() => endDuelGame(gameId), 4000);
+  } else {
+    setTimeout(() => nextDuelRound(gameId), 5000);
+  }
+}
+
+function buildDuelScoreField(game) {
+  const [p1, p2] = game.players;
+  return {
+    name: '📊 Marble Count',
+    value: `⚔️ **${p1.displayName}**: ${marbleBar(game.p1Marbles)}\n🎯 **${p2.displayName}**: ${marbleBar(game.p2Marbles)}`,
+    inline: false
+  };
+}
+
+function buildDuelGuessField(game, guesses) {
+  const [p1, p2] = game.players;
+  const lines = [p1, p2].map(p => {
+    const g = guesses[p.id];
+    return `<@${p.id}> → **${g !== undefined ? g : '?'}**`;
+  });
+  return { name: '🔢 Guesses This Round', value: lines.join('\n'), inline: false };
+}
+
+async function nextDuelRound(gameId) {
+  const game = global.activeDuelGames[gameId];
+  if (!game) return;
+
+  game.round++;
+  game.playerGuesses = {};
+  game.votedCount = 0;
+
+  const coinFlip = Math.random() < 0.5 ? 'heads' : 'tails';
+  game.currentPlayerIndex = coinFlip === 'heads' ? 0 : 1;
+  game.firstPlayerIndex = game.currentPlayerIndex;
+
+  const embed = createDuelGameEmbed(game, coinFlip);
+  const pickButton = createDuelPickButton(gameId);
+  await refreshDuelMessage(game, [embed], [pickButton]);
+}
+
+async function endDuelGame(gameId) {
+  const game = global.activeDuelGames[gameId];
+  if (!game) return;
+
+  const [p1, p2] = game.players;
+  const p1Won = game.p1Marbles >= 10 || game.p2Marbles <= 0;
+  const winner = p1Won ? p1 : p2;
+  const loser = p1Won ? p2 : p1;
+  const winnerMarbles = p1Won ? game.p1Marbles : game.p2Marbles;
+  const loserMarbles = p1Won ? game.p2Marbles : game.p1Marbles;
+
+  // Award full pot to winner
+  await getUser(winner.id);
+  userData[winner.id].cash += game.totalPot;
+  await saveUserData();
+
+  const duration = Math.max(1, Math.round((Date.now() - game.createdAt) / 60000));
+
+  const gameEndEmbed = new EmbedBuilder()
+    .setTitle(`🏆 ${winner.displayName} Wins the Duel!`)
+    .setDescription(
+      `After **${game.round} rounds**, **${winner.displayName}** drained **${loser.displayName}**'s marbles!\n\n` +
+      `🏅 **Winner:** <@${winner.id}> — **$${game.totalPot.toLocaleString()}** claimed!\n` +
+      `💀 **Defeated:** <@${loser.id}>`
+    )
+    .addFields(
+      {
+        name: '📊 Final Marble Count',
+        value: `${winner.displayName}: ${marbleBar(winnerMarbles)}\n${loser.displayName}: ${marbleBar(loserMarbles)}`,
+        inline: false
+      },
+      {
+        name: '💰 Prize',
+        value: `**$${game.totalPot.toLocaleString()}** (pot of $${game.betAmount.toLocaleString()} × 2)`,
+        inline: true
+      },
+      {
+        name: '📈 Stats',
+        value: `Rounds: **${game.round}** • Duration: **${duration} min**`,
+        inline: true
+      }
+    )
+    .setColor(0xFFD700)
+    .setFooter({ text: 'Winnings distributed! Thanks for dueling.' })
+    .setTimestamp();
+
+  await refreshDuelMessage(game, [gameEndEmbed], []);
+  delete global.activeDuelGames[gameId];
+}
+
+async function refreshDuelMessage(game, embeds, components) {
+  if (game.gameMessage) {
+    try { await game.gameMessage.delete(); } catch (_) {}
+    game.gameMessage = null;
+  }
+  if (game.channel) {
+    game.gameMessage = await game.channel.send({ embeds, components: components ?? [] });
+  }
 }
 
 // === MASS SELL SYSTEM ===
