@@ -27,6 +27,47 @@ const CO_DEVELOPER_ID_2 = '992632642992357459';
 function isDeveloper(userId) {
   return userId === DEVELOPER_ID || userId === CO_DEVELOPER_ID || userId === CO_DEVELOPER_ID_2;
 }
+
+// === Prefix system (per-guild text command prefix) ===
+const PREFIX_CACHE = new Map();
+
+function validatePrefix(input) {
+  if (typeof input !== 'string') return { ok: false, reason: 'Prefix must be text.' };
+  const trimmed = input.trim();
+  if (trimmed.length === 0) return { ok: false, reason: 'Prefix cannot be empty.' };
+  if (trimmed.length > 5) return { ok: false, reason: 'Prefix must be 5 characters or less.' };
+  if (/\s/.test(trimmed)) return { ok: false, reason: 'Prefix cannot contain spaces or whitespace.' };
+  if (/[<>@#`/\\]/.test(trimmed)) return { ok: false, reason: 'Prefix cannot contain any of: < > @ # ` / \\' };
+  if (!/^[\x21-\x7E]+$/.test(trimmed)) return { ok: false, reason: 'Prefix must be standard printable ASCII characters only.' };
+  return { ok: true, prefix: trimmed };
+}
+
+async function getGuildPrefix(guildId) {
+  if (!guildId) return null;
+  if (PREFIX_CACHE.has(guildId)) return PREFIX_CACHE.get(guildId);
+  if (!guildSettingsCollection) return null;
+  try {
+    const doc = await guildSettingsCollection.findOne({ _id: guildId });
+    const prefix = doc && doc.prefix ? doc.prefix : null;
+    PREFIX_CACHE.set(guildId, prefix);
+    return prefix;
+  } catch (err) {
+    console.error('Failed to load guild prefix:', err);
+    return null;
+  }
+}
+
+async function setGuildPrefix(guildId, prefix) {
+  if (!guildSettingsCollection) throw new Error('Database not ready');
+  await guildSettingsCollection.updateOne(
+    { _id: guildId },
+    { $set: { prefix: prefix } },
+    { upsert: true }
+  );
+  PREFIX_CACHE.set(guildId, prefix);
+}
+
+
 const token = process.env.DISCORD_BOT_TOKEN;
 const clientId = process.env.DISCORD_CLIENT_ID;
 
@@ -48,6 +89,7 @@ let cooldownsCollection;
 let eventSystemCollection;
 let guildItemsCollection;
 let globalItemsCollection;
+let guildSettingsCollection;
 
 // Initialize MongoDB connection
 async function initializeDatabase() {
@@ -72,6 +114,7 @@ async function initializeDatabase() {
     eventSystemCollection = db.collection('eventSystem');
     guildItemsCollection = db.collection('guildItems');
     globalItemsCollection = db.collection('globalItems');
+    guildSettingsCollection = db.collection('guildSettings');
 
     // Initialize event system if it doesn't exist
     const eventSystem = await eventSystemCollection.findOne({ _id: 'main' });
@@ -710,6 +753,23 @@ client.on('messageCreate', async (message) => {
   // Database not ready yet — ignore until fully initialised
   if (!usersCollection) return;
 
+  // === Prefix command dispatch ===
+  if (message.guildId) {
+    try {
+      const prefix = await getGuildPrefix(message.guildId);
+      if (prefix && message.content.startsWith(prefix)) {
+        const body = message.content.slice(prefix.length).trim();
+        if (body.length) {
+          const tokens = body.split(/\s+/);
+          const handled = await dispatchPrefixCommand(message, tokens);
+          if (handled) return;
+        }
+      }
+    } catch (err) {
+      console.error('Prefix dispatch error:', err);
+    }
+  }
+
   const userId = message.author.id;
   const channelId = message.channel.id;
   const now = Date.now();
@@ -1071,7 +1131,10 @@ client.once('clientReady', async () => {
       .addUserOption(option =>
         option.setName('user')
           .setDescription('User to reset cooldowns for (leave empty for ALL users)')
-          .setRequired(false))
+          .setRequired(false)),
+    new SlashCommandBuilder()
+      .setName('setprefix')
+      .setDescription('Set the prefix for text-based commands in this server (Admin only)')
   ];
 
   const rest = new REST({ version:'10' }).setToken(token);
@@ -1272,6 +1335,11 @@ client.on('interactionCreate', async interaction => {
       });
       return;
     }
+
+    if (customId === 'setprefix_modal') {
+      await handleSetPrefixModal(interaction);
+      return;
+    }
   }
 
   if (!interaction.isChatInputCommand()) return;
@@ -1303,6 +1371,9 @@ client.on('interactionCreate', async interaction => {
     switch (interaction.commandName) {
       case 'info':
         await handleInfoCommand(interaction);
+        break;
+      case 'setprefix':
+        await handleSetPrefixCommand(interaction);
         break;
       case 'bank':
         await handleBankCommand(interaction, userId);
@@ -1884,62 +1955,395 @@ async function handleBanCommand(interaction) {
 }
 
 // Command handlers
+async function handleSetPrefixCommand(interaction) {
+  if (!isDeveloper(interaction.user.id) && !interaction.member?.permissions.has(PermissionFlagsBits.Administrator)) {
+    return await interaction.reply({
+      embeds: [new EmbedBuilder()
+        .setTitle('Access Denied')
+        .setDescription('You need **Administrator** permissions or must be a bot developer to use this command.')
+        .setColor(0xFF6B6B)
+        .setTimestamp()],
+      ephemeral: true
+    });
+  }
+  if (!interaction.guildId) {
+    return await interaction.reply({ content: 'This command can only be used in a server.', ephemeral: true });
+  }
+
+  const currentPrefix = await getGuildPrefix(interaction.guildId);
+
+  const input = new TextInputBuilder()
+    .setCustomId('setprefix_input')
+    .setLabel('New prefix (1-5 chars, no spaces)')
+    .setPlaceholder('e.g.  !   $   fb!')
+    .setStyle(TextInputStyle.Short)
+    .setMinLength(1)
+    .setMaxLength(5)
+    .setRequired(true);
+
+  if (currentPrefix) input.setValue(currentPrefix);
+
+  const modal = new ModalBuilder()
+    .setCustomId('setprefix_modal')
+    .setTitle('Set Server Prefix')
+    .addComponents(new ActionRowBuilder().addComponents(input));
+
+  await interaction.showModal(modal);
+}
+
+async function handleSetPrefixModal(interaction) {
+  if (!isDeveloper(interaction.user.id) && !interaction.member?.permissions.has(PermissionFlagsBits.Administrator)) {
+    return await interaction.reply({ content: 'You no longer have permission to set the prefix.', ephemeral: true });
+  }
+  if (!interaction.guildId) {
+    return await interaction.reply({ content: 'This can only be used in a server.', ephemeral: true });
+  }
+
+  const raw = interaction.fields.getTextInputValue('setprefix_input');
+  const validation = validatePrefix(raw);
+  if (!validation.ok) {
+    return await interaction.reply({
+      embeds: [new EmbedBuilder()
+        .setTitle('Invalid Prefix')
+        .setDescription(validation.reason)
+        .setColor(0xFF6B6B)
+        .setTimestamp()],
+      ephemeral: true
+    });
+  }
+
+  try {
+    await setGuildPrefix(interaction.guildId, validation.prefix);
+  } catch (err) {
+    console.error('Failed to save guild prefix:', err);
+    return await interaction.reply({ content: 'Failed to save the prefix. Please try again later.', ephemeral: true });
+  }
+
+  return await interaction.reply({
+    embeds: [new EmbedBuilder()
+      .setTitle('Prefix Updated')
+      .setDescription(`The text-command prefix for this server is now: \`${validation.prefix}\``)
+      .addFields({
+        name: 'Try it',
+        value: `\`${validation.prefix}inventory\`, \`${validation.prefix}labor\`, \`${validation.prefix}bank all\`, \`${validation.prefix}store\`, \`${validation.prefix}scavenge\``
+      })
+      .setColor(0x51CF66)
+      .setTimestamp()]
+  });
+}
+
+class MessageInteractionAdapter {
+  constructor(message, args, commandName) {
+    this.message = message;
+    this.user = message.author;
+    this.member = message.member;
+    this.guild = message.guild;
+    this.guildId = message.guildId;
+    this.channel = message.channel;
+    this.channelId = message.channelId;
+    this.commandName = commandName;
+    this.replied = false;
+    this.deferred = false;
+    this._reply = null;
+    this.options = {
+      _args: args,
+      getInteger: (_name) => {
+        const raw = args[0];
+        if (raw === undefined || raw === null) return null;
+        const n = parseInt(String(raw).replace(/[, $_]/g, ''), 10);
+        return isNaN(n) ? null : n;
+      },
+      getString: (_name) => (args[0] !== undefined ? String(args[0]) : null),
+      getUser: (_name) => message.mentions.users.first() || null,
+      getBoolean: (_name) => null,
+    };
+  }
+
+  isRepliable() { return true; }
+  isAutocomplete() { return false; }
+  isChatInputCommand() { return false; }
+
+  _normalizePayload(payload) {
+    if (typeof payload === 'string') return { content: payload };
+    const out = {};
+    if (payload.embeds) out.embeds = payload.embeds;
+    if (payload.content) out.content = payload.content;
+    if (payload.components) out.components = payload.components;
+    if (payload.files) out.files = payload.files;
+    if (!out.content && !out.embeds && !out.components && !out.files) {
+      out.content = '\u200b';
+    }
+    return out;
+  }
+
+  async deferReply(_opts = {}) {
+    if (this.deferred || this.replied) return this._reply;
+    try {
+      this._reply = await this.message.channel.send({ content: 'Working on it…' });
+    } catch (err) {
+      console.error('deferReply send failed:', err);
+    }
+    this.deferred = true;
+    return this._reply;
+  }
+
+  async reply(payload) {
+    if (this.replied || this.deferred) {
+      return await this.editReply(payload);
+    }
+    const sendPayload = this._normalizePayload(payload);
+    try {
+      this._reply = await this.message.reply(sendPayload);
+    } catch (err) {
+      try {
+        this._reply = await this.message.channel.send(sendPayload);
+      } catch (err2) {
+        console.error('reply failed entirely:', err2);
+      }
+    }
+    this.replied = true;
+    return this._reply;
+  }
+
+  async editReply(payload) {
+    const sendPayload = this._normalizePayload(payload);
+    if (this._reply) {
+      try {
+        return await this._reply.edit(sendPayload);
+      } catch (err) {
+        try {
+          return await this.message.channel.send(sendPayload);
+        } catch (err2) {
+          console.error('editReply fallback failed:', err2);
+        }
+      }
+    }
+    try {
+      this._reply = await this.message.channel.send(sendPayload);
+    } catch (err) {
+      console.error('editReply send failed:', err);
+    }
+    this.replied = true;
+    return this._reply;
+  }
+
+  async followUp(payload) {
+    const sendPayload = this._normalizePayload(payload);
+    try {
+      return await this.message.channel.send(sendPayload);
+    } catch (err) {
+      console.error('followUp send failed:', err);
+    }
+  }
+
+  async showModal(_modal) {
+    // Modals require an interaction context; not supported from message-based commands.
+    try {
+      await this.message.reply('This action requires using the slash-command version.');
+    } catch (_) {}
+  }
+}
+
+async function dispatchPrefixCommand(message, tokens) {
+  const cmd = tokens[0].toLowerCase();
+  const args = tokens.slice(1);
+
+  let handler = null;
+  let commandName = null;
+  let parsedArgs = args;
+
+  switch (cmd) {
+    case 'labor':
+    case 'work':
+      handler = (ix) => handleLaborCommand(ix, message.author.id);
+      commandName = 'labor';
+      break;
+
+    case 'inventory':
+    case 'inv':
+      handler = (ix) => handleInventoryCommand(ix, message.author.id);
+      commandName = 'inventory';
+      break;
+
+    case 'scavenge':
+    case 'scav':
+      handler = (ix) => handleScavengeCommand(ix, message.author.id);
+      commandName = 'scavenge';
+      break;
+
+    case 'store':
+    case 'shop':
+      handler = async (ix) => {
+        await ix.deferReply();
+        await handleStoreCommand(ix);
+      };
+      commandName = 'store';
+      break;
+
+    case 'leaderboard':
+    case 'lb':
+      handler = (ix) => handleLeaderboardCommand(ix);
+      commandName = 'leaderboard';
+      break;
+
+    case 'mining-status':
+    case 'mining':
+    case 'event':
+      handler = (ix) => handleMiningStatusCommand(ix);
+      commandName = 'mining-status';
+      break;
+
+    case 'collection':
+    case 'col':
+      handler = (ix) => handleCollectionCommand(ix, message.author.id);
+      commandName = 'collection';
+      break;
+
+    case 'bank':
+      if ((args[0] || '').toLowerCase() === 'all') {
+        handler = (ix) => handleBankAllCommand(ix, message.author.id);
+        commandName = 'bank-all';
+      } else if (args[0]) {
+        const amount = parseInt(String(args[0]).replace(/[, $_]/g, ''), 10);
+        if (isNaN(amount) || amount <= 0) {
+          try { await message.reply('Usage: `bank <amount>` or `bank all`'); } catch (_) {}
+          return true;
+        }
+        parsedArgs = [String(amount)];
+        handler = (ix) => handleBankCommand(ix, message.author.id);
+        commandName = 'bank';
+      } else {
+        try { await message.reply('Usage: `bank <amount>` or `bank all`'); } catch (_) {}
+        return true;
+      }
+      break;
+
+    case 'withdraw':
+    case 'wd':
+      if (args[0]) {
+        const amount = parseInt(String(args[0]).replace(/[, $_]/g, ''), 10);
+        if (isNaN(amount) || amount <= 0) {
+          try { await message.reply('Usage: `withdraw <amount>`'); } catch (_) {}
+          return true;
+        }
+        parsedArgs = [String(amount)];
+        handler = (ix) => handleWithdrawCommand(ix, message.author.id);
+        commandName = 'withdraw';
+      } else {
+        try { await message.reply('Usage: `withdraw <amount>`'); } catch (_) {}
+        return true;
+      }
+      break;
+
+    default:
+      return false;
+  }
+
+  try {
+    const userId = message.author.id;
+    await getUser(userId);
+    if (!userData[userId].commandCount) userData[userId].commandCount = 0;
+    userData[userId].commandCount++;
+    if (!userData[userId].joinedDate) userData[userId].joinedDate = Date.now();
+
+    const adapter = new MessageInteractionAdapter(message, parsedArgs, commandName);
+    await handler(adapter);
+  } catch (err) {
+    console.error(`Prefix command "${cmd}" failed:`, err);
+    try {
+      await message.reply('Something went wrong while running that command. Please try again.');
+    } catch (_) {}
+  }
+  return true;
+}
+
+
 async function handleInfoCommand(interaction) {
+  const guildPrefix = interaction.guildId ? await getGuildPrefix(interaction.guildId) : null;
+  const prefixNote = guildPrefix
+    ? `**Text-command prefix for this server:** \`${guildPrefix}\`\nMost common commands also work as e.g. \`${guildPrefix}inventory\`, \`${guildPrefix}labor\`, \`${guildPrefix}bank all\`.`
+    : 'No text-command prefix set yet — admins can set one with `/setprefix`, then players can use commands like `!inventory` instead of slash.';
+
   const infoEmbed = new EmbedBuilder()
-    .setTitle('⚡ Fortune Bot - Build Your Empire')
-    .setDescription('**Welcome to Fortune Bot!** Build your fortune through virtual currency, collect rare artefacts, trade with players, and climb the leaderboards!')
+    .setTitle('Fortune Bot — Build Your Empire')
+    .setDescription(
+      '**Welcome to Fortune Bot!** Earn cash, scavenge for rare artefacts, trade with players, ' +
+      'fight in marble games, and climb the leaderboards.\n\n' + prefixNote
+    )
     .setColor(0x2F3136)
-    .setThumbnail('https://cdn.discordapp.com/emojis/1234567890123456789.png')
     .addFields(
       {
-        name: '⚒️ Core Commands',
+        name: 'Earning & Inventory',
         value: [
-          '`/scavenge` - Search for rare artefacts (2h cooldown)',
-          '`/labor` - Work to earn money (40min cooldown)',
-          '`/inventory` - View your cash, bank balance and artefacts',
-          '`/sell [artefact]` - Sell a specific artefact for cash',
-          '`/mass-sell` - Sell all artefacts at once',
-          '`/trade [user]` - Interactive trading with other players',
-          '`/store` - View items available for purchase'
+          '`/scavenge` — Search for rare artefacts (cooldown applies)',
+          '`/labor` — Work to earn cash (cooldown applies)',
+          '`/inventory` — View your cash, bank balance, and artefact collection',
+          '`/collection` — Browse your full artefact collection',
+          '`/convert` — Convert XP into cash (1 XP = $2)'
         ].join('\n'),
         inline: false
       },
       {
-        name: '🏦 Banking System',
+        name: 'Banking',
         value: [
-          '`/bank [amount]` - Deposit money (max $50,000 total)',
-          '`/withdraw [amount]` - Withdraw money from bank',
-          '`/steal [user] [amount]` - Steal cash from other players',
-          '**Note:** Only cash on hand can be stolen, bank money is protected'
+          '`/bank <amount>` — Deposit cash into your bank',
+          '`/bank-all` — Deposit all your cash at once',
+          '`/withdraw <amount>` — Withdraw cash from your bank',
+          'Use `/store` then `/buy Bank Expansion Ticket` to grow your bank capacity (+25% per ticket).'
         ].join('\n'),
         inline: false
       },
       {
-        name: '👥 Social & Admin Features',
+        name: 'Trading & Selling',
         value: [
-          '`/leaderboard` - View wealth rankings',
-          '`/store` - View custom server items',
-          '`/add-item [name] [price]` - Add custom server item (Admin)',
-          '`/remove-item [name]` - Remove server item (Admin)',
-          '`/view-items` - Manage server items (Admin)'
+          '`/sell` — Open the interactive sell menu',
+          '`/mass-sell` — Queue and sell many artefacts at once',
+          '`/trade <user>` — Start an interactive trade with another player',
+          '`/store` — View global and server-specific items for sale',
+          '`/buy <item>` — Purchase an item from the store'
         ].join('\n'),
         inline: false
       },
       {
-        name: 'Rarity Levels & Tier Values',
+        name: 'Player Interaction',
         value: [
-          '**Common** (65%) — T1: $97 | T2: $112 | T3: $150 | T4: $187 | T5: $202',
-          '**Uncommon** (20%) — T1: $325 | T2: $375 | T3: $500 | T4: $625 | T5: $675',
-          '**Rare** (10%) — T1: $975 | T2: $1,125 | T3: $1,500 | T4: $1,875 | T5: $2,025',
-          '**Legendary** (4%) — T1: $3,250 | T2: $3,750 | T3: $5,000 | T4: $6,250 | T5: $6,750',
-          '**Unknown** (1%) — T1: $9,750 | T2: $11,250 | T3: $15,000 | T4: $18,750 | T5: $20,250',
-          '',
-          'T1=65%  T2=75%  T3=100% (base)  T4=125%  T5=135%'
+          '`/steal <user> <amount>` — Steal cash on hand from a player (bank balances are protected)',
+          '`/marble-game` — Multiplayer marble guessing game',
+          '`/marble-duel <opponent>` — 1v1 marble duel for stakes',
+          '`/leaderboard` — View server wealth rankings',
+          '`/observe <player>` — View another player\'s inventory (with their permission)',
+          '`/configure-observation` — Toggle whether others can observe you'
+        ].join('\n'),
+        inline: false
+      },
+      {
+        name: 'Events',
+        value: [
+          '`/mining-status` — Check the current Mining Crisis event',
+          'During a Mining Crisis one artefact becomes unscavengeable while another doubles in find rate.'
+        ].join('\n'),
+        inline: false
+      },
+      {
+        name: 'Server Admins',
+        value: [
+          '`/setprefix` — Set the text-command prefix for this server',
+          '`/add-item`, `/remove-item`, `/view-items` — Manage server-specific store items',
+          '`/give-roles`, `/timeout`, `/kick`, `/ban` — Moderation tools'
+        ].join('\n'),
+        inline: false
+      },
+      {
+        name: 'Artefact Rarity & Tier Scaling',
+        value: [
+          '**Common** (65%) · **Uncommon** (20%) · **Rare** (10%) · **Legendary** (4%) · **Unknown** (1%)',
+          'Each artefact has a tier (T1–T5) that scales its sell value: T1=65%  T2=75%  T3=100%  T4=125%  T5=135%.',
+          'Shiny variants (✨) sell for 20× the base tier value.'
         ].join('\n'),
         inline: false
       }
     )
-    .setFooter({ text: '💡 Tip: Start with /scavenge to find your first artefact!' })
+    .setFooter({ text: 'Tip: Start with /scavenge to find your first artefact!' })
     .setTimestamp();
 
   await interaction.reply({ embeds: [infoEmbed] });
