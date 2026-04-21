@@ -2443,7 +2443,7 @@ async function handleInventoryCommand(interaction, userId) {
     return counts;
   }, {});
 
-  const artefactList = Object.keys(artefactCounts).length ?
+  const artefactLines = Object.keys(artefactCounts).length ?
     Object.entries(artefactCounts).map(([artefactName, count]) => {
       const rarity = getRarityByArtefact(artefactName);
       const tier = getArtefactTier(artefactName);
@@ -2451,8 +2451,27 @@ async function handleInventoryCommand(interaction, userId) {
       const isShiny = artefactName.startsWith('✨ SHINY ') && artefactName.endsWith(' ✨');
       const sellDisplay = isShiny ? tierSell * 20 : tierSell;
       const countSuffix = count > 1 ? ` [${count}]` : '';
-      return `${artefactName} (${rarity ? rarity.name : 'Unknown'} T${tier} — $${sellDisplay.toLocaleString()})${countSuffix}`;
-    }).join('\n') : 'No artefacts';
+      return `${artefactName} (${rarity ? rarity.name : 'Unknown'} T${tier} — ${sellDisplay.toLocaleString()})${countSuffix}`;
+    }) : ['No artefacts'];
+
+  const artefactChunks = [];
+  let currentChunk = '';
+  for (const line of artefactLines) {
+    const addition = currentChunk ? '\n' + line : line;
+    if (currentChunk.length + addition.length > 1024) {
+      artefactChunks.push(currentChunk);
+      currentChunk = line;
+    } else {
+      currentChunk += addition;
+    }
+  }
+  if (currentChunk) artefactChunks.push(currentChunk);
+
+  const artefactFields = artefactChunks.map((chunk, i) => ({
+    name: i === 0 ? 'Artefact Collection' : '\u200b',
+    value: chunk,
+    inline: false
+  }));
 
   // Count purchased items
   const itemsCount = {};
@@ -2460,24 +2479,24 @@ async function handleInventoryCommand(interaction, userId) {
     itemsCount[item] = (itemsCount[item] || 0) + 1;
   });
 
-  const itemsList = Object.entries(itemsCount)
+  const itemsList = (Object.entries(itemsCount)
     .map(([name, count]) => `${name}${count > 1 ? ` [${count}]` : ''}`)
-    .join(', ') || 'No items';
+    .join(', ') || 'No items').substring(0, 1024);
 
   const inventoryEmbed = new EmbedBuilder()
     .setTitle('Your Inventory')
     .setDescription('Current financial status and artefact collection')
     .addFields(
-      { name: 'Cash on Hand', value: `$${user.cash.toLocaleString()}`, inline: true },
-      { name: 'Bank Balance', value: `$${(user.bankBalance || 0).toLocaleString()}`, inline: true },
-      { name: 'Total Wealth', value: `$${(user.cash + (user.bankBalance || 0)).toLocaleString()}`, inline: true },
+      { name: 'Cash on Hand', value: `${user.cash.toLocaleString()}`, inline: true },
+      { name: 'Bank Balance', value: `${(user.bankBalance || 0).toLocaleString()}`, inline: true },
+      { name: 'Total Wealth', value: `${(user.cash + (user.bankBalance || 0)).toLocaleString()}`, inline: true },
       { name: 'Experience Points', value: `${userXpData.xp.toLocaleString()} XP`, inline: true },
-      { name: 'XP Cash Value', value: `$${(userXpData.xp * 2).toLocaleString()}`, inline: true },
+      { name: 'XP Cash Value', value: `${(userXpData.xp * 2).toLocaleString()}`, inline: true },
       { name: 'Messages Sent', value: `${userXpData.messageCount.toLocaleString()}`, inline: true },
       { name: 'Artefacts Owned', value: user.artefacts.length.toString(), inline: true },
-      { name: 'Collection Value', value: `$${totalValue.toLocaleString()}`, inline: true },
+      { name: 'Collection Value', value: `${totalValue.toLocaleString()}`, inline: true },
       { name: 'Bank Capacity', value: `${(((user.bankBalance || 0) / bankCapacity) * 100).toFixed(1)}%`, inline: true },
-      { name: 'Artefact Collection', value: artefactList, inline: false },
+      ...artefactFields,
       { name: 'Purchased Items', value: itemsList, inline: false }
     )
     .setColor(0x339AF0)
