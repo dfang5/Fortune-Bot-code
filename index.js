@@ -3065,11 +3065,10 @@ async function handleStoreCommand(interaction) {
 
   // Global Store Embed
   if (Object.keys(globalItems).length > 0) {
-    let globalItemsList = '';
+    const globalItemBlocks = [];
 
     for (const [name, item] of Object.entries(globalItems)) {
       if (item.type === 'bank_expansion') {
-        // Calculate both price and capacity in parallel
         const [currentPrice, currentCapacity] = await Promise.all([
           calculateExpansionPrice(userId),
           calculateBankCapacity(userId)
@@ -3077,19 +3076,42 @@ async function handleStoreCommand(interaction) {
         const currentExpansions = userData[userId]?.bankExpansions || 0;
         const nextCapacity = Math.floor(50000 * Math.pow(1.25, currentExpansions + 1));
 
-        globalItemsList += `**${name}**\n`;
-        globalItemsList += `Current Price: $${currentPrice.toLocaleString()}\n`;
-        globalItemsList += `${item.description}\n`;
-        globalItemsList += `Your Bank: $${currentCapacity.toLocaleString()} capacity (${currentExpansions} expansions)\n`;
-        globalItemsList += `Next Expansion: $${nextCapacity.toLocaleString()} capacity\n\n`;
+        globalItemBlocks.push(
+          `**${name}**\n` +
+          `Current Price: ${currentPrice.toLocaleString()}\n` +
+          `${item.description}\n` +
+          `Your Bank: ${currentCapacity.toLocaleString()} capacity (${currentExpansions} expansions)\n` +
+          `Next Expansion: ${nextCapacity.toLocaleString()} capacity`
+        );
       }
     }
+
+    const globalChunks = [];
+    let currentGlobalChunk = '';
+    for (const block of globalItemBlocks) {
+      const safeBlock = block.length > 1024 ? block.slice(0, 1021) + '...' : block;
+      const addition = currentGlobalChunk ? '\n\n' + safeBlock : safeBlock;
+      if (currentGlobalChunk.length + addition.length > 1024) {
+        globalChunks.push(currentGlobalChunk);
+        currentGlobalChunk = safeBlock;
+      } else {
+        currentGlobalChunk += addition;
+      }
+    }
+    if (currentGlobalChunk) globalChunks.push(currentGlobalChunk);
+    if (globalChunks.length === 0) globalChunks.push('No items available');
+
+    const globalFields = globalChunks.map((chunk, i) => ({
+      name: i === 0 ? 'Available Items' : '\u200b',
+      value: chunk,
+      inline: false
+    }));
 
     const globalEmbed = new EmbedBuilder()
       .setTitle('Global Store')
       .setDescription('**Cross-server items available to all players**')
       .addFields(
-        { name: 'Available Items', value: globalItemsList || 'No items available', inline: false },
+        ...globalFields,
         { name: 'How to Purchase', value: 'Use `/buy <item_name>` to purchase global items', inline: false }
       )
       .setColor(0xFFD700)
@@ -3101,15 +3123,35 @@ async function handleStoreCommand(interaction) {
 
   // Server Store Embed
   if (Object.keys(guildItems).length > 0) {
-    const serverItemsList = Object.entries(guildItems)
-      .map(([name, data]) => `**${name}**\nPrice: $${data.price.toLocaleString()}\n${data.description}`)
-      .join('\n\n');
+    const serverItemBlocks = Object.entries(guildItems).map(([name, data]) =>
+      `**${name}**\nPrice: ${data.price.toLocaleString()}\n${data.description}`
+    );
+
+    const serverChunks = [];
+    let currentServerChunk = '';
+    for (const block of serverItemBlocks) {
+      const safeBlock = block.length > 1024 ? block.slice(0, 1021) + '...' : block;
+      const addition = currentServerChunk ? '\n\n' + safeBlock : safeBlock;
+      if (currentServerChunk.length + addition.length > 1024) {
+        serverChunks.push(currentServerChunk);
+        currentServerChunk = safeBlock;
+      } else {
+        currentServerChunk += addition;
+      }
+    }
+    if (currentServerChunk) serverChunks.push(currentServerChunk);
+
+    const serverFields = serverChunks.map((chunk, i) => ({
+      name: i === 0 ? 'Available Items' : '\u200b',
+      value: chunk,
+      inline: false
+    }));
 
     const serverEmbed = new EmbedBuilder()
       .setTitle('Server Store')
       .setDescription(`**Server-specific items for this server**`)
       .addFields(
-        { name: 'Available Items', value: serverItemsList, inline: false },
+        ...serverFields,
         { name: 'How to Purchase', value: 'Use `/buy <item_name>` to purchase server items', inline: false }
       )
       .setColor(0x9932CC)
