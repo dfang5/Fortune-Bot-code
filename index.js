@@ -16,7 +16,8 @@ const {
   ButtonBuilder,
   ButtonStyle,
   ComponentType,
-  PermissionFlagsBits
+  PermissionFlagsBits,
+  ChannelType
 } = require('discord.js');
 require('dotenv').config();
 const DEVELOPER_ID = '1299875574894039184';
@@ -90,6 +91,7 @@ let eventSystemCollection;
 let guildItemsCollection;
 let globalItemsCollection;
 let guildSettingsCollection;
+let marketStateCollection;
 
 // Initialize MongoDB connection
 async function initializeDatabase() {
@@ -115,6 +117,7 @@ async function initializeDatabase() {
     guildItemsCollection = db.collection('guildItems');
     globalItemsCollection = db.collection('globalItems');
     guildSettingsCollection = db.collection('guildSettings');
+    marketStateCollection = db.collection('marketState');
 
     // Initialize event system if it doesn't exist
     const eventSystem = await eventSystemCollection.findOne({ _id: 'main' });
@@ -540,19 +543,412 @@ function getArtefactTier(name) {
 function calcArtefactSellValue(name, rarity) {
   const tier = getArtefactTier(name);
   const base = rarity ? rarity.sell : 100;
-  return Math.floor(base * TIER_MULTIPLIERS[tier]);
+  const mult = getMarketMultiplier(name);
+  return Math.floor(base * TIER_MULTIPLIERS[tier] * mult);
 }
 
 function calcArtefactValue(name, rarity) {
   const tier = getArtefactTier(name);
   const base = rarity ? rarity.value : 100;
-  return Math.floor(base * TIER_MULTIPLIERS[tier]);
+  const mult = getMarketMultiplier(name);
+  return Math.floor(base * TIER_MULTIPLIERS[tier] * mult);
 }
 
 function getRarityByArtefact(name) {
   const cleanName = name.startsWith('✨ SHINY ') && name.endsWith(' ✨') ? name.replace('✨ SHINY ', '').replace(' ✨', '') : name;
   return rarities.find(r => r.items.includes(cleanName));
 }
+
+// === MARKET SYSTEM ===
+// Per-artefact price multipliers refreshed every 6 hours and persisted in MongoDB.
+// MARKET_CACHE is the in-memory copy that all sell/value helpers read from for speed.
+const MARKET_REFRESH_INTERVAL = 6 * 60 * 60 * 1000; // 6 hours
+const MARKET_MULT_FLOOR = 0.4;
+const MARKET_MULT_CEILING = 3.0;
+
+// Per-rarity volatility profile applied each refresh.
+// `stay` = chance the multiplier is left unchanged this refresh.
+// Otherwise the price moves up or down by `swing` (50/50).
+const MARKET_VOLATILITY = {
+  Common:    { stay: 0.90, swing: 0.02 },
+  Uncommon:  { stay: 0.80, swing: 0.05 },
+  Rare:      { stay: 0.70, swing: 0.10 },
+  Legendary: { stay: 0.50, swing: 0.12 },
+  Unknown:   { stay: 0.40, swing: 0.15 }
+};
+
+const MARKET_CACHE = {
+  multipliers: {},          // { artefactName: number }
+  previousMultipliers: {},  // last refresh's values, for change display
+  lastRefresh: 0,
+  refreshCount: 0
+};
+
+function getMarketMultiplier(name) {
+  const cleanName = name.startsWith('✨ SHINY ') && name.endsWith(' ✨')
+    ? name.replace('✨ SHINY ', '').replace(' ✨', '')
+    : name;
+  const m = MARKET_CACHE.multipliers[cleanName];
+  return (typeof m === 'number' && m > 0) ? m : 1.0;
+}
+
+function getAllArtefactNames() {
+  const names = [];
+  for (const r of rarities) for (const item of r.items) names.push(item);
+  return names;
+}
+
+function rollNewMultiplier(currentMult, rarityName) {
+  const profile = MARKET_VOLATILITY[rarityName] || MARKET_VOLATILITY.Common;
+  if (Math.random() < profile.stay) return currentMult;
+  const goingUp = Math.random() < 0.5;
+  const next = goingUp ? currentMult * (1 + profile.swing) : currentMult * (1 - profile.swing);
+  return Math.min(MARKET_MULT_CEILING, Math.max(MARKET_MULT_FLOOR, next));
+}
+
+async function loadMarketState() {
+  if (!marketStateCollection) return;
+  let doc = await marketStateCollection.findOne({ _id: 'global' });
+  if (!doc) {
+    const seed = {};
+    for (const name of getAllArtefactNames()) seed[name] = 1.0;
+    doc = {
+      _id: 'global',
+      multipliers: seed,
+      previousMultipliers: { ...seed },
+      lastRefresh: Date.now(),
+      refreshCount: 0
+    };
+    await marketStateCollection.insertOne(doc);
+    console.log('Market state initialized with neutral multipliers');
+  }
+  MARKET_CACHE.multipliers = doc.multipliers || {};
+  MARKET_CACHE.previousMultipliers = doc.previousMultipliers || {};
+  MARKET_CACHE.lastRefresh = doc.lastRefresh || 0;
+  MARKET_CACHE.refreshCount = doc.refreshCount || 0;
+  MARKET_CACHE.lastCrashout = doc.lastCrashout || 0;
+  MARKET_CACHE.crashoutHistory = Array.isArray(doc.crashoutHistory) ? doc.crashoutHistory : [];
+
+  // Backfill any newly-added artefacts with a neutral 1.0 multiplier
+  let added = false;
+  for (const name of getAllArtefactNames()) {
+    if (typeof MARKET_CACHE.multipliers[name] !== 'number') {
+      MARKET_CACHE.multipliers[name] = 1.0;
+      added = true;
+    }
+  }
+  if (added) {
+    await marketStateCollection.updateOne(
+      { _id: 'global' },
+      { $set: { multipliers: MARKET_CACHE.multipliers } }
+    );
+  }
+}
+
+async function runMarketRefresh() {
+  if (!marketStateCollection) return;
+  const previousMultipliers = { ...MARKET_CACHE.multipliers };
+  const newMultipliers = {};
+  for (const r of rarities) {
+    for (const item of r.items) {
+      const current = MARKET_CACHE.multipliers[item] ?? 1.0;
+      newMultipliers[item] = Number(rollNewMultiplier(current, r.name).toFixed(4));
+    }
+  }
+  MARKET_CACHE.multipliers = newMultipliers;
+  MARKET_CACHE.previousMultipliers = previousMultipliers;
+  MARKET_CACHE.lastRefresh = Date.now();
+  MARKET_CACHE.refreshCount += 1;
+  await marketStateCollection.updateOne(
+    { _id: 'global' },
+    { $set: {
+        multipliers: newMultipliers,
+        previousMultipliers,
+        lastRefresh: MARKET_CACHE.lastRefresh,
+        refreshCount: MARKET_CACHE.refreshCount
+    } },
+    { upsert: true }
+  );
+  console.log(`Market refresh #${MARKET_CACHE.refreshCount} complete`);
+}
+
+async function maybeRefreshMarket() {
+  if (!marketStateCollection) return;
+  if (Date.now() - MARKET_CACHE.lastRefresh >= MARKET_REFRESH_INTERVAL) {
+    try { await runMarketRefresh(); }
+    catch (err) { console.error('Market refresh failed:', err); }
+  }
+}
+
+// === MARKET CRASHOUT EVENTS ===
+// Once per week a random rarity tier is hit by a Market Crash (-10%) or
+// a Speculative Bubble (+15%). The shift is applied to every artefact in
+// that rarity by multiplying their current multiplier and clamping.
+const CRASHOUT_INTERVAL = 7 * 24 * 60 * 60 * 1000; // 7 days
+const CRASHOUT_CRASH_FACTOR = 0.90;   // -10%
+const CRASHOUT_BUBBLE_FACTOR = 1.15;  // +15%
+const CRASHOUT_HISTORY_LIMIT = 10;
+
+// In-memory cache for per-guild announcement channels (mirror of guildSettings)
+const ANNOUNCEMENT_CACHE = new Map(); // guildId -> channelId | null
+
+async function getAnnouncementChannelId(guildId) {
+  if (!guildId) return null;
+  if (ANNOUNCEMENT_CACHE.has(guildId)) return ANNOUNCEMENT_CACHE.get(guildId);
+  if (!guildSettingsCollection) return null;
+  try {
+    const doc = await guildSettingsCollection.findOne({ _id: guildId });
+    const channelId = doc && doc.announcementChannelId ? doc.announcementChannelId : null;
+    ANNOUNCEMENT_CACHE.set(guildId, channelId);
+    return channelId;
+  } catch (err) {
+    console.error('Failed to load announcement channel:', err);
+    return null;
+  }
+}
+
+async function setAnnouncementChannelId(guildId, channelId) {
+  if (!guildSettingsCollection) throw new Error('Database not ready');
+  await guildSettingsCollection.updateOne(
+    { _id: guildId },
+    { $set: { announcementChannelId: channelId } },
+    { upsert: true }
+  );
+  ANNOUNCEMENT_CACHE.set(guildId, channelId);
+}
+
+async function broadcastToAnnouncementChannels(embed) {
+  let delivered = 0;
+  let failed = 0;
+  const guilds = client.guilds.cache;
+  for (const [guildId] of guilds) {
+    try {
+      const channelId = await getAnnouncementChannelId(guildId);
+      if (!channelId) continue;
+      const channel = await client.channels.fetch(channelId).catch(() => null);
+      if (!channel || !channel.isTextBased || !channel.isTextBased()) continue;
+      await channel.send({ embeds: [embed] });
+      delivered++;
+    } catch (err) {
+      failed++;
+      console.error(`Announcement send failed for guild ${guildId}:`, err.message);
+    }
+  }
+  console.log(`Announcement broadcast: delivered=${delivered} failed=${failed}`);
+  return { delivered, failed };
+}
+
+async function runCrashout() {
+  if (!marketStateCollection) return null;
+
+  // Pick a random rarity uniformly
+  const rarity = rarities[Math.floor(Math.random() * rarities.length)];
+  // 50/50 crash vs bubble
+  const isBubble = Math.random() < 0.5;
+  const factor = isBubble ? CRASHOUT_BUBBLE_FACTOR : CRASHOUT_CRASH_FACTOR;
+  const type = isBubble ? 'bubble' : 'crash';
+
+  // Apply factor to every artefact in that rarity
+  const updated = { ...MARKET_CACHE.multipliers };
+  for (const item of rarity.items) {
+    const current = updated[item] ?? 1.0;
+    const next = Math.min(MARKET_MULT_CEILING, Math.max(MARKET_MULT_FLOOR, current * factor));
+    updated[item] = Number(next.toFixed(4));
+  }
+  MARKET_CACHE.multipliers = updated;
+  MARKET_CACHE.lastCrashout = Date.now();
+  const event = {
+    timestamp: MARKET_CACHE.lastCrashout,
+    rarity: rarity.name,
+    type,
+    factor,
+  };
+  MARKET_CACHE.crashoutHistory = [event, ...(MARKET_CACHE.crashoutHistory || [])].slice(0, CRASHOUT_HISTORY_LIMIT);
+
+  await marketStateCollection.updateOne(
+    { _id: 'global' },
+    { $set: {
+        multipliers: updated,
+        lastCrashout: MARKET_CACHE.lastCrashout,
+        crashoutHistory: MARKET_CACHE.crashoutHistory,
+    } },
+    { upsert: true }
+  );
+
+  console.log(`Crashout event: ${type.toUpperCase()} on ${rarity.name} (factor ${factor})`);
+
+  // Build announcement embed and broadcast
+  const pctLabel = isBubble ? '+15%' : '-10%';
+  const embed = new EmbedBuilder()
+    .setTitle(isBubble ? 'Speculative Bubble!' : 'Market Crash!')
+    .setDescription(
+      isBubble
+        ? `Speculation has swept the **${rarity.name}** market. Every ${rarity.name} artefact has surged **${pctLabel}** in value!`
+        : `Disaster has hit the **${rarity.name}** market. Every ${rarity.name} artefact has plunged **${pctLabel}** in value.`
+    )
+    .addFields(
+      { name: 'Affected Rarity', value: rarity.name, inline: true },
+      { name: 'Price Shift', value: pctLabel, inline: true },
+      { name: 'Items Hit', value: `${rarity.items.length} artefacts`, inline: true },
+      { name: 'What Now?', value: isBubble
+          ? `Sell while prices are high — or hold and hope the bubble keeps growing.`
+          : `Now is a buying opportunity. Trade for cheap and hope for a recovery.`,
+        inline: false }
+    )
+    .setColor(isBubble ? 0x2ECC71 : 0xE74C3C)
+    .setFooter({ text: 'Fortune Bot • Weekly Market Event' })
+    .setTimestamp();
+
+  await broadcastToAnnouncementChannels(embed).catch(err =>
+    console.error('Crashout broadcast error:', err)
+  );
+
+  return event;
+}
+
+async function maybeRunCrashout() {
+  if (!marketStateCollection) return;
+  const last = MARKET_CACHE.lastCrashout || 0;
+  if (Date.now() - last >= CRASHOUT_INTERVAL) {
+    try { await runCrashout(); }
+    catch (err) { console.error('Crashout failed:', err); }
+  }
+}
+
+// === ARTEFACT SETS ===
+// Each set is a curated grouping of artefacts spanning multiple rarities.
+// Selling a complete copy of a set in a single transaction grants a 20%
+// "Collector's Premium" on the value of those items.
+const COLLECTORS_PREMIUM = 0.20;
+
+const ARTEFACT_SETS = {
+  volcanic: {
+    name: 'The Volcanic Set',
+    description: 'Born of fire and pressure deep beneath the crust.',
+    items: ['Olivine', 'Basalt Prism', 'Pumice Dome', 'Obsidian Blade', 'Stellar Obsidian']
+  },
+  quartz: {
+    name: 'The Quartz Set',
+    description: 'Every form of crystalline silica, from common to crowned.',
+    items: ['Quartz', 'Smoky Quartz', 'Condensed Quartz', 'Citrine Crest']
+  },
+  sedimentary: {
+    name: 'The Sedimentary Set',
+    description: 'Layer upon patient layer, history pressed into stone.',
+    items: ['Shale Flake', 'Sandstone Carving', 'Travertine Fragment', 'Limestone Tablet', 'Dolomite Tablet']
+  },
+  royal: {
+    name: 'The Royal Regalia Set',
+    description: 'Crowns, thrones, and sceptres fit for a forgotten dynasty.',
+    items: ['Crown of Gypsum', 'Ring of Malachite', 'Crown of Benitoite', 'Throne of Jadeite', 'Scepter of Onyx']
+  },
+  garnet: {
+    name: 'The Garnet Family',
+    description: 'Three siblings of the garnet line, in escalating brilliance.',
+    items: ['Garnet', 'Spessartine Dagger', 'Demantoid Shard']
+  },
+  relics: {
+    name: 'The Ancient Relics Set',
+    description: 'Artefacts that predate memory, each one a riddle.',
+    items: ['Amber Fossil', 'Statue of Bastnasite', 'Relic of Moissanite', 'Serendibite Relic']
+  },
+  arcane: {
+    name: 'The Arcane Implements Set',
+    description: 'Tools of practitioners now long lost to history.',
+    items: ['Stibnite Wand', 'Scepter of Rhodonite', 'Staff of Chrysoberyl', 'Brazilianite Shard']
+  },
+  stellar: {
+    name: 'The Stellar Set',
+    description: 'For the most ambitious collectors only — pieces from beyond.',
+    items: ['Meteorite Shard', 'Coesite Fragment', 'Primordial Opal', 'Grandidierite Prism']
+  }
+};
+
+// Reverse lookup: artefact name -> set id
+const ITEM_TO_SET = {};
+for (const [setId, set] of Object.entries(ARTEFACT_SETS)) {
+  for (const item of set.items) ITEM_TO_SET[item] = setId;
+}
+
+function stripShinyName(name) {
+  return (name.startsWith('✨ SHINY ') && name.endsWith(' ✨'))
+    ? name.replace('✨ SHINY ', '').replace(' ✨', '')
+    : name;
+}
+
+function getSetIdForItem(name) {
+  return ITEM_TO_SET[stripShinyName(name)] || null;
+}
+
+// Given a flat list of {name, sellValue} representing every individual item
+// being sold in this transaction, compute the Collector's Premium bonus
+// and a per-set breakdown for the receipt.
+function computeCollectorsPremium(soldItems) {
+  // Group sold items by base name; sort each group highest-value first so
+  // shiny copies are consumed for the bonus before plain ones (player-friendly).
+  const byBase = {};
+  for (const item of soldItems) {
+    const base = stripShinyName(item.name);
+    if (!byBase[base]) byBase[base] = [];
+    byBase[base].push(item);
+  }
+  for (const base in byBase) byBase[base].sort((a, b) => b.sellValue - a.sellValue);
+
+  let totalBonus = 0;
+  const breakdown = [];
+
+  for (const [setId, set] of Object.entries(ARTEFACT_SETS)) {
+    let completeCopies = Infinity;
+    for (const member of set.items) {
+      const count = (byBase[member] || []).length;
+      if (count < completeCopies) completeCopies = count;
+    }
+    if (!isFinite(completeCopies) || completeCopies === 0) continue;
+
+    let bonusForSet = 0;
+    for (let i = 0; i < completeCopies; i++) {
+      let copyValue = 0;
+      for (const member of set.items) {
+        const next = byBase[member].shift();
+        copyValue += next.sellValue;
+      }
+      bonusForSet += copyValue * COLLECTORS_PREMIUM;
+    }
+    totalBonus += bonusForSet;
+    breakdown.push({
+      setId,
+      setName: set.name,
+      copies: completeCopies,
+      bonus: Math.floor(bonusForSet)
+    });
+  }
+  return { totalBonus: Math.floor(totalBonus), breakdown };
+}
+
+// Given a player's full artefact array, return per-set progress for the
+// /collection "Sets" page.
+function computeSetProgress(playerArtefacts) {
+  const counts = {};
+  for (const a of (playerArtefacts || [])) {
+    const base = stripShinyName(a);
+    counts[base] = (counts[base] || 0) + 1;
+  }
+  const out = [];
+  for (const [setId, set] of Object.entries(ARTEFACT_SETS)) {
+    const owned = set.items.filter(i => (counts[i] || 0) > 0).length;
+    const completeCopies = Math.min(...set.items.map(i => counts[i] || 0));
+    out.push({
+      setId,
+      set,
+      ownedDistinct: owned,
+      total: set.items.length,
+      completeCopies,
+      itemCounts: Object.fromEntries(set.items.map(i => [i, counts[i] || 0]))
+    });
+  }
+  return out;
+}
+
 
 // === EVENT SYSTEM ===
 
@@ -829,6 +1225,15 @@ client.once('clientReady', async () => {
   setInterval(() => {
     checkAndHandleEvents();
   }, 15 * 60 * 1000);
+
+  // Initialize market state and start periodic refresh checks
+  await loadMarketState();
+  await maybeRefreshMarket();
+  await maybeRunCrashout();
+  setInterval(() => {
+    maybeRefreshMarket();
+    maybeRunCrashout();
+  }, 60 * 1000);
 
   // Register all slash commands
   const commands = [
@@ -1134,7 +1539,18 @@ client.once('clientReady', async () => {
           .setRequired(false)),
     new SlashCommandBuilder()
       .setName('setprefix')
-      .setDescription('Set the prefix for text-based commands in this server (Admin only)')
+      .setDescription('Set the prefix for text-based commands in this server (Admin only)'),
+    new SlashCommandBuilder()
+      .setName('market')
+      .setDescription('See current artefact market prices, top gainers and losers'),
+    new SlashCommandBuilder()
+      .setName('setannouncements')
+      .setDescription('Set the channel where market event announcements are posted (Admin only)')
+      .addChannelOption(option =>
+        option.setName('channel')
+          .setDescription('Channel to post announcements in. Omit to disable.')
+          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+          .setRequired(false))
   ];
 
   const rest = new REST({ version:'10' }).setToken(token);
@@ -1374,6 +1790,12 @@ client.on('interactionCreate', async interaction => {
         break;
       case 'setprefix':
         await handleSetPrefixCommand(interaction);
+        break;
+      case 'market':
+        await handleMarketCommand(interaction);
+        break;
+      case 'setannouncements':
+        await handleSetAnnouncementsCommand(interaction);
         break;
       case 'bank':
         await handleBankCommand(interaction, userId);
@@ -2258,6 +2680,148 @@ async function dispatchPrefixCommand(message, tokens) {
 }
 
 
+async function handleSetAnnouncementsCommand(interaction) {
+  if (!isDeveloper(interaction.user.id) && !interaction.member?.permissions.has(PermissionFlagsBits.Administrator)) {
+    return await interaction.reply({
+      embeds: [new EmbedBuilder()
+        .setTitle('Access Denied')
+        .setDescription('You need **Administrator** permissions or must be a bot developer to use this command.')
+        .setColor(0xFF6B6B)
+        .setTimestamp()],
+      ephemeral: true
+    });
+  }
+  if (!interaction.guildId) {
+    return await interaction.reply({ content: 'This command can only be used in a server.', ephemeral: true });
+  }
+
+  const channel = interaction.options.getChannel('channel');
+
+  // No channel = clear
+  if (!channel) {
+    await setAnnouncementChannelId(interaction.guildId, null);
+    return await interaction.reply({
+      embeds: [new EmbedBuilder()
+        .setTitle('Announcements Disabled')
+        .setDescription('Market event announcements will no longer be posted in this server. Run `/setannouncements channel:#some-channel` to enable them again.')
+        .setColor(0x95A5A6)
+        .setTimestamp()],
+      ephemeral: true
+    });
+  }
+
+  // Verify the bot can actually post there
+  try {
+    const me = interaction.guild.members.me;
+    const perms = channel.permissionsFor(me);
+    if (!perms || !perms.has(PermissionFlagsBits.SendMessages) || !perms.has(PermissionFlagsBits.ViewChannel) || !perms.has(PermissionFlagsBits.EmbedLinks)) {
+      return await interaction.reply({
+        embeds: [new EmbedBuilder()
+          .setTitle('Permission Problem')
+          .setDescription(`I don't have permission to send embedded messages in <#${channel.id}>. Please give me **View Channel**, **Send Messages**, and **Embed Links** there, then try again.`)
+          .setColor(0xFF6B6B)
+          .setTimestamp()],
+        ephemeral: true
+      });
+    }
+  } catch (err) {
+    console.error('Permission check failed:', err);
+  }
+
+  await setAnnouncementChannelId(interaction.guildId, channel.id);
+
+  return await interaction.reply({
+    embeds: [new EmbedBuilder()
+      .setTitle('Announcements Enabled')
+      .setDescription(`Market events (weekly crashes and bubbles) will now be posted in <#${channel.id}>.`)
+      .addFields({ name: 'Disable', value: 'Run `/setannouncements` with no channel to turn this off.', inline: false })
+      .setColor(0x2ECC71)
+      .setTimestamp()],
+    ephemeral: true
+  });
+}
+
+async function handleMarketCommand(interaction) {
+  try {
+    const now = Date.now();
+    const elapsed = now - (MARKET_CACHE.lastRefresh || now);
+    const untilNext = Math.max(0, MARKET_REFRESH_INTERVAL - elapsed);
+
+    const fmtDuration = (ms) => {
+      const totalMin = Math.floor(ms / 60000);
+      const h = Math.floor(totalMin / 60);
+      const m = totalMin % 60;
+      if (h > 0) return `${h}h ${m}m`;
+      return `${m}m`;
+    };
+
+    // Build per-artefact rows: name, rarity, current mult, change since last refresh
+    const rows = [];
+    for (const r of rarities) {
+      for (const item of r.items) {
+        const cur = MARKET_CACHE.multipliers[item] ?? 1.0;
+        const prev = MARKET_CACHE.previousMultipliers[item] ?? cur;
+        const changePct = prev > 0 ? ((cur - prev) / prev) * 100 : 0;
+        rows.push({ name: item, rarity: r.name, mult: cur, changePct });
+      }
+    }
+
+    const sortedByMult = [...rows].sort((a, b) => b.mult - a.mult);
+    const gainers = sortedByMult.slice(0, 5);
+    const losers = [...sortedByMult].reverse().slice(0, 5);
+    const movers = [...rows]
+      .filter(r => Math.abs(r.changePct) >= 0.01)
+      .sort((a, b) => Math.abs(b.changePct) - Math.abs(a.changePct))
+      .slice(0, 5);
+
+    const fmtRow = (r) => {
+      const arrow = r.mult > 1.001 ? '▲' : (r.mult < 0.999 ? '▼' : '•');
+      const pct = ((r.mult - 1) * 100).toFixed(1);
+      const sign = r.mult >= 1 ? '+' : '';
+      return `${arrow} **${r.name}** (${r.rarity}) — ${sign}${pct}% from base`;
+    };
+
+    const fmtMover = (r) => {
+      const arrow = r.changePct > 0 ? '▲' : '▼';
+      const sign = r.changePct > 0 ? '+' : '';
+      return `${arrow} **${r.name}** (${r.rarity}) — ${sign}${r.changePct.toFixed(1)}% this refresh`;
+    };
+
+    const embed = new EmbedBuilder()
+      .setTitle('Global Market')
+      .setDescription(
+        `Prices fluctuate every **6 hours**. Higher-rarity items swing harder.\n` +
+        `Last refresh: ${MARKET_CACHE.lastRefresh ? `<t:${Math.floor(MARKET_CACHE.lastRefresh / 1000)}:R>` : 'never'}\n` +
+        `Next refresh in: **${fmtDuration(untilNext)}**` +
+        ((MARKET_CACHE.crashoutHistory && MARKET_CACHE.crashoutHistory.length)
+          ? `\nLast weekly event: **${MARKET_CACHE.crashoutHistory[0].type === 'bubble' ? 'Bubble +15%' : 'Crash -10%'} on ${MARKET_CACHE.crashoutHistory[0].rarity}** <t:${Math.floor(MARKET_CACHE.crashoutHistory[0].timestamp / 1000)}:R>`
+          : '')
+      )
+      .addFields(
+        { name: 'Top Gainers (vs base)', value: gainers.map(fmtRow).join('\n') || 'No data', inline: false },
+        { name: 'Top Losers (vs base)',  value: losers.map(fmtRow).join('\n')  || 'No data', inline: false },
+        { name: 'Biggest Movers (last refresh)', value: movers.length ? movers.map(fmtMover).join('\n') : 'Quiet refresh — no major moves.', inline: false }
+      )
+      .setColor(0xF1C40F)
+      .setFooter({ text: `Market refresh #${MARKET_CACHE.refreshCount}` })
+      .setTimestamp();
+
+    await interaction.reply({ embeds: [embed] });
+  } catch (err) {
+    console.error('❌ Market command error:', err);
+    const errorEmbed = new EmbedBuilder()
+      .setTitle('Market Error')
+      .setDescription('Could not load the market right now. Please try again.')
+      .setColor(0xFF6B6B)
+      .setTimestamp();
+    if (interaction.deferred || interaction.replied) {
+      await interaction.editReply({ embeds: [errorEmbed] });
+    } else {
+      await interaction.reply({ embeds: [errorEmbed] });
+    }
+  }
+}
+
 async function handleInfoCommand(interaction) {
   const guildPrefix = interaction.guildId ? await getGuildPrefix(interaction.guildId) : null;
   const prefixNote = guildPrefix
@@ -2267,8 +2831,8 @@ async function handleInfoCommand(interaction) {
   const infoEmbed = new EmbedBuilder()
     .setTitle('Fortune Bot — Build Your Empire')
     .setDescription(
-      '**Welcome to Fortune Bot!** Earn cash, scavenge for rare artefacts, trade with players, ' +
-      'fight in marble games, and climb the leaderboards.\n\n' + prefixNote
+      '**Welcome to Fortune Bot!** Earn cash, scavenge for rare artefacts, time the market, ' +
+      'complete sets for bonuses, trade with players, and climb the leaderboards.\n\n' + prefixNote
     )
     .setColor(0x2F3136)
     .addFields(
@@ -2278,7 +2842,7 @@ async function handleInfoCommand(interaction) {
           '`/scavenge` — Search for rare artefacts (cooldown applies)',
           '`/labor` — Work to earn cash (cooldown applies)',
           '`/inventory` — View your cash, bank balance, and artefact collection',
-          '`/collection` — Browse your full artefact collection',
+          '`/collection` — Browse your full field guide (now with a **Sets** page!)',
           '`/convert` — Convert XP into cash (1 XP = $2)'
         ].join('\n'),
         inline: false
@@ -2296,8 +2860,7 @@ async function handleInfoCommand(interaction) {
       {
         name: 'Trading & Selling',
         value: [
-          '`/sell` — Open the interactive sell menu',
-          '`/mass-sell` — Queue and sell many artefacts at once',
+          '`/mass-sell` — Queue and sell many artefacts at once. **Sell a complete set together to earn the Collector\'s Premium (+20%)**.',
           '`/trade <user>` — Start an interactive trade with another player',
           '`/store` — View global and server-specific items for sale',
           '`/buy <item>` — Purchase an item from the store'
@@ -2317,10 +2880,29 @@ async function handleInfoCommand(interaction) {
         inline: false
       },
       {
+        name: 'The Market',
+        value: [
+          '`/market` — See current top gainers, top losers, biggest movers, and the next refresh countdown',
+          'Artefact prices **fluctuate every 6 hours**. Higher rarities swing harder — Common rarely moves, Unknown can swing up to ±15% per refresh.',
+          'Every price you see (in inventory, sell, collection, scavenge results) reflects the live market — buy low, sell high.'
+        ].join('\n'),
+        inline: false
+      },
+      {
+        name: 'Artefact Sets & Collector\'s Premium',
+        value: [
+          'There are **8 curated sets** spanning multiple rarities (e.g. The Volcanic Set, The Royal Regalia Set, The Stellar Set).',
+          'Selling a **complete set** in a single `/mass-sell` transaction grants a **+20% Collector\'s Premium** on those items\' value.',
+          'Check your progress on the new **Sets** page (page 6) of `/collection`. Trade aggressively for that one missing piece — it\'s often worth overpaying.'
+        ].join('\n'),
+        inline: false
+      },
+      {
         name: 'Events',
         value: [
-          '`/mining-status` — Check the current Mining Crisis event',
-          'During a Mining Crisis one artefact becomes unscavengeable while another doubles in find rate.'
+          '**Weekly Market Events:** Once a week a random rarity is hit by either a **Market Crash** (-10%) or a **Speculative Bubble** (+15%). Announced in your server\'s announcement channel if one is set.',
+          '**Mining Crises:** Periodic 24-hour events where one artefact becomes unscavengeable while another doubles in find rate.',
+          'Use `/mining-status` to check the current Mining Crisis.'
         ].join('\n'),
         inline: false
       },
@@ -2328,6 +2910,7 @@ async function handleInfoCommand(interaction) {
         name: 'Server Admins',
         value: [
           '`/setprefix` — Set the text-command prefix for this server',
+          '`/setannouncements [channel]` — Choose where weekly market events get posted (omit to disable)',
           '`/add-item`, `/remove-item`, `/view-items` — Manage server-specific store items',
           '`/give-roles`, `/timeout`, `/kick`, `/ban` — Moderation tools'
         ].join('\n'),
@@ -2338,12 +2921,12 @@ async function handleInfoCommand(interaction) {
         value: [
           '**Common** (65%) · **Uncommon** (20%) · **Rare** (10%) · **Legendary** (4%) · **Unknown** (1%)',
           'Each artefact has a tier (T1–T5) that scales its sell value: T1=65%  T2=75%  T3=100%  T4=125%  T5=135%.',
-          'Shiny variants (✨) sell for 20× the base tier value.'
+          'Shiny variants (✨) sell for 20× the base tier value — and they count toward set completion.'
         ].join('\n'),
         inline: false
       }
     )
-    .setFooter({ text: 'Tip: Start with /scavenge to find your first artefact!' })
+    .setFooter({ text: 'Tip: Start with /scavenge to find your first artefact, then /market to see what\'s hot!' })
     .setTimestamp();
 
   await interaction.reply({ embeds: [infoEmbed] });
@@ -3503,6 +4086,7 @@ async function handleMassSellCommand(interaction, userId) {
     } else if (i.customId === `ms_confirm_${sessionId}`) {
       let totalEarned = 0;
       const summaryLines = [];
+      const soldItemsForPremium = []; // { name, sellValue } per individual unit
 
       for (const entry of session.queue) {
         let remaining = entry.amount;
@@ -3513,10 +4097,16 @@ async function handleMassSellCommand(interaction, userId) {
         const { finalValue } = getMassSellValue(entry.name);
         totalEarned += finalValue * entry.amount;
         const { rarity } = getMassSellValue(entry.name);
-        summaryLines.push(`${entry.name} x${entry.amount} (${rarity ? rarity.name : 'Unknown'}) — $${(finalValue * entry.amount).toLocaleString()}`);
+        summaryLines.push(`${entry.name} x${entry.amount} (${rarity ? rarity.name : 'Unknown'}) — ${(finalValue * entry.amount).toLocaleString()}`);
+        for (let k = 0; k < entry.amount; k++) {
+          soldItemsForPremium.push({ name: entry.name, sellValue: finalValue });
+        }
       }
 
-      user.cash += totalEarned;
+      const premium = computeCollectorsPremium(soldItemsForPremium);
+      const grandTotal = totalEarned + premium.totalBonus;
+
+      user.cash += grandTotal;
       await saveUser(userId);
       collector.stop('sold');
       delete global.massSellSessions[sessionId];
@@ -3524,18 +4114,35 @@ async function handleMassSellCommand(interaction, userId) {
       const soldDisplay = summaryLines.slice(0, 20).join('\n')
         + (summaryLines.length > 20 ? `\n... and ${summaryLines.length - 20} more` : '');
 
+      const completeEmbed = new EmbedBuilder()
+        .setTitle('Sale Complete')
+        .setDescription(
+          premium.totalBonus > 0
+            ? `Successfully sold artefacts for **${totalEarned.toLocaleString()}** plus a **${premium.totalBonus.toLocaleString()} Collector's Premium**!`
+            : `Successfully sold artefacts for **${totalEarned.toLocaleString()}**!`
+        )
+        .addFields(
+          { name: 'Items Sold', value: soldDisplay, inline: false }
+        );
+
+      if (premium.breakdown.length > 0) {
+        const premiumLines = premium.breakdown.map(b =>
+          `✨ **${b.setName}** × ${b.copies} — +${b.bonus.toLocaleString()}`
+        ).join('\n');
+        completeEmbed.addFields({
+          name: `Collector's Premium (+${Math.round(COLLECTORS_PREMIUM * 100)}%)`,
+          value: premiumLines,
+          inline: false
+        });
+      }
+
+      completeEmbed.addFields(
+        { name: 'Total Earned', value: `${grandTotal.toLocaleString()}`, inline: true },
+        { name: 'New Cash Balance', value: `${user.cash.toLocaleString()}`, inline: true }
+      ).setColor(0x51CF66).setTimestamp();
+
       await i.update({
-        embeds: [new EmbedBuilder()
-          .setTitle('Sale Complete')
-          .setDescription(`Successfully sold artefacts for **$${totalEarned.toLocaleString()}**!`)
-          .addFields(
-            { name: 'Items Sold', value: soldDisplay, inline: false },
-            { name: 'Total Earned', value: `$${totalEarned.toLocaleString()}`, inline: true },
-            { name: 'New Cash Balance', value: `$${user.cash.toLocaleString()}`, inline: true }
-          )
-          .setColor(0x51CF66)
-          .setTimestamp()
-        ],
+        embeds: [completeEmbed],
         components: []
       });
 
@@ -6576,7 +7183,40 @@ function buildProgressBar(current, total) {
   return `[${'█'.repeat(filled)}${'░'.repeat(empty)}]`;
 }
 
+function buildSetsPage(user) {
+  const progress = computeSetProgress(user.artefacts || []);
+
+  const fields = progress.map(p => {
+    const lines = p.set.items.map(item => {
+      const owned = p.itemCounts[item] || 0;
+      const icon = owned > 0 ? '✅' : '❌';
+      const countStr = owned > 1 ? `  *(×${owned})*` : '';
+      return `${icon}  **${item}**${countStr}`;
+    });
+    const status = p.completeCopies > 0
+      ? `**${p.completeCopies} complete copy${p.completeCopies === 1 ? '' : 'ies'}** ready to sell`
+      : `${p.ownedDistinct} / ${p.total} pieces collected`;
+    return {
+      name: `${p.set.name}  ·  ${status}`,
+      value: `*${p.set.description}*\n${lines.join('\n')}`,
+      inline: false
+    };
+  });
+
+  return new EmbedBuilder()
+    .setTitle('Field Guide — Artefact Sets')
+    .setDescription(
+      `Selling a **complete set** in a single transaction grants a **${Math.round(COLLECTORS_PREMIUM * 100)}% Collector's Premium** on those items' value.\n` +
+      `Mix and match across rarities — that one missing piece is worth trading for.`
+    )
+    .setColor(0xF1C40F)
+    .addFields(fields)
+    .setFooter({ text: `Sets page  ·  ${progress.length} sets total` })
+    .setTimestamp();
+}
+
 function buildCollectionPage(user, pageIndex) {
+  if (pageIndex === rarities.length) return buildSetsPage(user);
   const rarity = rarities[pageIndex];
   const items = rarity.items;
 
@@ -6659,7 +7299,7 @@ function buildCollectionButtons(userId, pageIndex) {
       .setCustomId(`collection_next_${userId}_${pageIndex}`)
       .setLabel('Next  ▶')
       .setStyle(ButtonStyle.Secondary)
-      .setDisabled(pageIndex === rarities.length - 1)
+      .setDisabled(pageIndex === rarities.length)
   );
   return [row];
 }
