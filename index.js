@@ -1058,9 +1058,8 @@ async function broadcastEventStart(event) {
       .setFooter({ text: 'Fortune Bot Mining Authority • Emergency Broadcast System' })
       .setTimestamp();
 
-    // Send to all channels where the bot is active (this is a simplified approach)
-    // In a real implementation, you'd want to store channel IDs to broadcast to
-    console.log('MINING EVENT STARTED:', event);
+    const sent = await broadcastToAnnouncementChannels(eventEmbed);
+    console.log(`MINING EVENT STARTED: ${event.negativeArtefact} -> ${event.positiveArtefact} (broadcast to ${sent} channel(s))`);
 
   } catch (error) {
     console.error('Error broadcasting event start:', error);
@@ -1098,7 +1097,8 @@ async function broadcastEventEnd(event) {
       .setFooter({ text: 'Fortune Bot Mining Authority • All Clear Signal' })
       .setTimestamp();
 
-    console.log('MINING EVENT ENDED:', event);
+    const sent = await broadcastToAnnouncementChannels(eventEmbed);
+    console.log(`MINING EVENT ENDED: ${event.negativeArtefact} restored (broadcast to ${sent} channel(s))`);
 
   } catch (error) {
     console.error('Error broadcasting event end:', error);
