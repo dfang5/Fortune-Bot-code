@@ -1744,6 +1744,25 @@ client.on('interactionCreate', async interaction => {
       return;
     }
 
+    if (customId.startsWith('trade_picker_search_modal_')) {
+      const tradeId = customId.replace('trade_picker_search_modal_', '');
+      const trade = global.activeTrades[tradeId];
+      if (!trade) {
+        return await interaction.reply({ content: 'Trade session not found.', ephemeral: true });
+      }
+      const userId = interaction.user.id;
+      const picker = trade.pickers && trade.pickers[userId];
+      if (!picker) {
+        return await interaction.reply({ content: 'Picker session expired — close this and click Add/Remove Artefact again.', ephemeral: true });
+      }
+      const rawQuery = (interaction.fields.getTextInputValue('trade_picker_search_input') || '').trim();
+      picker.query = rawQuery;
+      picker.page = 0;
+      await interaction.deferUpdate();
+      await refreshTradePicker(trade, userId);
+      return;
+    }
+
     if (customId.startsWith('ga_amount_modal_')) {
       const sessionId = customId.replace('ga_amount_modal_', '');
       const session = global.giveArtefactSessions[sessionId];
@@ -4460,7 +4479,9 @@ async function handleComponentInteraction(interaction) {
     const recipientId = interaction.user.id;
 
     // Create trade session
-    const tradeId = `${initiatorId}_${recipientId}`;
+    // NOTE: tradeId MUST NOT contain underscores — many handlers
+    // parse customIds with split('_'). Use '-' between the IDs.
+    const tradeId = `${initiatorId}-${recipientId}`;
     global.activeTrades[tradeId] = {
       initiator: initiatorId,
       recipient: recipientId,
@@ -4468,6 +4489,8 @@ async function handleComponentInteraction(interaction) {
       recipientOffer: { cash: 0, artefacts: [] },
       initiatorReady: false,
       recipientReady: false,
+      pickers: {},      // { [userId]: { message, mode, query, page } }
+      message: null,    // public trade UI message — set in startInteractiveTrade
       status: 'active'
     };
 
@@ -4711,63 +4734,128 @@ async function handleComponentInteraction(interaction) {
     await interaction.update({ embeds: [tradeEmbed], components });
 
   } else if (customId.startsWith('trade_artefact_select_')) {
-    const tradeId = customId.split('_')[3];
+    const tradeId = customId.replace('trade_artefact_select_', '');
     const trade = global.activeTrades[tradeId];
     if (!trade) {
-      return await interaction.reply({ content: '❌ Trade session not found!', ephemeral: true });
+      return await interaction.reply({ content: 'Trade session not found.', ephemeral: true });
     }
 
     const userId = interaction.user.id;
-    const artefactIndex = parseInt(interaction.values[0]);
-    const artefact = userData[userId].artefacts[artefactIndex];
-
-    if (!artefact) {
-      return await interaction.reply({ content: '❌ Artefact not found in your inventory!', ephemeral: true });
+    if (userId !== trade.initiator && userId !== trade.recipient) {
+      return await interaction.reply({ content: 'You are not part of this trade.', ephemeral: true });
     }
 
+    const artefact = interaction.values[0];
     const isInitiator = trade.initiator === userId;
-    if (isInitiator) {
-      if (!trade.initiatorOffer.artefacts.includes(artefact)) {
-        trade.initiatorOffer.artefacts.push(artefact);
-      }
-      trade.initiatorReady = false;
-    } else {
-      if (!trade.recipientOffer.artefacts.includes(artefact)) {
-        trade.recipientOffer.artefacts.push(artefact);
-      }
-      trade.recipientReady = false;
+    const offer = isInitiator ? trade.initiatorOffer : trade.recipientOffer;
+    const userArtefacts = (userData[userId] && userData[userId].artefacts) || [];
+
+    // Validate count: how many do they own vs how many already in offer?
+    const owned = userArtefacts.filter(a => a === artefact).length;
+    const alreadyOffered = offer.artefacts.filter(a => a === artefact).length;
+    if (alreadyOffered >= owned) {
+      // Defer + refresh picker so the now-exhausted item disappears from the dropdown
+      await interaction.deferUpdate();
+      await refreshTradePicker(trade, userId);
+      return;
     }
 
-    const tradeEmbed = createTradeEmbed(trade, trade.initiator, trade.recipient);
-    const components = createTradeComponents(tradeId, userId);
+    offer.artefacts.push(artefact);
+    if (isInitiator) trade.initiatorReady = false;
+    else trade.recipientReady = false;
 
-    await interaction.update({ embeds: [tradeEmbed], components });
+    await interaction.deferUpdate();
+    await refreshTradeMessage(trade);
+    await refreshTradePicker(trade, userId);
 
   } else if (customId.startsWith('trade_remove_artefact_select_')) {
-    const tradeId = customId.split('_')[4];
+    const tradeId = customId.replace('trade_remove_artefact_select_', '');
     const trade = global.activeTrades[tradeId];
-    if (!trade) return;
-
-    const userId = interaction.user.id;
-    const artefactIndex = parseInt(interaction.values[0]);
-    const isInitiator = trade.initiator === userId;
-
-    if (isInitiator) {
-      trade.initiatorOffer.artefacts.splice(artefactIndex, 1);
-      trade.initiatorReady = false;
-    } else {
-      trade.recipientOffer.artefacts.splice(artefactIndex, 1);
-      trade.recipientReady = false;
+    if (!trade) {
+      return await interaction.reply({ content: 'Trade session not found.', ephemeral: true });
     }
 
-    const tradeEmbed = createTradeEmbed(trade, trade.initiator, trade.recipient);
-    const components = createTradeComponents(tradeId, userId);
+    const userId = interaction.user.id;
+    if (userId !== trade.initiator && userId !== trade.recipient) {
+      return await interaction.reply({ content: 'You are not part of this trade.', ephemeral: true });
+    }
 
-    await interaction.update({ 
-      content: 'Artefact removed from your offer!', 
-      embeds: [tradeEmbed], 
-      components 
-    });
+    const artefact = interaction.values[0];
+    const isInitiator = trade.initiator === userId;
+    const offer = isInitiator ? trade.initiatorOffer : trade.recipientOffer;
+
+    const idx = offer.artefacts.indexOf(artefact);
+    if (idx === -1) {
+      await interaction.deferUpdate();
+      await refreshTradePicker(trade, userId);
+      return;
+    }
+    offer.artefacts.splice(idx, 1);
+    if (isInitiator) trade.initiatorReady = false;
+    else trade.recipientReady = false;
+
+    await interaction.deferUpdate();
+    await refreshTradeMessage(trade);
+    await refreshTradePicker(trade, userId);
+
+  } else if (customId.startsWith('trade_picker_search_')) {
+    const tradeId = customId.replace('trade_picker_search_', '');
+    const trade = global.activeTrades[tradeId];
+    if (!trade) {
+      return await interaction.reply({ content: 'Trade session not found.', ephemeral: true });
+    }
+    const userId = interaction.user.id;
+    const picker = trade.pickers && trade.pickers[userId];
+    if (!picker) {
+      return await interaction.reply({ content: 'Picker session expired — close this and click Add/Remove Artefact again.', ephemeral: true });
+    }
+    const modal = new ModalBuilder()
+      .setCustomId(`trade_picker_search_modal_${tradeId}`)
+      .setTitle('Search Artefacts')
+      .addComponents(
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId('trade_picker_search_input')
+            .setLabel('Type a name (or part of a name)')
+            .setStyle(TextInputStyle.Short)
+            .setPlaceholder('e.g. quartz, obsidian, crown')
+            .setRequired(false)
+            .setMaxLength(80)
+            .setValue(picker.query || '')
+        )
+      );
+    await interaction.showModal(modal);
+
+  } else if (customId.startsWith('trade_picker_clear_')) {
+    const tradeId = customId.replace('trade_picker_clear_', '');
+    const trade = global.activeTrades[tradeId];
+    const userId = interaction.user.id;
+    const picker = trade && trade.pickers && trade.pickers[userId];
+    if (!picker) return await interaction.deferUpdate();
+    picker.query = '';
+    picker.page = 0;
+    await interaction.deferUpdate();
+    await refreshTradePicker(trade, userId);
+
+  } else if (customId.startsWith('trade_picker_prev_')) {
+    const tradeId = customId.replace('trade_picker_prev_', '');
+    const trade = global.activeTrades[tradeId];
+    const userId = interaction.user.id;
+    const picker = trade && trade.pickers && trade.pickers[userId];
+    if (!picker) return await interaction.deferUpdate();
+    picker.page = Math.max(0, (picker.page || 0) - 1);
+    await interaction.deferUpdate();
+    await refreshTradePicker(trade, userId);
+
+  } else if (customId.startsWith('trade_picker_next_')) {
+    const tradeId = customId.replace('trade_picker_next_', '');
+    const trade = global.activeTrades[tradeId];
+    const userId = interaction.user.id;
+    const picker = trade && trade.pickers && trade.pickers[userId];
+    if (!picker) return await interaction.deferUpdate();
+    picker.page = (picker.page || 0) + 1;
+    await interaction.deferUpdate();
+    await refreshTradePicker(trade, userId);
 
   } else if (customId.startsWith('convert_accept_')) {
     const userId = customId.replace('convert_accept_', '');
@@ -4872,6 +4960,157 @@ async function startInteractiveTrade(interaction, initiatorId, recipientId, trad
   const components = createTradeComponents(tradeId, interaction.user.id);
 
   await interaction.update({ embeds: [tradeEmbed], components });
+  // Store reference to public message so ephemeral pickers can refresh it
+  trade.message = interaction.message;
+}
+
+// Helper: refresh the public trade message after an offer changes
+async function refreshTradeMessage(trade) {
+  if (!trade.message) return;
+  try {
+    await trade.message.edit({
+      embeds: [createTradeEmbed(trade, trade.initiator, trade.recipient)],
+      components: createTradeComponents(`${trade.initiator}-${trade.recipient}`, trade.initiator)
+    });
+  } catch (e) {
+    console.error('Failed to refresh trade message:', e.message);
+  }
+}
+
+// Helper: case-insensitive match for trade artefact picker (mirrors mass-sell)
+function tradeMatchesQuery(name, query) {
+  if (!query) return true;
+  const clean = (name.startsWith('✨ SHINY ') && name.endsWith(' ✨'))
+    ? name.replace('✨ SHINY ', '').replace(' ✨', '')
+    : name;
+  const q = query.toLowerCase();
+  return clean.toLowerCase().includes(q) || name.toLowerCase().includes(q);
+}
+
+// Helper: build the ephemeral artefact picker (used for both add and remove)
+function buildTradePickerComponents(tradeId, picker, entries, valueKey) {
+  const PAGE_SIZE = 25;
+  const query = (picker.query || '').trim();
+  const filtered = query ? entries.filter(([name]) => tradeMatchesQuery(name, query)) : entries;
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  if (typeof picker.page !== 'number' || picker.page < 0) picker.page = 0;
+  if (picker.page >= totalPages) picker.page = totalPages - 1;
+  const pageStart = picker.page * PAGE_SIZE;
+  const pageEntries = filtered.slice(pageStart, pageStart + PAGE_SIZE);
+  const rows = [];
+
+  if (pageEntries.length > 0) {
+    const options = pageEntries.map(([name, count]) => {
+      const rarity = getRarityByArtefact(name);
+      const tier = getArtefactTier(name);
+      const val = calcArtefactSellValue(name, rarity);
+      return {
+        label: name.length > 100 ? name.slice(0, 97) + '...' : name,
+        description: `${rarity ? rarity.name : 'Unknown'} T${tier} — ~${val.toLocaleString()} (${count} ${picker.mode === 'add' ? 'available' : 'in offer'})`,
+        value: valueKey === 'name' ? name : String(pageStart + pageEntries.indexOf([name, count]))
+      };
+    });
+    const selectId = picker.mode === 'add'
+      ? `trade_artefact_select_${tradeId}`
+      : `trade_remove_artefact_select_${tradeId}`;
+    const placeholder = totalPages > 1
+      ? `${picker.mode === 'add' ? 'Choose an artefact' : 'Choose to remove'} (page ${picker.page + 1} of ${totalPages})`
+      : (picker.mode === 'add' ? 'Choose an artefact to add' : 'Choose an artefact to remove');
+    rows.push(new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder()
+        .setCustomId(selectId)
+        .setPlaceholder(placeholder)
+        .addOptions(options)
+    ));
+  }
+
+  // Search & pagination row — only when useful
+  const showSearchRow = entries.length > 0 && (entries.length > PAGE_SIZE || query.length > 0);
+  if (showSearchRow) {
+    const searchLabel = query
+      ? `🔍 Search: "${query.length > 18 ? query.slice(0, 15) + '...' : query}"`
+      : '🔍 Search';
+    rows.push(new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`trade_picker_search_${tradeId}`)
+        .setLabel(searchLabel)
+        .setStyle(query ? ButtonStyle.Success : ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId(`trade_picker_clear_${tradeId}`)
+        .setLabel('Clear Search')
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(!query),
+      new ButtonBuilder()
+        .setCustomId(`trade_picker_prev_${tradeId}`)
+        .setLabel('◀ Prev')
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(totalPages <= 1 || picker.page === 0),
+      new ButtonBuilder()
+        .setCustomId(`trade_picker_next_${tradeId}`)
+        .setLabel('Next ▶')
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(totalPages <= 1 || picker.page >= totalPages - 1)
+    ));
+  }
+
+  return { rows, totalPages, filteredCount: filtered.length };
+}
+
+// Helper: build the ephemeral picker embed
+function buildTradePickerEmbed(picker, filteredCount, totalEntries) {
+  const query = (picker.query || '').trim();
+  const title = picker.mode === 'add' ? 'Add Artefact to Trade' : 'Remove Artefact from Offer';
+  const desc = picker.mode === 'add'
+    ? 'Pick an artefact from your inventory to add to your trade offer. You can stack multiples — pick the same name again to add another copy.'
+    : 'Pick an artefact currently in your trade offer to remove it.';
+  const fields = [];
+  if (query) {
+    fields.push({
+      name: '🔍 Search Filter',
+      value: `\`${query}\` — **${filteredCount}** match${filteredCount !== 1 ? 'es' : ''} (of ${totalEntries} total)`,
+      inline: false
+    });
+  }
+  return new EmbedBuilder()
+    .setTitle(title)
+    .setDescription(desc)
+    .addFields(...fields)
+    .setColor(0x5865F2)
+    .setFooter({ text: 'This menu only you can see. Pick as many times as you want.' });
+}
+
+// Helper: refresh an ephemeral picker message after offer change
+async function refreshTradePicker(trade, userId) {
+  const picker = trade.pickers && trade.pickers[userId];
+  if (!picker || !picker.message) return;
+
+  let entries;
+  if (picker.mode === 'add') {
+    const userArtefacts = userData[userId] && userData[userId].artefacts ? userData[userId].artefacts : [];
+    const offer = trade.initiator === userId ? trade.initiatorOffer : trade.recipientOffer;
+    const ownedCounts = {};
+    userArtefacts.forEach(n => { ownedCounts[n] = (ownedCounts[n] || 0) + 1; });
+    offer.artefacts.forEach(n => { if (ownedCounts[n]) ownedCounts[n] -= 1; });
+    entries = Object.entries(ownedCounts).filter(([, c]) => c > 0);
+  } else {
+    const offer = trade.initiator === userId ? trade.initiatorOffer : trade.recipientOffer;
+    const offerCounts = {};
+    offer.artefacts.forEach(n => { offerCounts[n] = (offerCounts[n] || 0) + 1; });
+    entries = Object.entries(offerCounts);
+  }
+
+  const tradeId = `${trade.initiator}-${trade.recipient}`;
+  const valueKey = picker.mode === 'add' ? 'name' : 'name'; // both use names now
+  const { rows, filteredCount } = buildTradePickerComponents(tradeId, picker, entries, valueKey);
+
+  try {
+    await picker.message.edit({
+      embeds: [buildTradePickerEmbed(picker, filteredCount, entries.length)],
+      components: rows
+    });
+  } catch (e) {
+    // Picker message may have been dismissed by the user — ignore
+  }
 }
 
 function calcOfferValue(offer) {
@@ -5020,36 +5259,47 @@ async function handleTradeAddCash(interaction, customId) {
 }
 
 async function handleTradeAddArtefact(interaction, customId) {
-  const tradeId = customId.split('_')[3];
+  const tradeId = customId.replace('trade_add_artefact_', '');
   const trade = global.activeTrades[tradeId];
-  if (!trade) return;
+  if (!trade) {
+    return await interaction.reply({ content: 'Trade session not found.', ephemeral: true });
+  }
 
   const userId = interaction.user.id;
-  const userArtefacts = userData[userId].artefacts || [];
+  if (userId !== trade.initiator && userId !== trade.recipient) {
+    return await interaction.reply({ content: 'You are not part of this trade.', ephemeral: true });
+  }
 
+  const userArtefacts = (userData[userId] && userData[userId].artefacts) || [];
   if (userArtefacts.length === 0) {
     return await interaction.reply({ content: 'You have no artefacts to trade!', ephemeral: true });
   }
 
-  const options = userArtefacts.slice(0, 25).map((artefact, index) => {
-    const rarity = getRarityByArtefact(artefact);
-    const tier = getArtefactTier(artefact);
-    const sellVal = calcArtefactSellValue(artefact, rarity);
-    return {
-      label: artefact,
-      description: `${rarity ? rarity.name : 'Unknown'} T${tier} — $${sellVal.toLocaleString()} sell value`,
-      value: index.toString()
-    };
+  // Available = owned minus already in offer
+  const offer = trade.initiator === userId ? trade.initiatorOffer : trade.recipientOffer;
+  const ownedCounts = {};
+  userArtefacts.forEach(n => { ownedCounts[n] = (ownedCounts[n] || 0) + 1; });
+  offer.artefacts.forEach(n => { if (ownedCounts[n]) ownedCounts[n] -= 1; });
+  const entries = Object.entries(ownedCounts).filter(([, c]) => c > 0);
+
+  if (entries.length === 0) {
+    return await interaction.reply({ content: 'All your artefacts are already in this offer!', ephemeral: true });
+  }
+
+  // Build / reuse picker state for this user
+  if (!trade.pickers) trade.pickers = {};
+  const picker = { mode: 'add', query: '', page: 0, message: null };
+  trade.pickers[userId] = picker;
+
+  const { rows, filteredCount } = buildTradePickerComponents(tradeId, picker, entries, 'name');
+
+  const reply = await interaction.reply({
+    embeds: [buildTradePickerEmbed(picker, filteredCount, entries.length)],
+    components: rows,
+    ephemeral: true,
+    fetchReply: true
   });
-
-  const selectMenu = new StringSelectMenuBuilder()
-    .setCustomId(`trade_artefact_select_${tradeId}`)
-    .setPlaceholder('Choose an artefact to add')
-    .addOptions(options);
-
-  const row = new ActionRowBuilder().addComponents(selectMenu);
-
-  await interaction.reply({ content: 'Select an artefact to add to your trade offer:', components: [row], ephemeral: true });
+  picker.message = reply;
 }
 
 async function handleTradeRemoveCash(interaction, customId) {
@@ -5075,44 +5325,39 @@ async function handleTradeRemoveCash(interaction, customId) {
 }
 
 async function handleTradeRemoveArtefact(interaction, customId) {
-  const tradeId = customId.split('_')[3];
+  const tradeId = customId.replace('trade_remove_artefact_', '');
   const trade = global.activeTrades[tradeId];
-  if (!trade) return;
-
-  const userId = interaction.user.id;
-  const isInitiator = trade.initiator === userId;
-
-  const userOffer = isInitiator ? trade.initiatorOffer : trade.recipientOffer;
-
-  if (userOffer.artefacts.length === 0) {
-    return await interaction.reply({ 
-      content: 'You have no artefacts in your offer to remove!', 
-      ephemeral: true 
-    });
+  if (!trade) {
+    return await interaction.reply({ content: 'Trade session not found.', ephemeral: true });
   }
 
-  // Create select menu to choose which artefact to remove
-  const options = userOffer.artefacts.slice(0, 25).map((artefact, index) => {
-    const rarity = getRarityByArtefact(artefact);
-    return {
-      label: artefact,
-      description: `${rarity ? rarity.name : 'Unknown'} - Remove from offer`,
-      value: index.toString()
-    };
+  const userId = interaction.user.id;
+  if (userId !== trade.initiator && userId !== trade.recipient) {
+    return await interaction.reply({ content: 'You are not part of this trade.', ephemeral: true });
+  }
+
+  const userOffer = trade.initiator === userId ? trade.initiatorOffer : trade.recipientOffer;
+  if (userOffer.artefacts.length === 0) {
+    return await interaction.reply({ content: 'You have no artefacts in your offer to remove!', ephemeral: true });
+  }
+
+  const offerCounts = {};
+  userOffer.artefacts.forEach(n => { offerCounts[n] = (offerCounts[n] || 0) + 1; });
+  const entries = Object.entries(offerCounts);
+
+  if (!trade.pickers) trade.pickers = {};
+  const picker = { mode: 'remove', query: '', page: 0, message: null };
+  trade.pickers[userId] = picker;
+
+  const { rows, filteredCount } = buildTradePickerComponents(tradeId, picker, entries, 'name');
+
+  const reply = await interaction.reply({
+    embeds: [buildTradePickerEmbed(picker, filteredCount, entries.length)],
+    components: rows,
+    ephemeral: true,
+    fetchReply: true
   });
-
-  const selectMenu = new StringSelectMenuBuilder()
-    .setCustomId(`trade_remove_artefact_select_${tradeId}`)
-    .setPlaceholder('Choose an artefact to remove')
-    .addOptions(options);
-
-  const row = new ActionRowBuilder().addComponents(selectMenu);
-
-  await interaction.reply({ 
-    content: 'Select an artefact to remove from your trade offer:', 
-    components: [row], 
-    ephemeral: true 
-  });
+  picker.message = reply;
 }
 
 async function handleTradeReady(interaction, customId) {
@@ -5134,12 +5379,17 @@ async function handleTradeReady(interaction, customId) {
     });
   }
 
-  // Check artefact availability
-  for (const artefact of userOffer.artefacts) {
-    if (!userData[userId].artefacts.includes(artefact)) {
-      return await interaction.reply({ 
-        content: `❌ You no longer have "${artefact}" in your inventory!`, 
-        ephemeral: true 
+  // Check artefact availability — count-based so stacked offers validate correctly
+  const _offerCounts = {};
+  userOffer.artefacts.forEach(a => { _offerCounts[a] = (_offerCounts[a] || 0) + 1; });
+  const _invCounts = {};
+  (userData[userId].artefacts || []).forEach(a => { _invCounts[a] = (_invCounts[a] || 0) + 1; });
+  for (const [name, want] of Object.entries(_offerCounts)) {
+    const have = _invCounts[name] || 0;
+    if (have < want) {
+      return await interaction.reply({
+        content: `You're offering ${want}× **${name}** but only have ${have} in your inventory.`,
+        ephemeral: true
       });
     }
   }
@@ -5172,17 +5422,20 @@ async function executeTrade(interaction, trade, tradeId) {
       throw new Error(`Recipient doesn't have enough cash`);
     }
 
-    // Validate artefacts exist
-    for (const artefact of trade.initiatorOffer.artefacts) {
-      if (!initiator.artefacts.includes(artefact)) {
-        throw new Error(`Initiator doesn't have "${artefact}"`);
+    // Validate artefacts exist — count-based so stacked offers validate correctly
+    const _validateCounts = (offer, inventory, who) => {
+      const need = {};
+      offer.artefacts.forEach(a => { need[a] = (need[a] || 0) + 1; });
+      const have = {};
+      inventory.forEach(a => { have[a] = (have[a] || 0) + 1; });
+      for (const [name, want] of Object.entries(need)) {
+        if ((have[name] || 0) < want) {
+          throw new Error(`${who} only has ${have[name] || 0}× ${name} but offered ${want}`);
+        }
       }
-    }
-    for (const artefact of trade.recipientOffer.artefacts) {
-      if (!recipient.artefacts.includes(artefact)) {
-        throw new Error(`Recipient doesn't have "${artefact}"`);
-      }
-    }
+    };
+    _validateCounts(trade.initiatorOffer, initiator.artefacts || [], 'Initiator');
+    _validateCounts(trade.recipientOffer, recipient.artefacts || [], 'Recipient');
 
     // Execute the trade
     // Transfer cash
@@ -5208,7 +5461,8 @@ async function executeTrade(interaction, trade, tradeId) {
       }
     });
 
-    await saveUserData();
+    await saveUser(trade.initiator);
+    await saveUser(trade.recipient);
     delete global.activeTrades[tradeId];
 
     const successEmbed = new EmbedBuilder()
@@ -5242,16 +5496,31 @@ async function executeTrade(interaction, trade, tradeId) {
 }
 
 async function handleTradeCancel(interaction, customId) {
-  const tradeId = customId.split('_')[2];
+  const tradeId = customId.replace('trade_cancel_', '');
+  const trade = global.activeTrades[tradeId];
   delete global.activeTrades[tradeId];
 
   const cancelEmbed = new EmbedBuilder()
     .setTitle('Trade Cancelled')
-    .setDescription('The trade has been cancelled by one of the participants.')
+    .setDescription(`Cancelled by <@${interaction.user.id}>. No items were exchanged.`)
     .setColor(0xFF9F43)
     .setTimestamp();
 
   await interaction.update({ embeds: [cancelEmbed], components: [] });
+
+  // Best-effort: clean up any open ephemeral pickers
+  if (trade && trade.pickers) {
+    for (const userId of Object.keys(trade.pickers)) {
+      const picker = trade.pickers[userId];
+      if (!picker || !picker.message) continue;
+      try {
+        await picker.message.edit({
+          embeds: [new EmbedBuilder().setTitle('Trade Cancelled').setDescription('This trade was cancelled.').setColor(0xFF9F43)],
+          components: []
+        });
+      } catch (e) {}
+    }
+  }
 }
 
 // === MARBLE GAME FUNCTIONS ===
