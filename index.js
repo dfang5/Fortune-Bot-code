@@ -3577,14 +3577,16 @@ async function handleTradeCommand(interaction, userId) {
   // Initialize target user data if needed
   if (!userData[targetUser.id]) userData[targetUser.id] = { cash: 0, artefacts: [], bankBalance: 0 };
 
-  // Create trade request for recipient to accept/decline
+  // Create trade request for recipient to accept/decline.
+  // We encode BOTH ids in the customId so the handler can verify the clicker
+  // is actually the intended recipient (otherwise any bystander could accept).
   const acceptButton = new ButtonBuilder()
-    .setCustomId(`trade_accept_${userId}`)
+    .setCustomId(`trade_accept_${userId}_${targetUser.id}`)
     .setLabel('Accept Trade')
     .setStyle(ButtonStyle.Success);
 
   const declineButton = new ButtonBuilder()
-    .setCustomId(`trade_decline_${userId}`)
+    .setCustomId(`trade_decline_${userId}_${targetUser.id}`)
     .setLabel('Decline Trade')
     .setStyle(ButtonStyle.Danger);
 
@@ -3603,16 +3605,28 @@ async function handleTradeCommand(interaction, userId) {
     .setFooter({ text: 'This request will expire after 2 minutes' })
     .setTimestamp();
 
-  await interaction.reply({ 
-    content: `<@${targetUser.id}>`, 
-    embeds: [tradeRequestEmbed], 
-    components: [row] 
+  const requestMsg = await interaction.reply({
+    content: `<@${targetUser.id}>`,
+    embeds: [tradeRequestEmbed],
+    components: [row],
+    fetchReply: true
   });
 
-  // Set timeout for trade request
-  setTimeout(() => {
-    if (global.activeTrades[`${userId}_${targetUser.id}`]) {
-      delete global.activeTrades[`${userId}_${targetUser.id}`];
+  // Set timeout for trade request — disable the buttons if the recipient never
+  // responds. The previous version checked the wrong key (underscore separator
+  // vs the dash actually used by tradeId) so it was effectively dead code.
+  setTimeout(async () => {
+    const tradeId = `${userId}-${targetUser.id}`;
+    // Only disable if the recipient never accepted (no active session yet)
+    if (global.activeTrades[tradeId]) return;
+    try {
+      const expiredEmbed = EmbedBuilder.from(tradeRequestEmbed)
+        .setColor(0x95A5A6)
+        .spliceFields(2, 1, { name: 'Status', value: 'Expired (no response).', inline: false })
+        .spliceFields(3, 1, { name: 'Action Required', value: 'Run `/trade` again to start a new request.', inline: false });
+      await requestMsg.edit({ embeds: [expiredEmbed], components: [] });
+    } catch (e) {
+      // Message may have been deleted or already updated — safe to ignore
     }
   }, 120000); // 2 minutes
 }
@@ -4474,9 +4488,26 @@ async function handleComponentInteraction(interaction) {
   try {
 
   // Handle trade accept/decline
+  // customId format: `trade_accept_${initiatorId}_${recipientId}` so we can
+  // verify the clicker is actually the intended recipient.
   if (customId.startsWith('trade_accept_')) {
-    const initiatorId = customId.split('_')[2];
-    const recipientId = interaction.user.id;
+    const parts = customId.split('_');
+    const initiatorId = parts[2];
+    const intendedRecipientId = parts[3];
+
+    if (interaction.user.id !== intendedRecipientId) {
+      return await interaction.reply({
+        content: `❌ Only <@${intendedRecipientId}> can respond to this trade request.`,
+        ephemeral: true
+      });
+    }
+
+    const recipientId = intendedRecipientId;
+
+    // Make sure the recipient has a userData record before they enter the trade —
+    // downstream handlers read userData[userId].cash without guarding.
+    if (!userData[recipientId]) userData[recipientId] = { cash: 0, artefacts: [], bankBalance: 0 };
+    if (!userData[initiatorId]) userData[initiatorId] = { cash: 0, artefacts: [], bankBalance: 0 };
 
     // Create trade session
     // NOTE: tradeId MUST NOT contain underscores — many handlers
@@ -4497,11 +4528,20 @@ async function handleComponentInteraction(interaction) {
     await startInteractiveTrade(interaction, initiatorId, recipientId, tradeId);
 
   } else if (customId.startsWith('trade_decline_')) {
-    const initiatorId = customId.split('_')[2];
+    const parts = customId.split('_');
+    const initiatorId = parts[2];
+    const intendedRecipientId = parts[3];
+
+    if (interaction.user.id !== intendedRecipientId) {
+      return await interaction.reply({
+        content: `❌ Only <@${intendedRecipientId}> can respond to this trade request.`,
+        ephemeral: true
+      });
+    }
 
     const declineEmbed = new EmbedBuilder()
       .setTitle('Trade Declined')
-      .setDescription(`<@${interaction.user.id}> has declined the trade request.`)
+      .setDescription(`<@${interaction.user.id}> has declined the trade request from <@${initiatorId}>.`)
       .setColor(0xFF6B6B)
       .setTimestamp();
 
@@ -4686,13 +4726,17 @@ async function handleComponentInteraction(interaction) {
   } else if (customId.startsWith('trade_add_cash_')) {
     await handleTradeAddCash(interaction, customId);
 
-  } else if (customId.startsWith('trade_add_artefact_')) {
+  // IMPORTANT: the select-menu interactions also start with 'trade_add_artefact_' /
+  // 'trade_remove_artefact_' (specifically `trade_artefact_select_` and
+  // `trade_remove_artefact_select_`). The remove-select customId would otherwise
+  // be incorrectly matched here, so we explicitly exclude it.
+  } else if (customId.startsWith('trade_add_artefact_') && !customId.startsWith('trade_add_artefact_select_')) {
     await handleTradeAddArtefact(interaction, customId);
 
   } else if (customId.startsWith('trade_remove_cash_')) {
     await handleTradeRemoveCash(interaction, customId);
 
-  } else if (customId.startsWith('trade_remove_artefact_')) {
+  } else if (customId.startsWith('trade_remove_artefact_') && !customId.startsWith('trade_remove_artefact_select_')) {
     await handleTradeRemoveArtefact(interaction, customId);
 
   } else if (customId.startsWith('trade_ready_')) {
@@ -4702,21 +4746,26 @@ async function handleComponentInteraction(interaction) {
     await handleTradeCancel(interaction, customId);
 
   } else if (customId.startsWith('trade_cash_modal_')) {
-    const tradeId = customId.split('_')[3];
+    const tradeId = customId.replace('trade_cash_modal_', '');
     const trade = global.activeTrades[tradeId];
     if (!trade) {
       return await interaction.reply({ content: '❌ Trade session not found!', ephemeral: true });
     }
 
     const userId = interaction.user.id;
+    if (userId !== trade.initiator && userId !== trade.recipient) {
+      return await interaction.reply({ content: 'You are not part of this trade.', ephemeral: true });
+    }
+
     const cashAmount = parseInt(interaction.fields.getTextInputValue('cash_amount'));
 
     if (isNaN(cashAmount) || cashAmount <= 0) {
       return await interaction.reply({ content: 'Please enter a valid cash amount!', ephemeral: true });
     }
 
-    if (cashAmount > userData[userId].cash) {
-      return await interaction.reply({ content: `You only have $${userData[userId].cash.toLocaleString()} available!`, ephemeral: true });
+    const userRecord = userData[userId] || { cash: 0 };
+    if (cashAmount > (userRecord.cash || 0)) {
+      return await interaction.reply({ content: `You only have $${(userRecord.cash || 0).toLocaleString()} available!`, ephemeral: true });
     }
 
     const isInitiator = trade.initiator === userId;
@@ -4729,7 +4778,8 @@ async function handleComponentInteraction(interaction) {
     }
 
     const tradeEmbed = createTradeEmbed(trade, trade.initiator, trade.recipient);
-    const components = createTradeComponents(tradeId, userId);
+    // Components must reflect the public message, not just one viewer's state.
+    const components = createTradeComponents(tradeId);
 
     await interaction.update({ embeds: [tradeEmbed], components });
 
@@ -4957,7 +5007,7 @@ async function startInteractiveTrade(interaction, initiatorId, recipientId, trad
   if (!trade) return;
 
   const tradeEmbed = createTradeEmbed(trade, initiatorId, recipientId);
-  const components = createTradeComponents(tradeId, interaction.user.id);
+  const components = createTradeComponents(tradeId);
 
   await interaction.update({ embeds: [tradeEmbed], components });
   // Store reference to public message so ephemeral pickers can refresh it
@@ -4970,7 +5020,7 @@ async function refreshTradeMessage(trade) {
   try {
     await trade.message.edit({
       embeds: [createTradeEmbed(trade, trade.initiator, trade.recipient)],
-      components: createTradeComponents(`${trade.initiator}-${trade.recipient}`, trade.initiator)
+      components: createTradeComponents(`${trade.initiator}-${trade.recipient}`)
     });
   } catch (e) {
     console.error('Failed to refresh trade message:', e.message);
@@ -5004,10 +5054,13 @@ function buildTradePickerComponents(tradeId, picker, entries, valueKey) {
       const rarity = getRarityByArtefact(name);
       const tier = getArtefactTier(name);
       const val = calcArtefactSellValue(name, rarity);
+      // Discord caps select-option `value` at 100 chars; artefact names should
+      // already be well under that, but truncate defensively just in case.
+      const safeValue = name.length > 100 ? name.slice(0, 100) : name;
       return {
         label: name.length > 100 ? name.slice(0, 97) + '...' : name,
         description: `${rarity ? rarity.name : 'Unknown'} T${tier} — ~${val.toLocaleString()} (${count} ${picker.mode === 'add' ? 'available' : 'in offer'})`,
-        value: valueKey === 'name' ? name : String(pageStart + pageEntries.indexOf([name, count]))
+        value: safeValue
       };
     });
     const selectId = picker.mode === 'add'
@@ -5182,58 +5235,68 @@ function getTradeStatus(trade) {
   return 'Setting up offers...';
 }
 
-function createTradeComponents(tradeId, userId) {
+// The trade UI lives in a public message that BOTH players see, so the buttons
+// cannot have per-viewer disabled state — Discord renders the same components
+// for everyone. Each handler enforces "you cannot modify after marking ready"
+// itself with an ephemeral error if needed. We only globally disable the
+// action buttons when BOTH players are ready (trade is mid-execution).
+function createTradeComponents(tradeId) {
   const trade = global.activeTrades[tradeId];
   if (!trade) return [];
 
-  const isInitiator = trade.initiator === userId;
-  const userOffer = isInitiator ? trade.initiatorOffer : trade.recipientOffer;
-  const userReady = isInitiator ? trade.initiatorReady : trade.recipientReady;
+  const bothReady = trade.initiatorReady && trade.recipientReady;
 
   const row1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId(`trade_add_cash_${tradeId}`)
       .setLabel('Add Cash')
       .setStyle(ButtonStyle.Primary)
-      .setDisabled(userReady),
+      .setDisabled(bothReady),
     new ButtonBuilder()
       .setCustomId(`trade_add_artefact_${tradeId}`)
       .setLabel('Add Artefact')
       .setStyle(ButtonStyle.Primary)
-      .setDisabled(userReady),
+      .setDisabled(bothReady),
     new ButtonBuilder()
       .setCustomId(`trade_remove_cash_${tradeId}`)
       .setLabel('Remove Cash')
       .setStyle(ButtonStyle.Secondary)
-      .setDisabled(userOffer.cash === 0 || userReady),
+      .setDisabled(bothReady),
     new ButtonBuilder()
       .setCustomId(`trade_remove_artefact_${tradeId}`)
       .setLabel('Remove Artefact')
       .setStyle(ButtonStyle.Secondary)
-      .setDisabled(userOffer.artefacts.length === 0 || userReady)
+      .setDisabled(bothReady)
   );
 
   const row2 = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId(`trade_ready_${tradeId}`)
-      .setLabel(userReady ? 'Ready!' : 'Mark Ready')
-      .setStyle(userReady ? ButtonStyle.Success : ButtonStyle.Primary)
-      .setDisabled(userReady),
+      .setLabel('Mark Ready')
+      .setStyle(ButtonStyle.Primary)
+      .setDisabled(bothReady),
     new ButtonBuilder()
       .setCustomId(`trade_cancel_${tradeId}`)
       .setLabel('Cancel Trade')
       .setStyle(ButtonStyle.Danger)
+      .setDisabled(bothReady)
   );
 
   return [row1, row2];
 }
 
 async function handleTradeAddCash(interaction, customId) {
-  const tradeId = customId.split('_')[3];
+  const tradeId = customId.replace('trade_add_cash_', '');
   const trade = global.activeTrades[tradeId];
-  if (!trade) return;
+  if (!trade) {
+    return await interaction.reply({ content: 'Trade session not found.', ephemeral: true });
+  }
 
   const userId = interaction.user.id;
+  if (userId !== trade.initiator && userId !== trade.recipient) {
+    return await interaction.reply({ content: 'You are not part of this trade.', ephemeral: true });
+  }
+
   const isInitiator = trade.initiator === userId;
 
   if ((isInitiator && trade.initiatorReady) || (!isInitiator && trade.recipientReady)) {
@@ -5303,12 +5366,22 @@ async function handleTradeAddArtefact(interaction, customId) {
 }
 
 async function handleTradeRemoveCash(interaction, customId) {
-  const tradeId = customId.split('_')[3];
+  const tradeId = customId.replace('trade_remove_cash_', '');
   const trade = global.activeTrades[tradeId];
-  if (!trade) return;
+  if (!trade) {
+    return await interaction.reply({ content: 'Trade session not found.', ephemeral: true });
+  }
 
   const userId = interaction.user.id;
+  if (userId !== trade.initiator && userId !== trade.recipient) {
+    return await interaction.reply({ content: 'You are not part of this trade.', ephemeral: true });
+  }
+
   const isInitiator = trade.initiator === userId;
+
+  if ((isInitiator && trade.initiatorReady) || (!isInitiator && trade.recipientReady)) {
+    return await interaction.reply({ content: 'You cannot modify your offer after marking ready!', ephemeral: true });
+  }
 
   if (isInitiator) {
     trade.initiatorOffer.cash = 0;
@@ -5319,7 +5392,7 @@ async function handleTradeRemoveCash(interaction, customId) {
   }
 
   const tradeEmbed = createTradeEmbed(trade, trade.initiator, trade.recipient);
-  const components = createTradeComponents(tradeId, userId);
+  const components = createTradeComponents(tradeId);
 
   await interaction.update({ embeds: [tradeEmbed], components });
 }
@@ -5361,21 +5434,33 @@ async function handleTradeRemoveArtefact(interaction, customId) {
 }
 
 async function handleTradeReady(interaction, customId) {
-  const tradeId = customId.split('_')[2];
+  const tradeId = customId.replace('trade_ready_', '');
   const trade = global.activeTrades[tradeId];
-  if (!trade) return;
+  if (!trade) {
+    return await interaction.reply({ content: 'Trade session not found.', ephemeral: true });
+  }
 
   const userId = interaction.user.id;
+  if (userId !== trade.initiator && userId !== trade.recipient) {
+    return await interaction.reply({ content: 'You are not part of this trade.', ephemeral: true });
+  }
+
   const isInitiator = trade.initiator === userId;
+
+  // Already ready — nothing to do (don't double-set or re-execute).
+  if ((isInitiator && trade.initiatorReady) || (!isInitiator && trade.recipientReady)) {
+    return await interaction.reply({ content: 'You are already marked ready.', ephemeral: true });
+  }
 
   // Validate that user has the items they're offering
   const userOffer = isInitiator ? trade.initiatorOffer : trade.recipientOffer;
+  const userRecord = userData[userId] || { cash: 0, artefacts: [] };
 
   // Check cash availability
-  if (userOffer.cash > userData[userId].cash) {
-    return await interaction.reply({ 
-      content: `❌ You don't have enough cash! You're offering $${userOffer.cash.toLocaleString()} but only have $${userData[userId].cash.toLocaleString()}`, 
-      ephemeral: true 
+  if (userOffer.cash > (userRecord.cash || 0)) {
+    return await interaction.reply({
+      content: `❌ You don't have enough cash! You're offering $${userOffer.cash.toLocaleString()} but only have $${(userRecord.cash || 0).toLocaleString()}`,
+      ephemeral: true
     });
   }
 
@@ -5383,7 +5468,7 @@ async function handleTradeReady(interaction, customId) {
   const _offerCounts = {};
   userOffer.artefacts.forEach(a => { _offerCounts[a] = (_offerCounts[a] || 0) + 1; });
   const _invCounts = {};
-  (userData[userId].artefacts || []).forEach(a => { _invCounts[a] = (_invCounts[a] || 0) + 1; });
+  (userRecord.artefacts || []).forEach(a => { _invCounts[a] = (_invCounts[a] || 0) + 1; });
   for (const [name, want] of Object.entries(_offerCounts)) {
     const have = _invCounts[name] || 0;
     if (have < want) {
@@ -5404,7 +5489,7 @@ async function handleTradeReady(interaction, customId) {
     await executeTrade(interaction, trade, tradeId);
   } else {
     const tradeEmbed = createTradeEmbed(trade, trade.initiator, trade.recipient);
-    const components = createTradeComponents(tradeId, userId);
+    const components = createTradeComponents(tradeId);
     await interaction.update({ embeds: [tradeEmbed], components });
   }
 }
@@ -5477,6 +5562,10 @@ async function executeTrade(interaction, trade, tradeId) {
 
     await interaction.update({ embeds: [successEmbed], components: [] });
 
+    // Best-effort: close any open ephemeral picker messages now that the
+    // trade has resolved (Cancel does the same — completion shouldn't differ).
+    await closeTradePickers(trade, 'Trade Complete', 'This trade has been completed.', 0x00FF7F);
+
   } catch (error) {
     console.error('Trade execution error:', error);
 
@@ -5492,12 +5581,41 @@ async function executeTrade(interaction, trade, tradeId) {
 
     await interaction.update({ embeds: [errorEmbed], components: [] });
     delete global.activeTrades[tradeId];
+
+    await closeTradePickers(trade, 'Trade Failed', 'This trade was cancelled due to a validation error.', 0xFF6B6B);
+  }
+}
+
+// Shared helper to close any open ephemeral artefact pickers on a trade.
+async function closeTradePickers(trade, title, description, color) {
+  if (!trade || !trade.pickers) return;
+  for (const pickerUserId of Object.keys(trade.pickers)) {
+    const picker = trade.pickers[pickerUserId];
+    if (!picker || !picker.message) continue;
+    try {
+      await picker.message.edit({
+        embeds: [new EmbedBuilder().setTitle(title).setDescription(description).setColor(color)],
+        components: []
+      });
+    } catch (e) {
+      // Picker dismissed or webhook expired — safe to ignore
+    }
   }
 }
 
 async function handleTradeCancel(interaction, customId) {
   const tradeId = customId.replace('trade_cancel_', '');
   const trade = global.activeTrades[tradeId];
+
+  if (!trade) {
+    return await interaction.reply({ content: 'Trade session not found.', ephemeral: true });
+  }
+
+  const userId = interaction.user.id;
+  if (userId !== trade.initiator && userId !== trade.recipient) {
+    return await interaction.reply({ content: 'Only trade participants can cancel this trade.', ephemeral: true });
+  }
+
   delete global.activeTrades[tradeId];
 
   const cancelEmbed = new EmbedBuilder()
@@ -5509,18 +5627,7 @@ async function handleTradeCancel(interaction, customId) {
   await interaction.update({ embeds: [cancelEmbed], components: [] });
 
   // Best-effort: clean up any open ephemeral pickers
-  if (trade && trade.pickers) {
-    for (const userId of Object.keys(trade.pickers)) {
-      const picker = trade.pickers[userId];
-      if (!picker || !picker.message) continue;
-      try {
-        await picker.message.edit({
-          embeds: [new EmbedBuilder().setTitle('Trade Cancelled').setDescription('This trade was cancelled.').setColor(0xFF9F43)],
-          components: []
-        });
-      } catch (e) {}
-    }
-  }
+  await closeTradePickers(trade, 'Trade Cancelled', 'This trade was cancelled.', 0xFF9F43);
 }
 
 // === MARBLE GAME FUNCTIONS ===
