@@ -1722,6 +1722,28 @@ client.on('interactionCreate', async interaction => {
       return;
     }
 
+    if (customId.startsWith('ms_search_modal_')) {
+      const sessionId = customId.replace('ms_search_modal_', '');
+      const session = global.massSellSessions[sessionId];
+
+      if (!session) {
+        return await interaction.reply({ content: 'This session has expired.', ephemeral: true });
+      }
+
+      const rawQuery = (interaction.fields.getTextInputValue('ms_search_input') || '').trim();
+      session.searchQuery = rawQuery;
+      session.page = 0;
+
+      const user = await getUser(session.userId);
+
+      await interaction.deferUpdate();
+      await session.message.edit({
+        embeds: [buildMassSellEmbed(session, user.artefacts)],
+        components: buildMassSellComponents(sessionId, session, user.artefacts)
+      });
+      return;
+    }
+
     if (customId.startsWith('ga_amount_modal_')) {
       const sessionId = customId.replace('ga_amount_modal_', '');
       const session = global.giveArtefactSessions[sessionId];
@@ -3908,11 +3930,20 @@ function getMassSellValue(name) {
   return { isShiny, rarity, tier, finalValue: isShiny ? tierSell * 20 : tierSell };
 }
 
+function massSellMatchesQuery(name, query) {
+  if (!query) return true;
+  const clean = (name.startsWith('✨ SHINY ') && name.endsWith(' ✨'))
+    ? name.replace('✨ SHINY ', '').replace(' ✨', '')
+    : name;
+  const q = query.toLowerCase();
+  return clean.toLowerCase().includes(q) || name.toLowerCase().includes(q);
+}
+
 function buildMassSellEmbed(session, userArtefacts) {
   const queueText = session.queue.length
     ? session.queue.map(e => {
         const { rarity, tier, finalValue } = getMassSellValue(e.name);
-        return `${e.name} x${e.amount} — ${rarity ? rarity.name : 'Unknown'} T${tier} ($${(finalValue * e.amount).toLocaleString()} total)`;
+        return `${e.name} x${e.amount} — ${rarity ? rarity.name : 'Unknown'} T${tier} (${(finalValue * e.amount).toLocaleString()} total)`;
       }).join('\n')
     : 'Nothing queued yet — select an artefact and add it below.';
 
@@ -3923,15 +3954,30 @@ function buildMassSellEmbed(session, userArtefacts) {
 
   const totalItems = session.queue.reduce((s, e) => s + e.amount, 0);
 
+  const fields = [
+    { name: 'Currently Selected', value: session.selectedArtefact || 'None — pick from the dropdown below', inline: false },
+    { name: `Queue (${totalItems} artefact${totalItems !== 1 ? 's' : ''})`, value: queueText, inline: false },
+    { name: 'Total Sell Value', value: `${totalValue.toLocaleString()}`, inline: true },
+    { name: 'Artefacts in Inventory', value: userArtefacts.length.toString(), inline: true }
+  ];
+
+  const query = (session.searchQuery || '').trim();
+  if (query) {
+    const ownedCounts = {};
+    userArtefacts.forEach(n => { ownedCounts[n] = (ownedCounts[n] || 0) + 1; });
+    session.queue.forEach(e => { if (ownedCounts[e.name]) ownedCounts[e.name] -= e.amount; });
+    const matchCount = Object.entries(ownedCounts).filter(([n, c]) => c > 0 && massSellMatchesQuery(n, query)).length;
+    fields.splice(1, 0, {
+      name: '🔍 Search Filter',
+      value: `\`${query}\` — **${matchCount}** match${matchCount !== 1 ? 'es' : ''}. Click **Clear Search** to see everything again.`,
+      inline: false
+    });
+  }
+
   return new EmbedBuilder()
     .setTitle('Mass Sell Artefacts')
     .setDescription('Select an artefact from the dropdown, then queue it for sale. Confirm when your list is ready.')
-    .addFields(
-      { name: 'Currently Selected', value: session.selectedArtefact || 'None — pick from the dropdown below', inline: false },
-      { name: `Queue (${totalItems} artefact${totalItems !== 1 ? 's' : ''})`, value: queueText, inline: false },
-      { name: 'Total Sell Value', value: `$${totalValue.toLocaleString()}`, inline: true },
-      { name: 'Artefacts in Inventory', value: userArtefacts.length.toString(), inline: true }
-    )
+    .addFields(...fields)
     .setColor(session.queue.length > 0 ? 0x51CF66 : 0x339AF0)
     .setFooter({ text: 'Session expires in 5 minutes' })
     .setTimestamp();
@@ -3948,24 +3994,41 @@ function buildMassSellComponents(sessionId, session, userArtefacts) {
     if (availableCounts[e.name]) availableCounts[e.name] -= e.amount;
   });
 
-  const availableEntries = Object.entries(availableCounts).filter(([, c]) => c > 0);
+  const allAvailable = Object.entries(availableCounts).filter(([, c]) => c > 0);
+
+  // Apply search filter
+  const query = (session.searchQuery || '').trim();
+  const filtered = query ? allAvailable.filter(([name]) => massSellMatchesQuery(name, query)) : allAvailable;
+
+  // Paginate (25 per page — Discord select menu limit)
+  const PAGE_SIZE = 25;
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  if (typeof session.page !== 'number' || session.page < 0) session.page = 0;
+  if (session.page >= totalPages) session.page = totalPages - 1;
+  const pageStart = session.page * PAGE_SIZE;
+  const pageEntries = filtered.slice(pageStart, pageStart + PAGE_SIZE);
+
   const rows = [];
 
-  if (availableEntries.length > 0) {
-    const selectOptions = availableEntries.slice(0, 25).map(([name, count]) => {
+  if (pageEntries.length > 0) {
+    const selectOptions = pageEntries.map(([name, count]) => {
       const { rarity, tier, finalValue } = getMassSellValue(name);
       return {
         label: name.length > 100 ? name.slice(0, 97) + '...' : name,
-        description: `${rarity ? rarity.name : 'Unknown'} T${tier} — $${finalValue.toLocaleString()} each (${count} available)`,
+        description: `${rarity ? rarity.name : 'Unknown'} T${tier} — ${finalValue.toLocaleString()} each (${count} available)`,
         value: name,
         default: session.selectedArtefact === name
       };
     });
 
+    const placeholder = totalPages > 1
+      ? `Select an artefact (page ${session.page + 1} of ${totalPages})`
+      : 'Select an artefact to queue for sale';
+
     rows.push(new ActionRowBuilder().addComponents(
       new StringSelectMenuBuilder()
         .setCustomId(`ms_select_${sessionId}`)
-        .setPlaceholder('Select an artefact to queue for sale')
+        .setPlaceholder(placeholder)
         .addOptions(selectOptions)
     ));
   }
@@ -4001,6 +4064,35 @@ function buildMassSellComponents(sessionId, session, userArtefacts) {
       .setStyle(ButtonStyle.Danger)
   ));
 
+  // Search & pagination row — only render when useful
+  const showSearchRow = allAvailable.length > 0 && (allAvailable.length > PAGE_SIZE || query.length > 0);
+  if (showSearchRow) {
+    const searchLabel = query
+      ? `🔍 Search: "${query.length > 18 ? query.slice(0, 15) + '...' : query}"`
+      : '🔍 Search';
+    rows.push(new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`ms_search_${sessionId}`)
+        .setLabel(searchLabel)
+        .setStyle(query ? ButtonStyle.Success : ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId(`ms_clear_search_${sessionId}`)
+        .setLabel('Clear Search')
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(!query),
+      new ButtonBuilder()
+        .setCustomId(`ms_prev_page_${sessionId}`)
+        .setLabel('◀ Prev')
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(totalPages <= 1 || session.page === 0),
+      new ButtonBuilder()
+        .setCustomId(`ms_next_page_${sessionId}`)
+        .setLabel('Next ▶')
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(totalPages <= 1 || session.page >= totalPages - 1)
+    ));
+  }
+
   return rows;
 }
 
@@ -4024,6 +4116,8 @@ async function handleMassSellCommand(interaction, userId) {
     userId,
     selectedArtefact: null,
     queue: [],
+    searchQuery: '',
+    page: 0,
     message: null
   };
 
@@ -4145,6 +4239,37 @@ async function handleMassSellCommand(interaction, userId) {
         embeds: [completeEmbed],
         components: []
       });
+
+    } else if (i.customId === `ms_search_${sessionId}`) {
+      const modal = new ModalBuilder()
+        .setCustomId(`ms_search_modal_${sessionId}`)
+        .setTitle('Search Your Artefacts')
+        .addComponents(
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder()
+              .setCustomId('ms_search_input')
+              .setLabel('Type a name (or part of a name)')
+              .setStyle(TextInputStyle.Short)
+              .setPlaceholder('e.g. quartz, obsidian, crown')
+              .setRequired(false)
+              .setMaxLength(80)
+              .setValue(session.searchQuery || '')
+          )
+        );
+      await i.showModal(modal);
+
+    } else if (i.customId === `ms_clear_search_${sessionId}`) {
+      session.searchQuery = '';
+      session.page = 0;
+      await i.update({ embeds: [buildMassSellEmbed(session, user.artefacts)], components: buildMassSellComponents(sessionId, session, user.artefacts) });
+
+    } else if (i.customId === `ms_prev_page_${sessionId}`) {
+      session.page = Math.max(0, (session.page || 0) - 1);
+      await i.update({ embeds: [buildMassSellEmbed(session, user.artefacts)], components: buildMassSellComponents(sessionId, session, user.artefacts) });
+
+    } else if (i.customId === `ms_next_page_${sessionId}`) {
+      session.page = (session.page || 0) + 1;
+      await i.update({ embeds: [buildMassSellEmbed(session, user.artefacts)], components: buildMassSellComponents(sessionId, session, user.artefacts) });
 
     } else if (i.customId === `ms_cancel_${sessionId}`) {
       collector.stop('cancelled');
