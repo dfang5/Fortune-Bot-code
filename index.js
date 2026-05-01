@@ -139,6 +139,8 @@ async function initializeDatabase() {
 
     // Initialize global items if they don't exist
     await initializeGlobalItems();
+    // Seed any items that must always exist (baits, future minigame items)
+    await ensureGlobalItems();
 
   } catch (error) {
     console.error('Failed to connect to MongoDB:', error);
@@ -148,7 +150,7 @@ async function initializeDatabase() {
 
 // Global data objects (loaded from MongoDB)
 let userData = {};
-let cooldowns = { scavenge: {}, labor: {}, steal: {} };
+let cooldowns = { scavenge: {}, labor: {}, steal: {}, fish: {} };
 global.tempItems = {};
 global.activeTrades = {};
 global.activeMarbleGames = {};
@@ -156,6 +158,98 @@ global.activeDuelGames = {};
 global.messageTracker = {};
 global.giveArtefactSessions = {};
 global.massSellSessions = {};
+global.activeFishSessions = {};
+
+// === FISHING CONSTANTS ===
+
+const FISH_COOLDOWN = 20 * 60 * 1000; // 20 minutes
+
+// Each bait tier has a weight table (junk/common/uncommon/rare/legendary)
+const BAIT_CATALOG = {
+  'Earthworm': {
+    name: 'Earthworm', basePrice: 150, type: 'bait', category: 'minigame', emoji: '🪱',
+    description: 'A humble worm dug from the riverbank. Great for lazy afternoons. Attracts mostly common catches.',
+    weights: { junk: 30, common: 50, uncommon: 15, rare: 4, legendary: 1 }
+  },
+  'Cricket': {
+    name: 'Cricket', basePrice: 400, type: 'bait', category: 'minigame', emoji: '🦗',
+    description: 'Lively bait that attracts livelier fish. Noticeably better odds on uncommon catches.',
+    weights: { junk: 15, common: 40, uncommon: 30, rare: 12, legendary: 3 }
+  },
+  'Salted Lure': {
+    name: 'Salted Lure', basePrice: 900, type: 'bait', category: 'minigame', emoji: '🎣',
+    description: 'A handcrafted saltwater lure. Rare fish can\'t seem to resist the shimmer.',
+    weights: { junk: 5, common: 30, uncommon: 35, rare: 22, legendary: 8 }
+  },
+  'Gilded Hook': {
+    name: 'Gilded Hook', basePrice: 2000, type: 'bait', category: 'minigame', emoji: '🪝',
+    description: 'A gold-plated hook said to lure even legendary creatures from the deep. Never snags junk.',
+    weights: { junk: 0, common: 15, uncommon: 30, rare: 35, legendary: 20 }
+  }
+};
+
+// Fish definitions per rarity tier
+const FISH_TABLE = {
+  junk: [
+    { name: 'Old Boot',           value: 0,  emoji: '🥾', description: 'A waterlogged boot. Not yours, thankfully.' },
+    { name: 'Rusty Tin Can',      value: 0,  emoji: '🥫', description: 'Label long gone. Contents unknown. Definitely not fish.' },
+    { name: 'Soggy Journal',      value: 25, emoji: '📓', description: 'Most pages illegible — but a curious collector pays for novelty.' },
+    { name: 'Strange Pebble',     value: 50, emoji: '🪨', description: 'Oddly round. Not quite artefact-grade, but someone online wants it.' },
+    { name: 'Tangled Net Scrap',  value: 10, emoji: '🕸️', description: 'Probably from a commercial fisher. Barely worth hauling in.' }
+  ],
+  common: [
+    { name: 'Minnow',   value: [100, 200], emoji: '🐟', description: 'Tiny but plentiful. Sells at standard market rate.' },
+    { name: 'Carp',     value: [150, 280], emoji: '🐡', description: 'Reliable and meaty. The market always wants carp.' },
+    { name: 'Perch',    value: [120, 240], emoji: '🐠', description: 'Feisty for its size. Puts up a decent fight.' },
+    { name: 'Catfish',  value: [180, 320], emoji: '🐟', description: 'Bottom-feeder with surprising value. A solid catch.' },
+    { name: 'Gudgeon',  value: [100, 180], emoji: '🐡', description: 'Not glamorous, but a dependable earner.' },
+    { name: 'Roach',    value: [110, 220], emoji: '🐠', description: 'Schools near the riverbed. Easy pickings with the right bait.' }
+  ],
+  uncommon: [
+    { name: 'Bass',     value: [400, 700], emoji: '🐟', description: 'Firm flesh and high demand. A respectable haul.' },
+    { name: 'Trout',    value: [420, 750], emoji: '🐠', description: 'Cold-water prize. Buyers line up for fresh trout.' },
+    { name: 'Eel',      value: [450, 800], emoji: '🐍', description: 'Slippery and stubborn, but absolutely worth the effort.' },
+    { name: 'Pike',     value: [500, 850], emoji: '🐟', description: 'Apex river predator. Sells for a handsome sum.' },
+    { name: 'Tench',    value: [380, 680], emoji: '🐡', description: 'Golden scales catch the eye of collectors and chefs alike.' },
+    { name: 'Grayling', value: [400, 720], emoji: '🐠', description: 'An uncommon river find, prized for its delicate flavour.' }
+  ],
+  rare: [
+    { name: 'Artefact-Marked Sturgeon', value: [1000, 2000], emoji: '🐟', description: 'Ancient glyphs run along its scales. Centuries of river history, embodied.' },
+    { name: 'Crystal Perch',            value: [1200, 2200], emoji: '💎', description: 'Scales shimmer like raw quartz. Scientists are offering serious money.' },
+    { name: 'Iron-Scaled Carp',         value: [1100, 2100], emoji: '⚙️', description: 'Mineral deposits hardened its scales to near-metal. A remarkable specimen.' },
+    { name: 'Fossilled Snapper',        value: [1300, 2500], emoji: '🦴', description: 'Half fossil, half fish. The palaeontology guild will pay handsomely.' }
+  ],
+  legendary: [
+    { name: 'The Ancient Leviathan', value: [4000, 8000], emoji: '🐉', description: 'A creature from before the artefact age itself. Your hands won\'t stop trembling.' },
+    { name: 'The Gilded Carp',       value: [3500, 7000], emoji: '✨', description: 'Solid gold scales. The market hasn\'t seen one in decades.' },
+    { name: 'The Phantom Eel',       value: [4500, 8500], emoji: '👻', description: 'Translucent and bioluminescent. Worth more than your entire bank balance.' },
+    { name: 'The Spectral Pike',     value: [5000, 9000], emoji: '🌊', description: 'Ethereal and immense. Legends say catching one brings fortune for a month.' }
+  ]
+};
+
+function rollFishTier(baitName) {
+  const bait = BAIT_CATALOG[baitName];
+  if (!bait) return 'common';
+  const { weights } = bait;
+  const total = Object.values(weights).reduce((a, b) => a + b, 0);
+  let r = Math.random() * total;
+  for (const [tier, w] of Object.entries(weights)) {
+    r -= w;
+    if (r <= 0) return tier;
+  }
+  return 'common';
+}
+
+function pickFish(tier) {
+  const pool = FISH_TABLE[tier];
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
+function rollFishValue(fish) {
+  if (typeof fish.value === 'number') return fish.value;
+  const [min, max] = fish.value;
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
 
 // Graceful shutdown handler for Railway deployment
 async function gracefulShutdown(signal) {
@@ -236,7 +330,7 @@ async function saveUser(userId) {
 
 async function getCooldowns() {
   const cooldownDoc = await cooldownsCollection.findOne({ _id: 'main' });
-  const defaults = { scavenge: {}, labor: {}, steal: {} };
+  const defaults = { scavenge: {}, labor: {}, steal: {}, fish: {} };
 
   if (!cooldownDoc) {
     return defaults;
@@ -246,7 +340,8 @@ async function getCooldowns() {
   return {
     scavenge: cooldownDoc.scavenge || {},
     labor: cooldownDoc.labor || {},
-    steal: cooldownDoc.steal || {}
+    steal: cooldownDoc.steal || {},
+    fish: cooldownDoc.fish || {}
   };
 }
 
@@ -337,6 +432,21 @@ async function initializeGlobalItems() {
     console.error('❌ Failed to initialize global items:', error.message);
     throw error;
   }
+}
+
+// Upserts any items that should always exist in the global store (baits, etc.)
+// Uses $set so new items are added without touching existing ones.
+async function ensureGlobalItems() {
+  const setFields = {};
+  for (const [key, val] of Object.entries(BAIT_CATALOG)) {
+    const { emoji: _emoji, weights: _weights, ...storeEntry } = val;
+    setFields[`items.${key}`] = storeEntry;
+  }
+  await globalItemsCollection.updateOne(
+    { _id: 'main' },
+    { $set: setFields },
+    { upsert: true }
+  );
 }
 
 async function getGlobalItems() {
@@ -1350,6 +1460,14 @@ client.once('clientReady', async () => {
       .setDMPermission(false),
 
     new SlashCommandBuilder()
+      .setName('fish')
+      .setDescription('Cast your line and see what bites (20 min cooldown, requires bait from /store)')
+      .addStringOption(option =>
+        option.setName('bait')
+          .setDescription('Bait to use — leave blank to auto-use your best bait')
+          .setRequired(false)),
+
+    new SlashCommandBuilder()
       .setName('marble-game')
       .setDescription('Start a 4-player marble gambling game with cash betting')
       .addUserOption(option => 
@@ -1758,8 +1876,10 @@ client.on('interactionCreate', async interaction => {
       const rawQuery = (interaction.fields.getTextInputValue('trade_picker_search_input') || '').trim();
       picker.query = rawQuery;
       picker.page = 0;
-      await interaction.deferUpdate();
-      await refreshTradePicker(trade, userId);
+      // Modal submitted from a button on the picker — interaction.update edits
+      // that originating ephemeral message via this interaction's webhook,
+      // which is more reliable than the legacy stored-Message.edit path.
+      await interaction.update(buildTradePickerPayload(trade, userId));
       return;
     }
 
@@ -1802,8 +1922,11 @@ client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
   // Acknowledge ALL commands immediately to prevent timeout  
-  if (interaction.commandName === 'store' || interaction.commandName === 'buy' || interaction.commandName === 'add-item') {
+  if (interaction.commandName === 'buy' || interaction.commandName === 'add-item' || interaction.commandName === 'fish') {
     await interaction.deferReply();
+  }
+  if (interaction.commandName === 'store') {
+    await interaction.deferReply({ ephemeral: true });
   }
 
   // Developer commands get ephemeral replies
@@ -1885,6 +2008,10 @@ client.on('interactionCreate', async interaction => {
         break;
       case 'view-items':
         await handleViewItemsCommand(interaction);
+        break;
+
+      case 'fish':
+        await handleFishCommand(interaction, userId);
         break;
 
       case 'marble-game':
@@ -3671,157 +3798,148 @@ async function handleLeaderboardCommand(interaction) {
   await interaction.reply({ embeds: [leaderboardEmbed] });
 }
 
+// Build store nav row — active tab button is visually indicated via style
+function buildStoreNavRow(activeTab) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('store_tab_economy')
+      .setLabel('Economy')
+      .setStyle(activeTab === 'economy' ? ButtonStyle.Primary : ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId('store_tab_minigame')
+      .setLabel('Minigame Supplies')
+      .setStyle(activeTab === 'minigame' ? ButtonStyle.Primary : ButtonStyle.Secondary)
+  );
+}
+
+// Build {embeds, components} for the store, given the active tab and fetched data
+async function buildStorePayload(tab, userId, guildId, globalItems, guildItems) {
+  const navRow = buildStoreNavRow(tab);
+  const embeds = [];
+
+  if (tab === 'economy') {
+    // --- Economy tab: Bank Expansion + server items ---
+    const economyItems = Object.entries(globalItems).filter(([, item]) => item.type === 'bank_expansion');
+
+    const itemBlocks = [];
+    for (const [name, item] of economyItems) {
+      const [currentPrice, currentCapacity] = await Promise.all([
+        calculateExpansionPrice(userId),
+        calculateBankCapacity(userId)
+      ]);
+      const currentExpansions = userData[userId]?.bankExpansions || 0;
+      const nextCapacity = Math.floor(50000 * Math.pow(1.25, currentExpansions + 1));
+      itemBlocks.push(
+        `**${name}**\n` +
+        `Price: $${currentPrice.toLocaleString()}\n` +
+        `${item.description}\n` +
+        `Your Bank: $${currentCapacity.toLocaleString()} (${currentExpansions} expansion${currentExpansions !== 1 ? 's' : ''})\n` +
+        `Next Tier: $${nextCapacity.toLocaleString()} capacity`
+      );
+    }
+
+    // Server items
+    const serverBlocks = Object.entries(guildItems).map(([name, data]) =>
+      `**${name}**\nPrice: $${data.price.toLocaleString()}\n${data.description || 'No description'}`
+    );
+
+    const allBlocks = [...itemBlocks, ...serverBlocks];
+    const chunks = chunkTextBlocks(allBlocks);
+
+    const fields = chunks.length > 0
+      ? chunks.map((chunk, i) => ({ name: i === 0 ? 'Available Items' : '\u200b', value: chunk, inline: false }))
+      : [{ name: 'Available Items', value: 'No economy items are currently available.', inline: false }];
+
+    const serverNote = Object.keys(guildItems).length === 0
+      ? '\n\nThis server has no custom items yet. Admins can add them with `/add-item`.'
+      : '';
+
+    embeds.push(
+      new EmbedBuilder()
+        .setTitle('Store — Economy')
+        .setDescription(`**Bank expansions & server-specific items**${serverNote}`)
+        .addFields(...fields, { name: 'How to Buy', value: 'Use `/buy <item name>` to purchase any item here.', inline: false })
+        .setColor(0xFFD700)
+        .setFooter({ text: 'Economy tab • Switch tabs using the buttons below' })
+        .setTimestamp()
+    );
+
+  } else {
+    // --- Minigame Supplies tab: Bait ---
+    const baitBlocks = Object.values(BAIT_CATALOG).map(bait => {
+      const userItems = userData[userId]?.items || [];
+      const owned = userItems.filter(i => i === bait.name).length;
+      const tierLabel = ['', 'Basic', 'Standard', 'Premium', 'Elite'][bait.tier] || 'Unknown';
+      return (
+        `${bait.emoji} **${bait.name}** — $${bait.basePrice.toLocaleString()} *(${tierLabel})*\n` +
+        `${bait.description}\n` +
+        `You own: **${owned}**`
+      );
+    });
+
+    const chunks = chunkTextBlocks(baitBlocks);
+    const fields = chunks.map((chunk, i) => ({ name: i === 0 ? 'Fishing Bait' : '\u200b', value: chunk, inline: false }));
+
+    embeds.push(
+      new EmbedBuilder()
+        .setTitle('Store — Minigame Supplies')
+        .setDescription('**Bait for `/fish`** — better bait means rarer catches and bigger rewards.')
+        .addFields(
+          ...fields,
+          { name: 'Bait Odds (worst → best)', value: '🪱 Earthworm → 🦗 Cricket → 🎣 Salted Lure → 🪝 Gilded Hook', inline: false },
+          { name: 'How to Buy', value: 'Use `/buy <bait name>` — you can stack as many as you like.', inline: false }
+        )
+        .setColor(0x0099FF)
+        .setFooter({ text: 'Minigame Supplies tab • Use /fish once you have bait' })
+        .setTimestamp()
+    );
+  }
+
+  return { embeds, components: [navRow] };
+}
+
+// Simple helper: pack text blocks into ≤1024-char field values
+function chunkTextBlocks(blocks) {
+  const chunks = [];
+  let current = '';
+  for (const block of blocks) {
+    const safe = block.length > 1024 ? block.slice(0, 1021) + '...' : block;
+    const addition = current ? '\n\n' + safe : safe;
+    if (current.length + addition.length > 1024) {
+      chunks.push(current);
+      current = safe;
+    } else {
+      current += addition;
+    }
+  }
+  if (current) chunks.push(current);
+  return chunks;
+}
+
 async function handleStoreCommand(interaction) {
-  // Interaction already deferred in main handler to prevent timeout
-
-  // Use guildId directly (always available) instead of guild object
   const guildId = interaction.guildId;
-
-  // Additional safety check - commands should only work in servers
   if (!guildId) {
-    const dmEmbed = new EmbedBuilder()
-      .setTitle('Server Required')
-      .setDescription('This command requires server context.')
-      .setColor(0xFF6B6B)
-      .setTimestamp();
-
-    return await interaction.editReply({ embeds: [dmEmbed] });
+    return await interaction.editReply({ embeds: [
+      new EmbedBuilder().setTitle('Server Required').setDescription('This command requires a server context.').setColor(0xFF6B6B)
+    ]});
   }
 
   try {
     const userId = interaction.user.id;
-
-    // Run all database queries in parallel for speed
-    const [user, globalItems, guildItemsDoc] = await Promise.all([
+    const [, globalItems, guildItemsDoc] = await Promise.all([
       getUser(userId),
       getGlobalItems(),
       guildItemsCollection.findOne({ _id: guildId })
     ]);
+    const guildItems = guildItemsDoc?.items || {};
 
-    const guildItems = guildItemsDoc ? guildItemsDoc.items : {};
-    const embeds = [];
-
-  // Global Store Embed
-  if (Object.keys(globalItems).length > 0) {
-    const globalItemBlocks = [];
-
-    for (const [name, item] of Object.entries(globalItems)) {
-      if (item.type === 'bank_expansion') {
-        const [currentPrice, currentCapacity] = await Promise.all([
-          calculateExpansionPrice(userId),
-          calculateBankCapacity(userId)
-        ]);
-        const currentExpansions = userData[userId]?.bankExpansions || 0;
-        const nextCapacity = Math.floor(50000 * Math.pow(1.25, currentExpansions + 1));
-
-        globalItemBlocks.push(
-          `**${name}**\n` +
-          `Current Price: ${currentPrice.toLocaleString()}\n` +
-          `${item.description}\n` +
-          `Your Bank: ${currentCapacity.toLocaleString()} capacity (${currentExpansions} expansions)\n` +
-          `Next Expansion: ${nextCapacity.toLocaleString()} capacity`
-        );
-      }
-    }
-
-    const globalChunks = [];
-    let currentGlobalChunk = '';
-    for (const block of globalItemBlocks) {
-      const safeBlock = block.length > 1024 ? block.slice(0, 1021) + '...' : block;
-      const addition = currentGlobalChunk ? '\n\n' + safeBlock : safeBlock;
-      if (currentGlobalChunk.length + addition.length > 1024) {
-        globalChunks.push(currentGlobalChunk);
-        currentGlobalChunk = safeBlock;
-      } else {
-        currentGlobalChunk += addition;
-      }
-    }
-    if (currentGlobalChunk) globalChunks.push(currentGlobalChunk);
-    if (globalChunks.length === 0) globalChunks.push('No items available');
-
-    const globalFields = globalChunks.map((chunk, i) => ({
-      name: i === 0 ? 'Available Items' : '\u200b',
-      value: chunk,
-      inline: false
-    }));
-
-    const globalEmbed = new EmbedBuilder()
-      .setTitle('Global Store')
-      .setDescription('**Cross-server items available to all players**')
-      .addFields(
-        ...globalFields,
-        { name: 'How to Purchase', value: 'Use `/buy <item_name>` to purchase global items', inline: false }
-      )
-      .setColor(0xFFD700)
-      .setFooter({ text: 'Global items • Available across all servers' })
-      .setTimestamp();
-
-    embeds.push(globalEmbed);
-  }
-
-  // Server Store Embed
-  if (Object.keys(guildItems).length > 0) {
-    const serverItemBlocks = Object.entries(guildItems).map(([name, data]) =>
-      `**${name}**\nPrice: ${data.price.toLocaleString()}\n${data.description}`
-    );
-
-    const serverChunks = [];
-    let currentServerChunk = '';
-    for (const block of serverItemBlocks) {
-      const safeBlock = block.length > 1024 ? block.slice(0, 1021) + '...' : block;
-      const addition = currentServerChunk ? '\n\n' + safeBlock : safeBlock;
-      if (currentServerChunk.length + addition.length > 1024) {
-        serverChunks.push(currentServerChunk);
-        currentServerChunk = safeBlock;
-      } else {
-        currentServerChunk += addition;
-      }
-    }
-    if (currentServerChunk) serverChunks.push(currentServerChunk);
-
-    const serverFields = serverChunks.map((chunk, i) => ({
-      name: i === 0 ? 'Available Items' : '\u200b',
-      value: chunk,
-      inline: false
-    }));
-
-    const serverEmbed = new EmbedBuilder()
-      .setTitle('Server Store')
-      .setDescription(`**Server-specific items for this server**`)
-      .addFields(
-        ...serverFields,
-        { name: 'How to Purchase', value: 'Use `/buy <item_name>` to purchase server items', inline: false }
-      )
-      .setColor(0x9932CC)
-      .setFooter({ text: 'Server items • Custom additions by administrators' })
-      .setTimestamp();
-
-    embeds.push(serverEmbed);
-  } else {
-    const emptyServerEmbed = new EmbedBuilder()
-      .setTitle('Server Store')
-      .setDescription('This server currently has no custom items available for purchase.')
-      .addFields(
-        { name: 'Get Started', value: 'Ask an administrator to add items using `/add-item`', inline: false },
-        { name: 'Available Commands', value: '`/add-item` - Add new items (Admin only)\n`/view-items` - Manage items (Admin only)', inline: false }
-      )
-      .setColor(0x6C7B7F)
-      .setTimestamp();
-
-    embeds.push(emptyServerEmbed);
-  }
-
-    await interaction.editReply({ embeds: embeds });
+    const payload = await buildStorePayload('economy', userId, guildId, globalItems, guildItems);
+    await interaction.editReply(payload);
   } catch (error) {
     console.error('❌ Store command error:', error);
-
-    const errorEmbed = new EmbedBuilder()
-      .setTitle('Store Error')
-      .setDescription('An error occurred while loading the store. Please try again.')
-      .setColor(0xFF6B6B)
-      .setTimestamp();
-
-    await interaction.editReply({ embeds: [errorEmbed] });
+    await interaction.editReply({ embeds: [
+      new EmbedBuilder().setTitle('Store Error').setDescription('An error occurred while loading the store. Please try again.').setColor(0xFF6B6B)
+    ]});
   }
 }
 
@@ -4804,19 +4922,19 @@ async function handleComponentInteraction(interaction) {
     const owned = userArtefacts.filter(a => a === artefact).length;
     const alreadyOffered = offer.artefacts.filter(a => a === artefact).length;
     if (alreadyOffered >= owned) {
-      // Defer + refresh picker so the now-exhausted item disappears from the dropdown
-      await interaction.deferUpdate();
-      await refreshTradePicker(trade, userId);
-      return;
+      // Re-render the picker so the now-exhausted item disappears from the dropdown
+      return await interaction.update(buildTradePickerPayload(trade, userId));
     }
 
     offer.artefacts.push(artefact);
     if (isInitiator) trade.initiatorReady = false;
     else trade.recipientReady = false;
 
-    await interaction.deferUpdate();
+    // Update the picker (the message this select sits on) via the current
+    // interaction — far more reliable than editing via a stored Message ref.
+    await interaction.update(buildTradePickerPayload(trade, userId));
+    // Independently refresh the public trade message
     await refreshTradeMessage(trade);
-    await refreshTradePicker(trade, userId);
 
   } else if (customId.startsWith('trade_remove_artefact_select_')) {
     const tradeId = customId.replace('trade_remove_artefact_select_', '');
@@ -4836,17 +4954,14 @@ async function handleComponentInteraction(interaction) {
 
     const idx = offer.artefacts.indexOf(artefact);
     if (idx === -1) {
-      await interaction.deferUpdate();
-      await refreshTradePicker(trade, userId);
-      return;
+      return await interaction.update(buildTradePickerPayload(trade, userId));
     }
     offer.artefacts.splice(idx, 1);
     if (isInitiator) trade.initiatorReady = false;
     else trade.recipientReady = false;
 
-    await interaction.deferUpdate();
+    await interaction.update(buildTradePickerPayload(trade, userId));
     await refreshTradeMessage(trade);
-    await refreshTradePicker(trade, userId);
 
   } else if (customId.startsWith('trade_picker_search_')) {
     const tradeId = customId.replace('trade_picker_search_', '');
@@ -4884,8 +4999,7 @@ async function handleComponentInteraction(interaction) {
     if (!picker) return await interaction.deferUpdate();
     picker.query = '';
     picker.page = 0;
-    await interaction.deferUpdate();
-    await refreshTradePicker(trade, userId);
+    await interaction.update(buildTradePickerPayload(trade, userId));
 
   } else if (customId.startsWith('trade_picker_prev_')) {
     const tradeId = customId.replace('trade_picker_prev_', '');
@@ -4894,8 +5008,7 @@ async function handleComponentInteraction(interaction) {
     const picker = trade && trade.pickers && trade.pickers[userId];
     if (!picker) return await interaction.deferUpdate();
     picker.page = Math.max(0, (picker.page || 0) - 1);
-    await interaction.deferUpdate();
-    await refreshTradePicker(trade, userId);
+    await interaction.update(buildTradePickerPayload(trade, userId));
 
   } else if (customId.startsWith('trade_picker_next_')) {
     const tradeId = customId.replace('trade_picker_next_', '');
@@ -4903,9 +5016,9 @@ async function handleComponentInteraction(interaction) {
     const userId = interaction.user.id;
     const picker = trade && trade.pickers && trade.pickers[userId];
     if (!picker) return await interaction.deferUpdate();
+    // Optimistically increment; buildTradePickerComponents clamps to last page.
     picker.page = (picker.page || 0) + 1;
-    await interaction.deferUpdate();
-    await refreshTradePicker(trade, userId);
+    await interaction.update(buildTradePickerPayload(trade, userId));
 
   } else if (customId.startsWith('convert_accept_')) {
     const userId = customId.replace('convert_accept_', '');
@@ -4982,6 +5095,23 @@ async function handleComponentInteraction(interaction) {
     const embed = buildCollectionPage(user, newPage);
     const components = buildCollectionButtons(ownerId, newPage);
     await interaction.update({ embeds: [embed], components });
+
+  } else if (customId === 'store_tab_economy' || customId === 'store_tab_minigame') {
+    const tab = customId === 'store_tab_economy' ? 'economy' : 'minigame';
+    const guildId = interaction.guildId;
+    const userId = interaction.user.id;
+    if (!guildId) return await interaction.deferUpdate();
+    const [globalItems, guildItemsDoc] = await Promise.all([
+      getGlobalItems(),
+      guildItemsCollection.findOne({ _id: guildId })
+    ]);
+    const guildItems = guildItemsDoc?.items || {};
+    const payload = await buildStorePayload(tab, userId, guildId, globalItems, guildItems);
+    await interaction.update(payload);
+
+  } else if (customId.startsWith('fish_reel_')) {
+    const sessionId = customId.replace('fish_reel_', '');
+    await handleReelIn(interaction, sessionId);
 
   }
 
@@ -5132,35 +5262,48 @@ function buildTradePickerEmbed(picker, filteredCount, totalEntries) {
     .setFooter({ text: 'This menu only you can see. Pick as many times as you want.' });
 }
 
-// Helper: refresh an ephemeral picker message after offer change
-async function refreshTradePicker(trade, userId) {
-  const picker = trade.pickers && trade.pickers[userId];
-  if (!picker || !picker.message) return;
-
-  let entries;
+// Compute the entries list for a picker (add = available inventory minus what's
+// already in the offer; remove = what's currently in the offer).
+function computeTradePickerEntries(trade, userId, picker) {
   if (picker.mode === 'add') {
     const userArtefacts = userData[userId] && userData[userId].artefacts ? userData[userId].artefacts : [];
     const offer = trade.initiator === userId ? trade.initiatorOffer : trade.recipientOffer;
     const ownedCounts = {};
     userArtefacts.forEach(n => { ownedCounts[n] = (ownedCounts[n] || 0) + 1; });
     offer.artefacts.forEach(n => { if (ownedCounts[n]) ownedCounts[n] -= 1; });
-    entries = Object.entries(ownedCounts).filter(([, c]) => c > 0);
-  } else {
-    const offer = trade.initiator === userId ? trade.initiatorOffer : trade.recipientOffer;
-    const offerCounts = {};
-    offer.artefacts.forEach(n => { offerCounts[n] = (offerCounts[n] || 0) + 1; });
-    entries = Object.entries(offerCounts);
+    return Object.entries(ownedCounts).filter(([, c]) => c > 0);
   }
+  const offer = trade.initiator === userId ? trade.initiatorOffer : trade.recipientOffer;
+  const offerCounts = {};
+  offer.artefacts.forEach(n => { offerCounts[n] = (offerCounts[n] || 0) + 1; });
+  return Object.entries(offerCounts);
+}
 
+// Build the full {embeds, components} payload for the ephemeral picker message
+// in its current state. Used by all picker interactions to update via
+// `interaction.update(buildTradePickerPayload(...))` — the canonical pattern
+// for ephemeral messages, which avoids the unreliable stored-Message.edit()
+// path that previously left Prev/Next looking broken.
+function buildTradePickerPayload(trade, userId) {
+  const picker = trade.pickers && trade.pickers[userId];
+  if (!picker) return { embeds: [], components: [] };
+  const entries = computeTradePickerEntries(trade, userId, picker);
   const tradeId = `${trade.initiator}-${trade.recipient}`;
-  const valueKey = picker.mode === 'add' ? 'name' : 'name'; // both use names now
-  const { rows, filteredCount } = buildTradePickerComponents(tradeId, picker, entries, valueKey);
+  const { rows, filteredCount } = buildTradePickerComponents(tradeId, picker, entries, 'name');
+  return {
+    embeds: [buildTradePickerEmbed(picker, filteredCount, entries.length)],
+    components: rows
+  };
+}
 
+// Legacy: refresh an ephemeral picker via stored Message reference. Only kept
+// for code paths that don't have access to the current interaction (none today,
+// but it's a safe fallback). Prefer interaction.update(buildTradePickerPayload).
+async function refreshTradePicker(trade, userId) {
+  const picker = trade.pickers && trade.pickers[userId];
+  if (!picker || !picker.message) return;
   try {
-    await picker.message.edit({
-      embeds: [buildTradePickerEmbed(picker, filteredCount, entries.length)],
-      components: rows
-    });
+    await picker.message.edit(buildTradePickerPayload(trade, userId));
   } catch (e) {
     // Picker message may have been dismissed by the user — ignore
   }
@@ -5628,6 +5771,225 @@ async function handleTradeCancel(interaction, customId) {
 
   // Best-effort: clean up any open ephemeral pickers
   await closeTradePickers(trade, 'Trade Cancelled', 'This trade was cancelled.', 0xFF9F43);
+}
+
+// === FISHING FUNCTIONS ===
+
+async function handleFishCommand(interaction, userId) {
+  await getUser(userId);
+  const now = Date.now();
+
+  if (!cooldowns.fish) cooldowns.fish = {};
+  if (cooldowns.fish[userId] && (now - cooldowns.fish[userId]) < FISH_COOLDOWN) {
+    const timeLeft = FISH_COOLDOWN - (now - cooldowns.fish[userId]);
+    const minutes = Math.floor(timeLeft / 60000);
+    const seconds = Math.floor((timeLeft % 60000) / 1000);
+    return await interaction.editReply({ embeds: [
+      new EmbedBuilder()
+        .setTitle('🎣 Fishing Cooldown')
+        .setDescription('You need to let the fish recover before casting again.')
+        .addFields(
+          { name: 'Time Remaining', value: `${minutes}m ${seconds}s`, inline: true },
+          { name: 'Cooldown', value: '20 minutes', inline: true }
+        )
+        .setColor(0xFF9F43)
+        .setTimestamp()
+    ]});
+  }
+
+  const userItems = userData[userId].items || [];
+  const baitOrder = ['Gilded Hook', 'Salted Lure', 'Cricket', 'Earthworm'];
+  let baitUsed = null;
+
+  const chosenBait = (interaction.options.getString('bait') || '').trim();
+  if (chosenBait) {
+    const matchedBait = Object.keys(BAIT_CATALOG).find(b => b.toLowerCase() === chosenBait.toLowerCase());
+    if (!matchedBait) {
+      return await interaction.editReply({ embeds: [
+        new EmbedBuilder()
+          .setTitle('Unknown Bait')
+          .setDescription(`"${chosenBait}" isn't a recognised bait type.`)
+          .addFields({ name: 'Available Baits', value: Object.values(BAIT_CATALOG).map(b => `${b.emoji} ${b.name}`).join('\n'), inline: false })
+          .setColor(0xFF6B6B)
+      ]});
+    }
+    if (!userItems.includes(matchedBait)) {
+      return await interaction.editReply({ embeds: [
+        new EmbedBuilder()
+          .setTitle(`You don't have any ${matchedBait}`)
+          .setDescription(`Buy bait from the **Minigame Supplies** tab in \`/store\`, then come back.`)
+          .setColor(0xFF6B6B)
+      ]});
+    }
+    baitUsed = matchedBait;
+  } else {
+    for (const b of baitOrder) {
+      if (userItems.includes(b)) { baitUsed = b; break; }
+    }
+  }
+
+  if (!baitUsed) {
+    return await interaction.editReply({ embeds: [
+      new EmbedBuilder()
+        .setTitle('🎣 No Bait!')
+        .setDescription('You need bait to go fishing.\n\nHead to `/store` → **Minigame Supplies** to pick some up.')
+        .addFields({ name: 'Bait Options', value: Object.values(BAIT_CATALOG).map(b => `${b.emoji} **${b.name}** — $${b.basePrice.toLocaleString()}`).join('\n'), inline: false })
+        .setColor(0xFF9F43)
+        .setTimestamp()
+    ]});
+  }
+
+  // Consume one bait
+  const baitIdx = userData[userId].items.indexOf(baitUsed);
+  userData[userId].items.splice(baitIdx, 1);
+
+  // Roll the catch (hidden from player for now — revealed when they reel in)
+  const tier = rollFishTier(baitUsed);
+  const fish = pickFish(tier);
+  const cashValue = rollFishValue(fish);
+
+  // Roll artefact bonus (uncommon: 10%, rare: 40%, legendary: 100%)
+  const artefactChances = { junk: 0, common: 0, uncommon: 0.10, rare: 0.40, legendary: 1.0 };
+  let artefactDrop = null;
+  if (Math.random() < (artefactChances[tier] || 0)) {
+    const currentRarities = await getModifiedArtefactChances();
+    const totalChance = currentRarities.reduce((sum, r) => sum + r.chance, 0);
+    let r = Math.random() * totalChance;
+    let selectedRarity = currentRarities[0];
+    for (const rarity of currentRarities) {
+      r -= rarity.chance;
+      if (r <= 0) { selectedRarity = rarity; break; }
+    }
+    if (selectedRarity && selectedRarity.items.length > 0) {
+      artefactDrop = selectedRarity.items[Math.floor(Math.random() * selectedRarity.items.length)];
+    }
+  }
+
+  // Store session so the Reel In button can retrieve it
+  const sessionId = `${userId}-${now}`;
+  global.activeFishSessions[sessionId] = { userId, tier, fish, cashValue, baitUsed, artefactDrop, expiresAt: now + 90000 };
+
+  // Set cooldown immediately (bait already consumed, so prevent double-cast)
+  cooldowns.fish[userId] = now;
+  await saveUserData();
+  await saveCooldowns();
+
+  // Hint at the catch without revealing it
+  const tierFlavors = {
+    junk:      { text: 'The line goes slack almost immediately... something\'s down there, but it feels wrong.', hint: 'Whatever is on the hook feels oddly light.', color: 0x95A5A6 },
+    common:    { text: 'A small tug. Something is nibbling at the hook.',                                       hint: 'Feels light — probably a smaller one.',     color: 0x74B9FF },
+    uncommon:  { text: 'A firm, steady pull! Something is fighting back!',                                      hint: 'This one has some weight to it.',            color: 0x6C5CE7 },
+    rare:      { text: 'WHOA — the rod bends hard! This is a massive catch!',                                   hint: 'Something very powerful is down there.',    color: 0xFDCB6E },
+    legendary: { text: 'THE ROD SNAPS TAUT — THE WATER ERUPTS — SOMETHING ENORMOUS IS ON THE LINE!',            hint: '...You\'ve never felt a pull like this.',   color: 0xFF7675 }
+  };
+  const flavor = tierFlavors[tier];
+  const baitInfo = BAIT_CATALOG[baitUsed];
+
+  const castEmbed = new EmbedBuilder()
+    .setTitle('🎣 Line Cast...')
+    .setDescription(`You lower a **${baitInfo.emoji} ${baitUsed}** into the murky water.\n\n*${flavor.text}*`)
+    .addFields({ name: 'What You Feel', value: flavor.hint, inline: false })
+    .setColor(flavor.color)
+    .setFooter({ text: `Session expires in 90 seconds • Bait used: ${baitUsed}` })
+    .setTimestamp();
+
+  const reelRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`fish_reel_${sessionId}`)
+      .setLabel('🎣 Reel In!')
+      .setStyle(ButtonStyle.Primary)
+  );
+
+  await interaction.editReply({ embeds: [castEmbed], components: [reelRow] });
+
+  // Auto-expire after 90 seconds
+  setTimeout(async () => {
+    if (!global.activeFishSessions[sessionId]) return;
+    delete global.activeFishSessions[sessionId];
+    try {
+      await interaction.editReply({
+        embeds: [
+          new EmbedBuilder()
+            .setTitle('🎣 The Fish Got Away...')
+            .setDescription('You waited too long to reel in — the fish shook the hook and escaped.')
+            .setColor(0x95A5A6)
+            .setTimestamp()
+        ],
+        components: []
+      });
+    } catch (e) {}
+  }, 90000);
+}
+
+async function handleReelIn(interaction, sessionId) {
+  const session = global.activeFishSessions[sessionId];
+
+  if (!session) {
+    return await interaction.update({
+      embeds: [
+        new EmbedBuilder()
+          .setTitle('Session Expired')
+          .setDescription('This fishing session has already ended. Cast your line again with `/fish`!')
+          .setColor(0x95A5A6)
+          .setTimestamp()
+      ],
+      components: []
+    });
+  }
+
+  if (interaction.user.id !== session.userId) {
+    return await interaction.reply({ content: 'That\'s not your fishing line!', ephemeral: true });
+  }
+
+  delete global.activeFishSessions[sessionId];
+
+  const { tier, fish, cashValue, baitUsed, artefactDrop, userId } = session;
+
+  // Award rewards
+  userData[userId].cash += cashValue;
+  if (artefactDrop) {
+    if (!userData[userId].artefacts) userData[userId].artefacts = [];
+    if (!userData[userId].discoveredArtefacts) userData[userId].discoveredArtefacts = [];
+    userData[userId].artefacts.push(artefactDrop);
+    if (!userData[userId].discoveredArtefacts.includes(artefactDrop)) {
+      userData[userId].discoveredArtefacts.push(artefactDrop);
+    }
+  }
+  await saveUserData();
+
+  const tierColors  = { junk: 0x95A5A6, common: 0x74B9FF, uncommon: 0x6C5CE7, rare: 0xFDCB6E, legendary: 0xFF7675 };
+  const tierLabels  = { junk: 'Junk', common: 'Common', uncommon: 'Uncommon', rare: 'Rare', legendary: '✨ LEGENDARY' };
+  const tierTitles  = {
+    junk:      `You pulled out ${fish.emoji} ${fish.name}...`,
+    common:    `Caught a ${fish.emoji} ${fish.name}!`,
+    uncommon:  `Nice catch! ${fish.emoji} ${fish.name}!`,
+    rare:      `Incredible! ${fish.emoji} ${fish.name}!`,
+    legendary: `🌊 LEGENDARY CATCH! 🌊\n${fish.emoji} ${fish.name}`
+  };
+
+  const baitInfo = BAIT_CATALOG[baitUsed];
+  const fields = [
+    { name: 'Rarity',    value: tierLabels[tier],                                        inline: true },
+    { name: 'Bait Used', value: `${baitInfo?.emoji || ''} ${baitUsed}`,                  inline: true }
+  ];
+  if (cashValue > 0) {
+    fields.push({ name: 'Cash Earned', value: `$${cashValue.toLocaleString()}`, inline: true });
+  } else {
+    fields.push({ name: 'Cash Earned', value: 'Nothing — classic junk.', inline: true });
+  }
+  if (artefactDrop) {
+    fields.push({ name: '🏺 Bonus Find!', value: `Embedded in the catch: **${artefactDrop}**\nAdded to your artefact collection!`, inline: false });
+  }
+
+  const revealEmbed = new EmbedBuilder()
+    .setTitle(tierTitles[tier])
+    .setDescription(`*${fish.description}*`)
+    .addFields(...fields)
+    .setColor(tierColors[tier])
+    .setFooter({ text: 'Fishing cooldown: 20 min • /store → Minigame Supplies for more bait' })
+    .setTimestamp();
+
+  await interaction.update({ embeds: [revealEmbed], components: [] });
 }
 
 // === MARBLE GAME FUNCTIONS ===
@@ -7556,6 +7918,7 @@ async function handleResetCooldownsCommand(interaction) {
     if (cooldowns.scavenge && cooldowns.scavenge[userId]) delete cooldowns.scavenge[userId];
     if (cooldowns.labor && cooldowns.labor[userId]) delete cooldowns.labor[userId];
     if (cooldowns.steal && cooldowns.steal[userId]) delete cooldowns.steal[userId];
+    if (cooldowns.fish && cooldowns.fish[userId]) delete cooldowns.fish[userId];
 
     await saveCooldowns();
 
@@ -7564,7 +7927,7 @@ async function handleResetCooldownsCommand(interaction) {
       .setDescription(`Successfully reset all cooldowns for ${targetUser.displayName}!`)
       .addFields(
         { name: 'Target User', value: `<@${userId}>`, inline: true },
-        { name: 'Cooldowns Reset', value: 'Scavenge, Labor, Steal', inline: true },
+        { name: 'Cooldowns Reset', value: 'Scavenge, Labor, Steal, Fish', inline: true },
         { name: 'Developer', value: `<@${interaction.user.id}>`, inline: true }
       )
       .setColor(0x51CF66)
@@ -7577,6 +7940,7 @@ async function handleResetCooldownsCommand(interaction) {
     cooldowns.scavenge = {};
     cooldowns.labor = {};
     cooldowns.steal = {};
+    cooldowns.fish = {};
 
     await saveCooldowns();
 
@@ -7585,7 +7949,7 @@ async function handleResetCooldownsCommand(interaction) {
       .setDescription('Successfully reset ALL cooldowns for ALL users globally!')
       .addFields(
         { name: 'Scope', value: 'All Users Worldwide', inline: true },
-        { name: 'Cooldowns Reset', value: 'Scavenge, Labor, Steal', inline: true },
+        { name: 'Cooldowns Reset', value: 'Scavenge, Labor, Steal, Fish', inline: true },
         { name: 'Developer', value: `<@${interaction.user.id}>`, inline: true }
       )
       .setColor(0x51CF66)
