@@ -651,12 +651,18 @@ function getArtefactTier(name) {
 }
 
 function calcArtefactSellValue(name, rarity) {
-  const isShiny = name.startsWith('✨ SHINY ') && name.endsWith(' ✨');
   const tier = getArtefactTier(name);
   const base = rarity ? rarity.sell : 100;
   const mult = getMarketMultiplier(name);
-  const raw = Math.floor(base * TIER_MULTIPLIERS[tier] * mult);
-  return isShiny ? raw * 20 : raw;
+  return Math.floor(base * TIER_MULTIPLIERS[tier] * mult);
+}
+
+// Trade-only value: includes the 20× shiny premium displayed in trade embeds/pickers.
+// Do NOT use this for /sell, /inventory, or scavenge — those apply their own shiny bonus.
+function calcArtefactTradeValue(name, rarity) {
+  const isShiny = name.startsWith('✨ SHINY ') && name.endsWith(' ✨');
+  const base = calcArtefactSellValue(name, rarity);
+  return isShiny ? base * 20 : base;
 }
 
 function calcArtefactValue(name, rarity) {
@@ -5317,13 +5323,14 @@ function buildTradePickerComponents(tradeId, picker, entries, valueKey) {
     const options = pageEntries.map(([name, count]) => {
       const rarity = getRarityByArtefact(name);
       const tier = getArtefactTier(name);
-      const val = calcArtefactSellValue(name, rarity);
+      const val = calcArtefactTradeValue(name, rarity);
+      const isShiny = name.startsWith('✨ SHINY ') && name.endsWith(' ✨');
       // Discord caps select-option `value` at 100 chars; artefact names should
       // already be well under that, but truncate defensively just in case.
       const safeValue = name.length > 100 ? name.slice(0, 100) : name;
       return {
         label: name.length > 100 ? name.slice(0, 97) + '...' : name,
-        description: `${rarity ? rarity.name : 'Unknown'} T${tier} — ~${val.toLocaleString()} (${count} ${picker.mode === 'add' ? 'available' : 'in offer'})`,
+        description: `${rarity ? rarity.name : 'Unknown'} T${tier}${isShiny ? ' ✨20×' : ''} — ~$${val.toLocaleString()} (${count} ${picker.mode === 'add' ? 'available' : 'in offer'})`,
         value: safeValue
       };
     });
@@ -5447,7 +5454,7 @@ function calcOfferValue(offer) {
   let total = offer.cash;
   for (const name of offer.artefacts) {
     const rarity = getRarityByArtefact(name);
-    total += calcArtefactSellValue(name, rarity);
+    total += calcArtefactTradeValue(name, rarity);
   }
   return total;
 }
@@ -5468,7 +5475,7 @@ function formatOfferDetailed(offer) {
     const count = counts[name];
     const rarity = getRarityByArtefact(name);
     const tier = getArtefactTier(name);
-    const val = calcArtefactSellValue(name, rarity);
+    const val = calcArtefactTradeValue(name, rarity);
     const rarityName = rarity ? rarity.name : 'Unknown';
     const isShiny = name.startsWith('✨ SHINY ') && name.endsWith(' ✨');
     const shinyTag = isShiny ? ' ✨20×' : '';
