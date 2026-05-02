@@ -651,10 +651,12 @@ function getArtefactTier(name) {
 }
 
 function calcArtefactSellValue(name, rarity) {
+  const isShiny = name.startsWith('✨ SHINY ') && name.endsWith(' ✨');
   const tier = getArtefactTier(name);
   const base = rarity ? rarity.sell : 100;
   const mult = getMarketMultiplier(name);
-  return Math.floor(base * TIER_MULTIPLIERS[tier] * mult);
+  const raw = Math.floor(base * TIER_MULTIPLIERS[tier] * mult);
+  return isShiny ? raw * 20 : raw;
 }
 
 function calcArtefactValue(name, rarity) {
@@ -1879,6 +1881,122 @@ client.on('interactionCreate', async interaction => {
       // Modal submitted from a button on the picker — interaction.update edits
       // that originating ephemeral message via this interaction's webhook,
       // which is more reliable than the legacy stored-Message.edit path.
+      await interaction.update(buildTradePickerPayload(trade, userId));
+      return;
+    }
+
+    if (customId.startsWith('trade_cash_modal_')) {
+      const tradeId = customId.replace('trade_cash_modal_', '');
+      const trade = global.activeTrades[tradeId];
+      if (!trade) {
+        return await interaction.reply({ content: '❌ Trade session not found!', ephemeral: true });
+      }
+      const userId = interaction.user.id;
+      if (userId !== trade.initiator && userId !== trade.recipient) {
+        return await interaction.reply({ content: '❌ You are not part of this trade.', ephemeral: true });
+      }
+      const isInitiator = trade.initiator === userId;
+      if ((isInitiator && trade.initiatorReady) || (!isInitiator && trade.recipientReady)) {
+        return await interaction.reply({ content: '❌ You cannot modify your offer after marking ready!', ephemeral: true });
+      }
+      const rawInput = (interaction.fields.getTextInputValue('cash_amount') || '').trim();
+      const cashAmount = parseCashInput(rawInput);
+      if (isNaN(cashAmount) || cashAmount < 0) {
+        return await interaction.reply({ content: '❌ Invalid amount. Use a number like `500`, `1.5k`, or `2m`.', ephemeral: true });
+      }
+      const userRecord = userData[userId] || { cash: 0 };
+      if (cashAmount > (userRecord.cash || 0)) {
+        return await interaction.reply({
+          content: `❌ You only have **$${(userRecord.cash || 0).toLocaleString()}** available!`,
+          ephemeral: true
+        });
+      }
+      if (isInitiator) {
+        trade.initiatorOffer.cash = cashAmount;
+        trade.initiatorReady = false;
+      } else {
+        trade.recipientOffer.cash = cashAmount;
+        trade.recipientReady = false;
+      }
+      const tradeEmbed = createTradeEmbed(trade, trade.initiator, trade.recipient);
+      const components = createTradeComponents(tradeId);
+      await interaction.update({ embeds: [tradeEmbed], components });
+      return;
+    }
+
+    if (customId.startsWith('trade_artefact_qty_modal_')) {
+      const tradeId = customId.replace('trade_artefact_qty_modal_', '');
+      const trade = global.activeTrades[tradeId];
+      if (!trade) {
+        return await interaction.reply({ content: '❌ Trade session not found!', ephemeral: true });
+      }
+      const userId = interaction.user.id;
+      const picker = trade.pickers && trade.pickers[userId];
+      if (!picker || !picker.pendingAdd) {
+        return await interaction.reply({ content: '❌ Picker session expired — please click Add Artefact again.', ephemeral: true });
+      }
+      const artefact = picker.pendingAdd;
+      picker.pendingAdd = null;
+      const rawQty = (interaction.fields.getTextInputValue('artefact_qty') || '').trim();
+      const qty = parseInt(rawQty, 10);
+      const userArtefacts = (userData[userId] && userData[userId].artefacts) || [];
+      const offer = trade.initiator === userId ? trade.initiatorOffer : trade.recipientOffer;
+      const owned = userArtefacts.filter(a => a === artefact).length;
+      const alreadyOffered = offer.artefacts.filter(a => a === artefact).length;
+      const available = owned - alreadyOffered;
+      if (isNaN(qty) || qty < 1) {
+        return await interaction.reply({ content: '❌ Please enter a number of 1 or more.', ephemeral: true });
+      }
+      if (qty > available) {
+        return await interaction.reply({
+          content: `❌ You only have **${available}** copy(ies) of **${artefact}** available to add.`,
+          ephemeral: true
+        });
+      }
+      for (let i = 0; i < qty; i++) offer.artefacts.push(artefact);
+      const isInitiator = trade.initiator === userId;
+      if (isInitiator) trade.initiatorReady = false;
+      else trade.recipientReady = false;
+      await refreshTradeMessage(trade);
+      await interaction.update(buildTradePickerPayload(trade, userId));
+      return;
+    }
+
+    if (customId.startsWith('trade_remove_artefact_qty_modal_')) {
+      const tradeId = customId.replace('trade_remove_artefact_qty_modal_', '');
+      const trade = global.activeTrades[tradeId];
+      if (!trade) {
+        return await interaction.reply({ content: '❌ Trade session not found!', ephemeral: true });
+      }
+      const userId = interaction.user.id;
+      const picker = trade.pickers && trade.pickers[userId];
+      if (!picker || !picker.pendingRemove) {
+        return await interaction.reply({ content: '❌ Picker session expired — please click Remove Artefact again.', ephemeral: true });
+      }
+      const artefact = picker.pendingRemove;
+      picker.pendingRemove = null;
+      const rawQty = (interaction.fields.getTextInputValue('remove_qty') || '').trim();
+      const qty = parseInt(rawQty, 10);
+      const offer = trade.initiator === userId ? trade.initiatorOffer : trade.recipientOffer;
+      const countInOffer = offer.artefacts.filter(a => a === artefact).length;
+      if (isNaN(qty) || qty < 1) {
+        return await interaction.reply({ content: '❌ Please enter a number of 1 or more.', ephemeral: true });
+      }
+      if (qty > countInOffer) {
+        return await interaction.reply({
+          content: `❌ You only have **${countInOffer}** copy(ies) of **${artefact}** in your offer.`,
+          ephemeral: true
+        });
+      }
+      let removed = 0;
+      offer.artefacts = offer.artefacts.filter(a => {
+        if (a === artefact && removed < qty) { removed++; return false; }
+        return true;
+      });
+      const isInitiator = trade.initiator === userId;
+      if (isInitiator) trade.initiatorReady = false;
+      else trade.recipientReady = false;
+      await refreshTradeMessage(trade);
       await interaction.update(buildTradePickerPayload(trade, userId));
       return;
     }
@@ -4863,44 +4981,6 @@ async function handleComponentInteraction(interaction) {
   } else if (customId.startsWith('trade_cancel_')) {
     await handleTradeCancel(interaction, customId);
 
-  } else if (customId.startsWith('trade_cash_modal_')) {
-    const tradeId = customId.replace('trade_cash_modal_', '');
-    const trade = global.activeTrades[tradeId];
-    if (!trade) {
-      return await interaction.reply({ content: '❌ Trade session not found!', ephemeral: true });
-    }
-
-    const userId = interaction.user.id;
-    if (userId !== trade.initiator && userId !== trade.recipient) {
-      return await interaction.reply({ content: 'You are not part of this trade.', ephemeral: true });
-    }
-
-    const cashAmount = parseInt(interaction.fields.getTextInputValue('cash_amount'));
-
-    if (isNaN(cashAmount) || cashAmount <= 0) {
-      return await interaction.reply({ content: 'Please enter a valid cash amount!', ephemeral: true });
-    }
-
-    const userRecord = userData[userId] || { cash: 0 };
-    if (cashAmount > (userRecord.cash || 0)) {
-      return await interaction.reply({ content: `You only have $${(userRecord.cash || 0).toLocaleString()} available!`, ephemeral: true });
-    }
-
-    const isInitiator = trade.initiator === userId;
-    if (isInitiator) {
-      trade.initiatorOffer.cash = cashAmount;
-      trade.initiatorReady = false;
-    } else {
-      trade.recipientOffer.cash = cashAmount;
-      trade.recipientReady = false;
-    }
-
-    const tradeEmbed = createTradeEmbed(trade, trade.initiator, trade.recipient);
-    // Components must reflect the public message, not just one viewer's state.
-    const components = createTradeComponents(tradeId);
-
-    await interaction.update({ embeds: [tradeEmbed], components });
-
   } else if (customId.startsWith('trade_artefact_select_')) {
     const tradeId = customId.replace('trade_artefact_select_', '');
     const trade = global.activeTrades[tradeId];
@@ -4921,20 +5001,38 @@ async function handleComponentInteraction(interaction) {
     // Validate count: how many do they own vs how many already in offer?
     const owned = userArtefacts.filter(a => a === artefact).length;
     const alreadyOffered = offer.artefacts.filter(a => a === artefact).length;
-    if (alreadyOffered >= owned) {
+    const available = owned - alreadyOffered;
+    if (available <= 0) {
       // Re-render the picker so the now-exhausted item disappears from the dropdown
       return await interaction.update(buildTradePickerPayload(trade, userId));
     }
 
-    offer.artefacts.push(artefact);
-    if (isInitiator) trade.initiatorReady = false;
-    else trade.recipientReady = false;
-
-    // Update the picker (the message this select sits on) via the current
-    // interaction — far more reliable than editing via a stored Message ref.
-    await interaction.update(buildTradePickerPayload(trade, userId));
-    // Independently refresh the public trade message
-    await refreshTradeMessage(trade);
+    if (available === 1) {
+      // Only one available — add it directly and refresh
+      offer.artefacts.push(artefact);
+      if (isInitiator) trade.initiatorReady = false;
+      else trade.recipientReady = false;
+      await interaction.update(buildTradePickerPayload(trade, userId));
+      await refreshTradeMessage(trade);
+    } else {
+      // Multiple available — ask how many via a modal
+      if (!trade.pickers) trade.pickers = {};
+      if (!trade.pickers[userId]) trade.pickers[userId] = { mode: 'add', query: '', page: 0, message: null };
+      trade.pickers[userId].pendingAdd = artefact;
+      const qtyModal = new ModalBuilder()
+        .setCustomId(`trade_artefact_qty_modal_${tradeId}`)
+        .setTitle('How many to add?');
+      const qtyInput = new TextInputBuilder()
+        .setCustomId('artefact_qty')
+        .setLabel(`How many "${artefact.length > 30 ? artefact.slice(0, 27) + '...' : artefact}" to add?`)
+        .setStyle(TextInputStyle.Short)
+        .setPlaceholder(`1 – ${available} available`)
+        .setValue('1')
+        .setRequired(true)
+        .setMaxLength(4);
+      qtyModal.addComponents(new ActionRowBuilder().addComponents(qtyInput));
+      await interaction.showModal(qtyModal);
+    }
 
   } else if (customId.startsWith('trade_remove_artefact_select_')) {
     const tradeId = customId.replace('trade_remove_artefact_select_', '');
@@ -4952,16 +5050,37 @@ async function handleComponentInteraction(interaction) {
     const isInitiator = trade.initiator === userId;
     const offer = isInitiator ? trade.initiatorOffer : trade.recipientOffer;
 
-    const idx = offer.artefacts.indexOf(artefact);
-    if (idx === -1) {
+    const countInOffer = offer.artefacts.filter(a => a === artefact).length;
+    if (countInOffer === 0) {
       return await interaction.update(buildTradePickerPayload(trade, userId));
     }
-    offer.artefacts.splice(idx, 1);
-    if (isInitiator) trade.initiatorReady = false;
-    else trade.recipientReady = false;
 
-    await interaction.update(buildTradePickerPayload(trade, userId));
-    await refreshTradeMessage(trade);
+    if (countInOffer === 1) {
+      // Only one — remove directly
+      offer.artefacts.splice(offer.artefacts.indexOf(artefact), 1);
+      if (isInitiator) trade.initiatorReady = false;
+      else trade.recipientReady = false;
+      await interaction.update(buildTradePickerPayload(trade, userId));
+      await refreshTradeMessage(trade);
+    } else {
+      // Multiple — ask how many to remove via a modal
+      if (!trade.pickers) trade.pickers = {};
+      if (!trade.pickers[userId]) trade.pickers[userId] = { mode: 'remove', query: '', page: 0, message: null };
+      trade.pickers[userId].pendingRemove = artefact;
+      const removeModal = new ModalBuilder()
+        .setCustomId(`trade_remove_artefact_qty_modal_${tradeId}`)
+        .setTitle('How many to remove?');
+      const removeInput = new TextInputBuilder()
+        .setCustomId('remove_qty')
+        .setLabel(`Remove how many "${artefact.length > 28 ? artefact.slice(0, 25) + '...' : artefact}"?`)
+        .setStyle(TextInputStyle.Short)
+        .setPlaceholder(`1 – ${countInOffer} in your offer`)
+        .setValue('1')
+        .setRequired(true)
+        .setMaxLength(4);
+      removeModal.addComponents(new ActionRowBuilder().addComponents(removeInput));
+      await interaction.showModal(removeModal);
+    }
 
   } else if (customId.startsWith('trade_picker_search_')) {
     const tradeId = customId.replace('trade_picker_search_', '');
@@ -5157,6 +5276,21 @@ async function refreshTradeMessage(trade) {
   }
 }
 
+// Parse user-typed cash amounts: "1000", "1,000", "$1k", "2.5m", etc.
+function parseCashInput(raw) {
+  const s = (raw || '').replace(/[$,\s]/g, '').toLowerCase();
+  if (!s) return 0;
+  if (s.endsWith('m')) {
+    const n = parseFloat(s);
+    return isNaN(n) ? NaN : Math.floor(n * 1_000_000);
+  }
+  if (s.endsWith('k')) {
+    const n = parseFloat(s);
+    return isNaN(n) ? NaN : Math.floor(n * 1_000);
+  }
+  return parseInt(s, 10);
+}
+
 // Helper: case-insensitive match for trade artefact picker (mirrors mass-sell)
 function tradeMatchesQuery(name, query) {
   if (!query) return true;
@@ -5320,14 +5454,44 @@ function calcOfferValue(offer) {
 
 function formatOfferDetailed(offer) {
   const lines = [];
-  if (offer.cash > 0) lines.push(`Cash — $${offer.cash.toLocaleString()}`);
+  if (offer.cash > 0) lines.push(`💰 **Cash** — $${offer.cash.toLocaleString()}`);
+
+  // Group artefacts by name preserving insertion order
+  const counts = {};
+  const order = [];
   for (const name of offer.artefacts) {
+    if (!counts[name]) { counts[name] = 0; order.push(name); }
+    counts[name]++;
+  }
+
+  for (const name of order) {
+    const count = counts[name];
     const rarity = getRarityByArtefact(name);
     const tier = getArtefactTier(name);
     const val = calcArtefactSellValue(name, rarity);
-    lines.push(`${name} (${rarity ? rarity.name : 'Unknown'}, T${tier}, ~$${val.toLocaleString()})`);
+    const rarityName = rarity ? rarity.name : 'Unknown';
+    const isShiny = name.startsWith('✨ SHINY ') && name.endsWith(' ✨');
+    const shinyTag = isShiny ? ' ✨20×' : '';
+    if (count > 1) {
+      const totalVal = val * count;
+      lines.push(`${name}${shinyTag} ×${count} (${rarityName}, T${tier}, ~$${val.toLocaleString()} ea / ~$${totalVal.toLocaleString()} total)`);
+    } else {
+      lines.push(`${name}${shinyTag} (${rarityName}, T${tier}, ~$${val.toLocaleString()})`);
+    }
   }
-  return lines.length > 0 ? lines.join('\n') : '*Nothing offered yet*';
+
+  if (lines.length === 0) return '*Nothing offered yet*';
+  // Truncate to Discord embed field limit (1024 chars)
+  const joined = lines.join('\n');
+  if (joined.length <= 1024) return joined;
+  const truncated = [];
+  let len = 0;
+  for (const line of lines) {
+    if (len + line.length + 1 > 980) { truncated.push(`… and ${lines.length - truncated.length} more`); break; }
+    truncated.push(line);
+    len += line.length + 1;
+  }
+  return truncated.join('\n');
 }
 
 function formatOffer(offer) {
@@ -5343,25 +5507,38 @@ function createTradeEmbed(trade, initiatorId, recipientId) {
   const initiatorValue = calcOfferValue(trade.initiatorOffer);
   const recipientValue = calcOfferValue(trade.recipientOffer);
 
-  const initiatorStatus = trade.initiatorReady ? '**Ready**' : 'Preparing offer';
-  const recipientStatus = trade.recipientReady ? '**Ready**' : 'Preparing offer';
+  const initiatorStatus = trade.initiatorReady ? '✅ **Ready**' : '⏳ Preparing';
+  const recipientStatus = trade.recipientReady ? '✅ **Ready**' : '⏳ Preparing';
+
+  // Value balance hint
+  let balanceText = '';
+  if (initiatorValue > 0 || recipientValue > 0) {
+    const diff = initiatorValue - recipientValue;
+    if (Math.abs(diff) < 100) {
+      balanceText = '\n⚖️ *Offers are roughly equal in value.*';
+    } else if (diff > 0) {
+      balanceText = `\n⚖️ *Initiator's offer is ~$${Math.abs(diff).toLocaleString()} higher in value.*`;
+    } else {
+      balanceText = `\n⚖️ *Recipient's offer is ~$${Math.abs(diff).toLocaleString()} higher in value.*`;
+    }
+  }
 
   return new EmbedBuilder()
-    .setTitle('Trade Session')
-    .setDescription('Both parties may add artefacts and cash. Once both mark Ready, the trade executes automatically.')
+    .setTitle('🔄 Trade Session')
+    .setDescription(`Both players may add artefacts and cash. Once **both** mark Ready, the trade executes automatically.${balanceText}`)
     .addFields(
       {
-        name: `Initiator Offer  —  est. $${initiatorValue.toLocaleString()}`,
+        name: `<@${initiatorId}>'s Offer  —  est. $${initiatorValue.toLocaleString()}`,
         value: initiatorOfferText,
         inline: true
       },
       {
-        name: `Recipient Offer  —  est. $${recipientValue.toLocaleString()}`,
+        name: `<@${recipientId}>'s Offer  —  est. $${recipientValue.toLocaleString()}`,
         value: recipientOfferText,
         inline: true
       },
       {
-        name: 'Player Status',
+        name: 'Status',
         value: `<@${initiatorId}>  —  ${initiatorStatus}\n<@${recipientId}>  —  ${recipientStatus}`,
         inline: false
       }
@@ -5446,17 +5623,22 @@ async function handleTradeAddCash(interaction, customId) {
     return await interaction.reply({ content: 'You cannot modify your offer after marking ready!', ephemeral: true });
   }
 
+  const offer = isInitiator ? trade.initiatorOffer : trade.recipientOffer;
+  const userBalance = (userData[userId] && userData[userId].cash) || 0;
+  const currentCash = offer.cash || 0;
+
   const modal = new ModalBuilder()
     .setCustomId(`trade_cash_modal_${tradeId}`)
-    .setTitle('Add Cash to Trade');
+    .setTitle('Set Cash Offer');
 
   const cashInput = new TextInputBuilder()
     .setCustomId('cash_amount')
-    .setLabel('Cash amount to add')
+    .setLabel(`Balance: $${userBalance.toLocaleString()} — enter 0 to clear`)
     .setStyle(TextInputStyle.Short)
-    .setPlaceholder('Enter amount in dollars')
-    .setRequired(true)
-    .setMaxLength(10);
+    .setPlaceholder('e.g. 500, 1.5k, 2m')
+    .setRequired(false)
+    .setMaxLength(15)
+    .setValue(currentCash > 0 ? String(currentCash) : '');
 
   const row = new ActionRowBuilder().addComponents(cashInput);
   modal.addComponents(row);
