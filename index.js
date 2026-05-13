@@ -2050,7 +2050,7 @@ client.on('interactionCreate', async interaction => {
     await interaction.deferReply();
   }
   if (interaction.commandName === 'store') {
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply();
   }
 
   // Developer commands get ephemeral replies
@@ -3704,85 +3704,141 @@ async function handleLaborCommand(interaction, userId) {
   }
 }
 
-async function handleInventoryCommand(interaction, userId) {
-  await interaction.deferReply();
-  const user = await getUser(userId);
-  const userXpData = await getXpData(userId);
-  const bankCapacity = await calculateBankCapacity(userId);
+// === INVENTORY HELPERS ===
 
-  const totalValue = user.artefacts.reduce((sum, artefactName) => {
-    const isShiny = artefactName.startsWith('✨ SHINY ') && artefactName.endsWith(' ✨');
-    const rarity = getRarityByArtefact(artefactName);
-    const tierSell = calcArtefactSellValue(artefactName, rarity);
-    return sum + (isShiny ? tierSell * 20 : tierSell);
-  }, 0);
+const INVENTORY_PAGE_SIZE = 12;
 
-  const artefactCounts = user.artefacts.reduce((counts, artefact) => {
-    counts[artefact] = (counts[artefact] || 0) + 1;
-    return counts;
-  }, {});
-
-  const artefactLines = Object.keys(artefactCounts).length ?
-    Object.entries(artefactCounts).map(([artefactName, count]) => {
-      const rarity = getRarityByArtefact(artefactName);
-      const tier = getArtefactTier(artefactName);
-      const tierSell = calcArtefactSellValue(artefactName, rarity);
-      const isShiny = artefactName.startsWith('✨ SHINY ') && artefactName.endsWith(' ✨');
-      const sellDisplay = isShiny ? tierSell * 20 : tierSell;
-      const countSuffix = count > 1 ? ` [${count}]` : '';
-      return `${artefactName} (${rarity ? rarity.name : 'Unknown'} T${tier} — ${sellDisplay.toLocaleString()})${countSuffix}`;
-    }) : ['No artefacts'];
-
-  const artefactChunks = [];
-  let currentChunk = '';
-  for (const line of artefactLines) {
-    const addition = currentChunk ? '\n' + line : line;
-    if (currentChunk.length + addition.length > 1024) {
-      artefactChunks.push(currentChunk);
-      currentChunk = line;
-    } else {
-      currentChunk += addition;
-    }
+function getRarityEmoji(rarityName) {
+  switch (rarityName) {
+    case 'Common':    return '🩶';
+    case 'Uncommon':  return '💚';
+    case 'Rare':      return '💙';
+    case 'Legendary': return '💛';
+    default:          return '❓';
   }
-  if (currentChunk) artefactChunks.push(currentChunk);
+}
 
-  const artefactFields = artefactChunks.map((chunk, i) => ({
-    name: i === 0 ? 'Artefact Collection' : '\u200b',
-    value: chunk,
-    inline: false
-  }));
+function getArtefactRarityRank(name) {
+  if (name.startsWith('✨ SHINY ') && name.endsWith(' ✨')) return 0;
+  const rarity = getRarityByArtefact(name);
+  if (!rarity) return 5;
+  switch (rarity.name) {
+    case 'Legendary': return 1;
+    case 'Rare':      return 2;
+    case 'Uncommon':  return 3;
+    case 'Common':    return 4;
+    default:          return 5;
+  }
+}
 
-  // Count purchased items
-  const itemsCount = {};
-  (user.items || []).forEach(item => {
-    itemsCount[item] = (itemsCount[item] || 0) + 1;
+function buildInventoryPayload(user, userXpData, bankCapacity, page) {
+  const isShinyName = n => n.startsWith('✨ SHINY ') && n.endsWith(' ✨');
+
+  // Build counts map
+  const counts = {};
+  for (const name of user.artefacts) counts[name] = (counts[name] || 0) + 1;
+
+  // Sort by rarity rank then alphabetically within rank
+  const uniqueNames = Object.keys(counts).sort((a, b) => {
+    const diff = getArtefactRarityRank(a) - getArtefactRarityRank(b);
+    return diff !== 0 ? diff : a.localeCompare(b);
   });
 
+  const totalPages = Math.max(1, Math.ceil(uniqueNames.length / INVENTORY_PAGE_SIZE));
+  const safePage = Math.max(0, Math.min(page, totalPages - 1));
+  const pageNames = uniqueNames.slice(safePage * INVENTORY_PAGE_SIZE, (safePage + 1) * INVENTORY_PAGE_SIZE);
+
+  // Build artefact lines with blank-line spacers between rarity groups
+  const lines = [];
+  let lastRank = null;
+  for (const name of pageNames) {
+    const rank = getArtefactRarityRank(name);
+    if (lastRank !== null && rank !== lastRank) lines.push('\u200b');
+    lastRank = rank;
+    const count = counts[name];
+    const rarity = getRarityByArtefact(name);
+    const sell = calcArtefactSellValue(name, rarity);
+    const value = isShinyName(name) ? sell * 20 : sell;
+    const emoji = isShinyName(name) ? '' : `${getRarityEmoji(rarity ? rarity.name : '')} `;
+    lines.push(`**${count}x** ${emoji}${name} (~$${value.toLocaleString()})`);
+  }
+
+  const artefactText = lines.length > 0
+    ? lines.join('\n')
+    : (user.artefacts.length === 0 ? '*No artefacts yet — go scavenge!*' : '\u200b');
+
+  // Total collection value
+  const totalValue = user.artefacts.reduce((sum, name) => {
+    const rarity = getRarityByArtefact(name);
+    const sell = calcArtefactSellValue(name, rarity);
+    return sum + (isShinyName(name) ? sell * 20 : sell);
+  }, 0);
+
+  // Purchased items
+  const itemsCount = {};
+  (user.items || []).forEach(item => { itemsCount[item] = (itemsCount[item] || 0) + 1; });
   const itemsList = (Object.entries(itemsCount)
-    .map(([name, count]) => `${name}${count > 1 ? ` [${count}]` : ''}`)
+    .map(([name, count]) => `${name}${count > 1 ? ` ×${count}` : ''}`)
     .join(', ') || 'No items').substring(0, 1024);
 
-  const inventoryEmbed = new EmbedBuilder()
-    .setTitle('Your Inventory')
-    .setDescription('Current financial status and artefact collection')
+  const collectionHeader = uniqueNames.length > 0
+    ? `Artefacts — Page ${safePage + 1} of ${totalPages}`
+    : 'Artefact Collection';
+
+  const embed = new EmbedBuilder()
+    .setTitle('📦 Inventory')
+    .setDescription('Your financial status and artefact collection.')
     .addFields(
-      { name: 'Cash on Hand', value: `${user.cash.toLocaleString()}`, inline: true },
-      { name: 'Bank Balance', value: `${(user.bankBalance || 0).toLocaleString()}`, inline: true },
-      { name: 'Total Wealth', value: `${(user.cash + (user.bankBalance || 0)).toLocaleString()}`, inline: true },
-      { name: 'Experience Points', value: `${userXpData.xp.toLocaleString()} XP`, inline: true },
-      { name: 'XP Cash Value', value: `${(userXpData.xp * 2).toLocaleString()}`, inline: true },
-      { name: 'Messages Sent', value: `${userXpData.messageCount.toLocaleString()}`, inline: true },
-      { name: 'Artefacts Owned', value: user.artefacts.length.toString(), inline: true },
-      { name: 'Collection Value', value: `${totalValue.toLocaleString()}`, inline: true },
-      { name: 'Bank Capacity', value: `${(((user.bankBalance || 0) / bankCapacity) * 100).toFixed(1)}%`, inline: true },
-      ...artefactFields,
-      { name: 'Purchased Items', value: itemsList, inline: false }
+      { name: 'Cash on Hand',      value: `$${user.cash.toLocaleString()}`,                        inline: true },
+      { name: 'Bank Balance',      value: `$${(user.bankBalance || 0).toLocaleString()}`,            inline: true },
+      { name: 'Total Wealth',      value: `$${(user.cash + (user.bankBalance || 0)).toLocaleString()}`, inline: true },
+      { name: 'Experience Points', value: `${userXpData.xp.toLocaleString()} XP`,                  inline: true },
+      { name: 'XP Cash Value',     value: `$${(userXpData.xp * 2).toLocaleString()}`,               inline: true },
+      { name: 'Messages Sent',     value: userXpData.messageCount.toLocaleString(),                 inline: true },
+      { name: 'Artefacts Owned',   value: user.artefacts.length.toString(),                         inline: true },
+      { name: 'Collection Value',  value: `$${totalValue.toLocaleString()}`,                        inline: true },
+      { name: 'Bank Capacity',     value: `${(((user.bankBalance || 0) / bankCapacity) * 100).toFixed(1)}%`, inline: true },
+      { name: collectionHeader,    value: artefactText || '\u200b',                                 inline: false },
+      { name: 'Purchased Items',   value: itemsList,                                                inline: false }
     )
     .setColor(0x339AF0)
-    .setFooter({ text: 'Use /convert to turn XP into cash (1 XP = $2)' })
+    .setFooter({ text: `🩶 Common  💚 Uncommon  💙 Rare  💛 Legendary  ✨ Shiny  •  /convert: 1 XP = $2` })
     .setTimestamp();
 
-  await interaction.editReply({ embeds: [inventoryEmbed] });
+  // Navigation buttons (only show when there are multiple pages)
+  const components = totalPages > 1 ? [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`inv_prev_${user._id}_${safePage}`)
+        .setLabel('◀ Prev')
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(safePage === 0),
+      new ButtonBuilder()
+        .setCustomId(`inv_page_info_${safePage}`)
+        .setLabel(`Page ${safePage + 1} / ${totalPages}`)
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(true),
+      new ButtonBuilder()
+        .setCustomId(`inv_next_${user._id}_${safePage}`)
+        .setLabel('Next ▶')
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(safePage >= totalPages - 1)
+    )
+  ] : [];
+
+  return { embed, components, safePage, totalPages };
+}
+
+async function handleInventoryCommand(interaction, userId) {
+  await interaction.deferReply();
+  const [user, userXpData, bankCapacity] = await Promise.all([
+    getUser(userId),
+    getXpData(userId),
+    calculateBankCapacity(userId)
+  ]);
+
+  const { embed, components } = buildInventoryPayload(user, userXpData, bankCapacity, 0);
+  await interaction.editReply({ embeds: [embed], components });
 }
 
 
@@ -5233,6 +5289,21 @@ async function handleComponentInteraction(interaction) {
     const guildItems = guildItemsDoc?.items || {};
     const payload = await buildStorePayload(tab, userId, guildId, globalItems, guildItems);
     await interaction.update(payload);
+
+  } else if (customId.startsWith('inv_prev_') || customId.startsWith('inv_next_')) {
+    const isPrev = customId.startsWith('inv_prev_');
+    const rest = isPrev ? customId.replace('inv_prev_', '') : customId.replace('inv_next_', '');
+    const lastUnderscore = rest.lastIndexOf('_');
+    const targetUserId = rest.slice(0, lastUnderscore);
+    const currentPage = parseInt(rest.slice(lastUnderscore + 1), 10);
+    const newPage = isPrev ? currentPage - 1 : currentPage + 1;
+    const [invUser, invXpData, invBankCap] = await Promise.all([
+      getUser(targetUserId),
+      getXpData(targetUserId),
+      calculateBankCapacity(targetUserId)
+    ]);
+    const { embed, components } = buildInventoryPayload(invUser, invXpData, invBankCap, newPage);
+    await interaction.update({ embeds: [embed], components });
 
   } else if (customId.startsWith('fish_reel_')) {
     const sessionId = customId.replace('fish_reel_', '');
