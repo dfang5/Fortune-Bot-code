@@ -22,11 +22,10 @@ const {
 require('dotenv').config();
 const DEVELOPER_ID = '1299875574894039184';
 const CO_DEVELOPER_ID = '742955843498278943';
-const CO_DEVELOPER_ID_2 = '992632642992357459';
 
 // Check if user is a developer
 function isDeveloper(userId) {
-  return userId === DEVELOPER_ID || userId === CO_DEVELOPER_ID || userId === CO_DEVELOPER_ID_2;
+  return userId === DEVELOPER_ID || userId === CO_DEVELOPER_ID;
 }
 
 // === Prefix system (per-guild text command prefix) ===
@@ -1596,11 +1595,13 @@ client.once('clientReady', async () => {
 
   ];
 
-  // Developer-only commands (registered separately)
+  // True developer-only commands — hidden from everyone by default via defaultMemberPermissions(0)
+  // Only registered as guild commands in guilds where a developer is present
   const devCommands = [
     new SlashCommandBuilder()
       .setName('give-artefact')
       .setDescription('Open an interactive menu to give artefacts to a user (Developer only)')
+      .setDefaultMemberPermissions(0)
       .addUserOption(option =>
         option.setName('user')
           .setDescription('User to give artefacts to')
@@ -1609,6 +1610,7 @@ client.once('clientReady', async () => {
     new SlashCommandBuilder()
       .setName('give-cash')
       .setDescription('Give cash to a user (Developer only)')
+      .setDefaultMemberPermissions(0)
       .addUserOption(option =>
         option.setName('user')
           .setDescription('User to give cash to')
@@ -1622,6 +1624,7 @@ client.once('clientReady', async () => {
     new SlashCommandBuilder()
       .setName('setevent')
       .setDescription('Manually trigger a mining event (Developer only)')
+      .setDefaultMemberPermissions(0)
       .addStringOption(option =>
         option.setName('positive_artefact')
           .setDescription('Artefact that will have increased rates')
@@ -1634,6 +1637,7 @@ client.once('clientReady', async () => {
     new SlashCommandBuilder()
       .setName('remove-artefact')
       .setDescription('Remove an artefact from a user (Developer only)')
+      .setDefaultMemberPermissions(0)
       .addUserOption(option =>
         option.setName('user')
           .setDescription('User to remove artefact from')
@@ -1646,6 +1650,7 @@ client.once('clientReady', async () => {
     new SlashCommandBuilder()
       .setName('remove-cash')
       .setDescription('Remove cash from a user (Developer only)')
+      .setDefaultMemberPermissions(0)
       .addUserOption(option =>
         option.setName('user')
           .setDescription('User to remove cash from')
@@ -1659,10 +1664,32 @@ client.once('clientReady', async () => {
     new SlashCommandBuilder()
       .setName('reset-cooldowns')
       .setDescription('Reset cooldowns for a user or all users (Developer only)')
+      .setDefaultMemberPermissions(0)
       .addUserOption(option =>
         option.setName('user')
           .setDescription('User to reset cooldowns for (leave empty for ALL users)')
           .setRequired(false)),
+
+    new SlashCommandBuilder()
+      .setName('devlog')
+      .setDescription('Broadcast a developer update to all servers (Developer only)')
+      .setDefaultMemberPermissions(0)
+      .addStringOption(option =>
+        option.setName('title')
+          .setDescription('Title of the update')
+          .setRequired(true))
+      .addStringOption(option =>
+        option.setName('message')
+          .setDescription('The update message to broadcast')
+          .setRequired(true))
+      .addStringOption(option =>
+        option.setName('version')
+          .setDescription('Optional version tag e.g. v1.2.3')
+          .setRequired(false)),
+  ];
+
+  // Non-developer commands that were previously grouped with dev commands
+  const extraPublicCommands = [
     new SlashCommandBuilder()
       .setName('setprefix')
       .setDescription('Set the prefix for text-based commands in this server (Admin only)'),
@@ -1679,19 +1706,20 @@ client.once('clientReady', async () => {
           .setRequired(false))
   ];
 
+  const allPublicCommands = [...commands, ...extraPublicCommands];
+
   const rest = new REST({ version:'10' }).setToken(token);
 
   try {
     console.log('Started refreshing application (/) commands.');
 
-    // Register all commands globally (public + developer)
-    // Developer commands will only work for authorized users due to permission checks
-    await rest.put(Routes.applicationCommands(clientId), { 
-      body: [...commands, ...devCommands].map(command => command.toJSON()) 
+    // Register only public commands globally — dev commands are never registered globally
+    await rest.put(Routes.applicationCommands(clientId), {
+      body: allPublicCommands.map(command => command.toJSON())
     });
 
-    // Register developer commands for specific users only
-    // This creates guild-specific commands that only appear for developers
+    // Register developer commands guild-specifically, only in guilds where a developer is present
+    // defaultMemberPermissions(0) ensures they are hidden from everyone (including admins) by default
     const guilds = client.guilds.cache;
     for (const [guildId, guild] of guilds) {
       try {
@@ -1704,21 +1732,17 @@ client.once('clientReady', async () => {
           }
         }
 
-        // Check if developers are in this guild
-        const hasDevelopers = guild.members.cache.has(DEVELOPER_ID) || 
-                             guild.members.cache.has(CO_DEVELOPER_ID);
+        // Check if any developer is in this guild
+        const hasDevelopers = guild.members.cache.has(DEVELOPER_ID) ||
+                              guild.members.cache.has(CO_DEVELOPER_ID);
 
         if (hasDevelopers) {
           console.log(`Registering developer commands for guild: ${guild.name} (${guildId})`);
           await rest.put(Routes.applicationGuildCommands(clientId, guildId), {
-            body: [...commands, ...devCommands].map(command => command.toJSON())
+            body: [...allPublicCommands, ...devCommands].map(command => command.toJSON())
           });
         } else {
-          console.log(`No developers found in guild: ${guild.name} (${guildId})`);
-          // Register only public commands for this guild
-          await rest.put(Routes.applicationGuildCommands(clientId, guildId), {
-            body: commands.map(command => command.toJSON())
-          });
+          console.log(`No developers found in guild: ${guild.name} (${guildId}), skipping dev commands`);
         }
       } catch (guildErr) {
         console.error(`Error registering commands for guild ${guildId}:`, guildErr);
@@ -2176,6 +2200,10 @@ client.on('interactionCreate', async interaction => {
 
       case 'reset-cooldowns':
         await handleResetCooldownsCommand(interaction);
+        break;
+
+      case 'devlog':
+        await handleDevlogCommand(interaction);
         break;
 
       case 'observe':
@@ -8218,6 +8246,76 @@ async function handleResetCooldownsCommand(interaction) {
 
     await interaction.editReply({ embeds: [successEmbed] });
   }
+}
+
+async function handleDevlogCommand(interaction) {
+  if (!isDeveloper(interaction.user.id)) {
+    return interaction.reply({
+      embeds: [new EmbedBuilder().setTitle('Access Denied').setDescription('This command is restricted to developers only.').setColor(0xFF6B6B).setTimestamp()],
+      ephemeral: true
+    });
+  }
+
+  await interaction.deferReply({ ephemeral: true });
+
+  const title = interaction.options.getString('title');
+  const message = interaction.options.getString('message');
+  const version = interaction.options.getString('version');
+
+  const embed = new EmbedBuilder()
+    .setTitle(`📋 Developer Update${version ? ` — ${version}` : ''}`)
+    .setDescription(`**${title}**\n\n${message}`)
+    .setColor(0x5865F2)
+    .setFooter({ text: `Posted by ${interaction.user.username} • Fortune Bot Development` })
+    .setTimestamp();
+
+  let delivered = 0;
+  let failed = 0;
+  const guilds = client.guilds.cache;
+
+  for (const [guildId, guild] of guilds) {
+    try {
+      // Try configured announcement channel first
+      const announcementChannelId = await getAnnouncementChannelId(guildId);
+      let channel = null;
+
+      if (announcementChannelId) {
+        channel = await client.channels.fetch(announcementChannelId).catch(() => null);
+        if (channel && (!channel.isTextBased || !channel.isTextBased())) channel = null;
+      }
+
+      // Fall back to first writable text channel
+      if (!channel) {
+        const textChannels = guild.channels.cache
+          .filter(c => c.isTextBased() && c.permissionsFor(guild.members.me)?.has('SendMessages'))
+          .sort((a, b) => a.position - b.position);
+        channel = textChannels.first() || null;
+      }
+
+      if (!channel) { failed++; continue; }
+
+      await channel.send({ embeds: [embed] });
+      delivered++;
+    } catch (err) {
+      failed++;
+      console.error(`Devlog send failed for guild ${guildId}:`, err.message);
+    }
+  }
+
+  const resultEmbed = new EmbedBuilder()
+    .setTitle('Devlog Broadcast Complete')
+    .addFields(
+      { name: 'Title', value: title, inline: false },
+      { name: 'Version', value: version || 'None', inline: true },
+      { name: 'Delivered', value: `${delivered} server(s)`, inline: true },
+      { name: 'Failed', value: `${failed} server(s)`, inline: true },
+      { name: 'Developer', value: `<@${interaction.user.id}>`, inline: false }
+    )
+    .setColor(delivered > 0 ? 0x51CF66 : 0xFF6B6B)
+    .setFooter({ text: 'Developer Command Executed' })
+    .setTimestamp();
+
+  await interaction.editReply({ embeds: [resultEmbed] });
 }
 
 async function handleConfigureObservationCommand(interaction, userId) {
