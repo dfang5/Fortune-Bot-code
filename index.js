@@ -154,6 +154,7 @@ global.tempItems = {};
 global.activeTrades = {};
 global.activeMarbleGames = {};
 global.activeDuelGames = {};
+global.activeCardDuelGames = {};
 global.messageTracker = {};
 global.giveArtefactSessions = {};
 global.massSellSessions = {};
@@ -1505,6 +1506,20 @@ client.once('clientReady', async () => {
       .setDMPermission(false),
 
     new SlashCommandBuilder()
+      .setName('card-duel')
+      .setDescription('Challenge a player to a 1v1 card duel — pick the highest card each round')
+      .addUserOption(option =>
+        option.setName('opponent')
+          .setDescription('The player you want to challenge')
+          .setRequired(true))
+      .addIntegerOption(option =>
+        option.setName('bet')
+          .setDescription('Amount to bet (each player puts this in)')
+          .setRequired(true)
+          .setMinValue(50))
+      .setDMPermission(false),
+
+    new SlashCommandBuilder()
       .setName('convert')
       .setDescription('Convert your XP into cash (1 XP = $2)'),
 
@@ -2168,6 +2183,10 @@ client.on('interactionCreate', async interaction => {
 
       case 'marble-duel':
         await handleMarbleDuel(interaction);
+        break;
+
+      case 'card-duel':
+        await handleCardDuelCommand(interaction);
         break;
 
       case 'convert':
@@ -4991,6 +5010,25 @@ async function handleComponentInteraction(interaction) {
       ],
       components: []
     });
+
+  } else if (customId.startsWith('cduel_accept_')) {
+    const gameId = customId.replace('cduel_accept_', '');
+    await handleCardDuelAccept(interaction, gameId);
+
+  } else if (customId.startsWith('cduel_decline_')) {
+    const gameId = customId.replace('cduel_decline_', '');
+    await handleCardDuelDecline(interaction, gameId);
+
+  } else if (customId.startsWith('cduel_pick_')) {
+    const gameId = customId.replace('cduel_pick_', '');
+    await handleCardDuelPickButton(interaction, gameId);
+
+  } else if (customId.startsWith('cduel_play_')) {
+    const withoutPrefix = customId.replace('cduel_play_', '');
+    const lastUnder = withoutPrefix.lastIndexOf('_');
+    const gameId = withoutPrefix.substring(0, lastUnder);
+    const cardIndex = parseInt(withoutPrefix.substring(lastUnder + 1));
+    await handleCardDuelPlay(interaction, gameId, cardIndex);
 
   } else if (customId.startsWith('place_duel_bet_')) {
     const gameId = customId.replace('place_duel_bet_', '');
@@ -8726,6 +8764,470 @@ async function handleObserveCommand(interaction, observerId) {
       await interaction.editReply({ components: [] });
     } catch (e) {}
   });
+}
+
+// === CARD DUEL GAME ===
+
+const CARD_RANKS = ['2','3','4','5','6','7','8','9','10','J','Q','K','A'];
+const CARD_SUITS = ['♠','♥','♦','♣'];
+const CARD_VALUES = {'2':2,'3':3,'4':4,'5':5,'6':6,'7':7,'8':8,'9':9,'10':10,'J':11,'Q':12,'K':13,'A':14};
+
+function buildDeck() {
+  const deck = [];
+  for (const suit of CARD_SUITS)
+    for (const rank of CARD_RANKS)
+      deck.push({ rank, suit, value: CARD_VALUES[rank] });
+  for (let i = deck.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [deck[i], deck[j]] = [deck[j], deck[i]];
+  }
+  return deck;
+}
+
+function renderCardLines(card) {
+  const r = card.rank;
+  const s = card.suit;
+  return [
+    '┌─────┐',
+    `│${r.padEnd(5)}│`,
+    `│  ${s}  │`,
+    `│${r.padStart(5)}│`,
+    '└─────┘'
+  ];
+}
+
+function renderFaceDownLines() {
+  return [
+    '┌─────┐',
+    '│░░░░░│',
+    '│░░░░░│',
+    '│░░░░░│',
+    '└─────┘'
+  ];
+}
+
+function renderHandBlock(cards) {
+  if (!cards || cards.length === 0) return '*(empty)*';
+  const lines = cards.map(c => renderCardLines(c));
+  const rows = [];
+  for (let i = 0; i < 5; i++)
+    rows.push(lines.map(l => l[i]).join('  '));
+  return '```\n' + rows.join('\n') + '\n```';
+}
+
+function cardLabel(card) {
+  return `${card.rank}${card.suit}`;
+}
+
+function buildCardDuelGameEmbed(game) {
+  const [p1, p2] = game.players;
+  const p1Score = game.scores[p1.id] || 0;
+  const p2Score = game.scores[p2.id] || 0;
+  const p1Hand = game.hands[p1.id] || [];
+  const p2Hand = game.hands[p2.id] || [];
+  const p1Picked = game.picks[p1.id] !== undefined;
+  const p2Picked = game.picks[p2.id] !== undefined;
+  const historyStr = game.roundHistory.length
+    ? game.roundHistory.map(r => r.summary).join('\n')
+    : '*No rounds played yet*';
+
+  return new EmbedBuilder()
+    .setTitle(`🃏 Card Duel — Round ${game.round}`)
+    .setDescription(
+      `**${p1.displayName}** vs **${p2.displayName}**\n` +
+      `💰 Pot: **$${game.totalPot.toLocaleString()}**`
+    )
+    .addFields(
+      { name: '🏆 Score', value: `**${p1.displayName}** ${p1Score} — ${p2Score} **${p2.displayName}**`, inline: false },
+      { name: `⚔️ ${p1.displayName}'s Hand`, value: renderHandBlock(p1Hand), inline: false },
+      { name: `🎯 ${p2.displayName}'s Hand`, value: renderHandBlock(p2Hand), inline: false },
+      { name: '📋 Status', value: `${p1Picked ? '✅' : '⏳'} **${p1.displayName}**  |  ${p2Picked ? '✅' : '⏳'} **${p2.displayName}**`, inline: false },
+      { name: '📜 Round History', value: historyStr, inline: false }
+    )
+    .setColor(0xE74C3C)
+    .setFooter({ text: `Round ${game.round} of 3 max • Both hands are visible — choose wisely` })
+    .setTimestamp();
+}
+
+async function handleCardDuelCommand(interaction) {
+  const userId = interaction.user.id;
+  const opponent = interaction.options.getUser('opponent');
+  const bet = interaction.options.getInteger('bet');
+
+  if (opponent.id === userId)
+    return interaction.reply({ content: '❌ You cannot challenge yourself!', ephemeral: true });
+  if (opponent.bot)
+    return interaction.reply({ content: '❌ Bots cannot play card duels!', ephemeral: true });
+
+  const busyCheck = [userId, opponent.id].some(id =>
+    Object.values(global.activeCardDuelGames).some(g => g.players.some(p => p.id === id)) ||
+    Object.values(global.activeDuelGames).some(g => g.players.some(p => p.id === id)) ||
+    Object.values(global.activeMarbleGames).some(g => g.players.some(p => p.id === id))
+  );
+  if (busyCheck)
+    return interaction.reply({ content: '❌ One or more players are already in an active game!', ephemeral: true });
+
+  const challenger = await getUser(userId);
+  if (challenger.cash < bet)
+    return interaction.reply({
+      content: `❌ You only have **$${challenger.cash.toLocaleString()}** — not enough to bet **$${bet.toLocaleString()}**.`,
+      ephemeral: true
+    });
+
+  const gameId = `cduel_${userId}_${Date.now()}`;
+  global.activeCardDuelGames[gameId] = {
+    gameId,
+    players: [interaction.user, opponent],
+    bet,
+    totalPot: bet * 2,
+    betsCollected: false,
+    phase: 'invitation',
+    hands: {},
+    picks: {},
+    round: 1,
+    scores: { [userId]: 0, [opponent.id]: 0 },
+    roundHistory: [],
+    gameMessage: null,
+    channel: null,
+    createdAt: Date.now()
+  };
+
+  const embed = new EmbedBuilder()
+    .setTitle('🃏 Card Duel — Challenge Issued')
+    .setDescription(
+      `**${interaction.user.displayName}** has challenged **${opponent.displayName}** to a Card Duel!\n\n` +
+      `**${opponent.displayName}** must accept within **2 minutes** to begin.`
+    )
+    .addFields(
+      { name: '⚔️ Challenger', value: `<@${userId}>`, inline: true },
+      { name: '🎯 Opponent', value: `<@${opponent.id}>`, inline: true },
+      { name: '💰 Bet', value: `$${bet.toLocaleString()} each — pot of **$${(bet * 2).toLocaleString()}**`, inline: false },
+      {
+        name: '📖 How It Works',
+        value:
+          '> • Each player is dealt **3 cards** — both hands are visible to everyone\n' +
+          '> • Each round, both secretly pick one card — **highest value wins the round**\n' +
+          '> • Card values: 2–10 face value, J=11, Q=12, K=13, A=14\n' +
+          '> • First to win **2 rounds** takes the pot\n' +
+          '> • Tied rounds score no points — if all 3 rounds tie, bets are refunded',
+        inline: false
+      }
+    )
+    .setColor(0xE74C3C)
+    .setFooter({ text: '⏰ Invitation expires in 2 minutes' })
+    .setTimestamp();
+
+  const buttons = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`cduel_accept_${gameId}`)
+      .setLabel('✅ Accept Duel')
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId(`cduel_decline_${gameId}`)
+      .setLabel('❌ Decline')
+      .setStyle(ButtonStyle.Danger)
+  );
+
+  await interaction.reply({ embeds: [embed], components: [buttons] });
+
+  setTimeout(() => {
+    const game = global.activeCardDuelGames[gameId];
+    if (game && game.phase === 'invitation') {
+      delete global.activeCardDuelGames[gameId];
+      interaction.editReply({
+        embeds: [
+          new EmbedBuilder()
+            .setTitle('⏰ Card Duel Expired')
+            .setDescription('The challenge was not accepted in time.')
+            .setColor(0x99AAB5)
+            .setTimestamp()
+        ],
+        components: []
+      }).catch(() => {});
+    }
+  }, 120000);
+}
+
+async function handleCardDuelAccept(interaction, gameId) {
+  const game = global.activeCardDuelGames[gameId];
+  if (!game)
+    return interaction.reply({ content: '❌ This duel is no longer active.', ephemeral: true });
+  if (interaction.user.id !== game.players[1].id)
+    return interaction.reply({ content: '❌ You were not invited to this duel.', ephemeral: true });
+  if (game.phase !== 'invitation')
+    return interaction.reply({ content: '❌ This duel has already started.', ephemeral: true });
+
+  const opponentData = await getUser(interaction.user.id);
+  if (opponentData.cash < game.bet) {
+    delete global.activeCardDuelGames[gameId];
+    return interaction.update({
+      embeds: [
+        new EmbedBuilder()
+          .setTitle('❌ Card Duel Cancelled')
+          .setDescription(
+            `**${interaction.user.displayName}** doesn't have enough cash to match the bet of **$${game.bet.toLocaleString()}**.`
+          )
+          .setColor(0xFF6B6B)
+          .setTimestamp()
+      ],
+      components: []
+    });
+  }
+
+  game.phase = 'game';
+  await startCardDuelGame(interaction, gameId);
+}
+
+async function handleCardDuelDecline(interaction, gameId) {
+  const game = global.activeCardDuelGames[gameId];
+  if (!game)
+    return interaction.reply({ content: '❌ This duel is no longer active.', ephemeral: true });
+  if (interaction.user.id !== game.players[1].id)
+    return interaction.reply({ content: '❌ You were not invited to this duel.', ephemeral: true });
+
+  delete global.activeCardDuelGames[gameId];
+  await interaction.update({
+    embeds: [
+      new EmbedBuilder()
+        .setTitle('🃏 Card Duel Declined')
+        .setDescription(`**${interaction.user.displayName}** has declined the challenge.`)
+        .setColor(0xFF6B6B)
+        .setTimestamp()
+    ],
+    components: []
+  });
+}
+
+async function startCardDuelGame(interaction, gameId) {
+  const game = global.activeCardDuelGames[gameId];
+  if (!game) return;
+
+  const [p1, p2] = game.players;
+
+  if (!game.betsCollected) {
+    const u1 = await getUser(p1.id);
+    const u2 = await getUser(p2.id);
+    u1.cash -= game.bet;
+    u2.cash -= game.bet;
+    await saveUser(p1.id);
+    await saveUser(p2.id);
+    game.betsCollected = true;
+  }
+
+  const deck = buildDeck();
+  game.hands[p1.id] = deck.slice(0, 3);
+  game.hands[p2.id] = deck.slice(3, 6);
+  game.picks = {};
+  game.channel = interaction.channel;
+
+  const embed = buildCardDuelGameEmbed(game);
+  const button = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`cduel_pick_${gameId}`)
+      .setLabel('🃏 Pick Your Card')
+      .setStyle(ButtonStyle.Primary)
+  );
+
+  await interaction.update({ embeds: [embed], components: [button] });
+  game.gameMessage = interaction.message;
+}
+
+async function handleCardDuelPickButton(interaction, gameId) {
+  const game = global.activeCardDuelGames[gameId];
+  if (!game)
+    return interaction.reply({ content: '❌ This game is no longer active.', ephemeral: true });
+  if (!game.players.some(p => p.id === interaction.user.id))
+    return interaction.reply({ content: '❌ You are not part of this duel.', ephemeral: true });
+  if (game.picks[interaction.user.id] !== undefined)
+    return interaction.reply({ content: '✅ You have already picked your card this round!', ephemeral: true });
+
+  const hand = game.hands[interaction.user.id] || [];
+  if (hand.length === 0)
+    return interaction.reply({ content: '❌ No cards left in your hand.', ephemeral: true });
+
+  const handStr = renderHandBlock(hand);
+  const buttons = new ActionRowBuilder().addComponents(
+    hand.map((card, i) =>
+      new ButtonBuilder()
+        .setCustomId(`cduel_play_${gameId}_${i}`)
+        .setLabel(`[${i + 1}] ${cardLabel(card)}`)
+        .setStyle(ButtonStyle.Secondary)
+    )
+  );
+
+  await interaction.reply({
+    embeds: [
+      new EmbedBuilder()
+        .setTitle('🃏 Pick a Card to Play')
+        .setDescription(
+          `Your hand this round:\n${handStr}\n` +
+          `*Remember — your opponent can see your cards too. Play smart!*`
+        )
+        .setColor(0x3498DB)
+        .setTimestamp()
+    ],
+    components: [buttons],
+    ephemeral: true
+  });
+}
+
+async function handleCardDuelPlay(interaction, gameId, cardIndex) {
+  const game = global.activeCardDuelGames[gameId];
+  if (!game)
+    return interaction.update({ content: '❌ Game no longer active.', components: [], embeds: [] });
+
+  const userId = interaction.user.id;
+  if (!game.players.some(p => p.id === userId))
+    return interaction.update({ content: '❌ You are not part of this duel.', components: [], embeds: [] });
+  if (game.picks[userId] !== undefined)
+    return interaction.update({ content: '✅ You already picked this round!', components: [], embeds: [] });
+
+  const hand = game.hands[userId] || [];
+  if (cardIndex < 0 || cardIndex >= hand.length)
+    return interaction.update({ content: '❌ Invalid card selection.', components: [], embeds: [] });
+
+  game.picks[userId] = cardIndex;
+  const card = hand[cardIndex];
+
+  await interaction.update({
+    embeds: [
+      new EmbedBuilder()
+        .setTitle('🃏 Card Locked In!')
+        .setDescription(`You played **${cardLabel(card)}** — waiting for your opponent...`)
+        .setColor(0x2ECC71)
+        .setTimestamp()
+    ],
+    components: []
+  });
+
+  if (game.gameMessage) {
+    try {
+      await game.gameMessage.edit({
+        embeds: [buildCardDuelGameEmbed(game)],
+        components: [
+          new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+              .setCustomId(`cduel_pick_${gameId}`)
+              .setLabel('🃏 Pick Your Card')
+              .setStyle(ButtonStyle.Primary)
+          )
+        ]
+      });
+    } catch (e) {}
+  }
+
+  const [p1, p2] = game.players;
+  if (game.picks[p1.id] !== undefined && game.picks[p2.id] !== undefined) {
+    await resolveCardDuelRound(game);
+  }
+}
+
+async function resolveCardDuelRound(game) {
+  const [p1, p2] = game.players;
+  const p1Idx = game.picks[p1.id];
+  const p2Idx = game.picks[p2.id];
+  const p1Card = game.hands[p1.id][p1Idx];
+  const p2Card = game.hands[p2.id][p2Idx];
+
+  game.hands[p1.id] = game.hands[p1.id].filter((_, i) => i !== p1Idx);
+  game.hands[p2.id] = game.hands[p2.id].filter((_, i) => i !== p2Idx);
+
+  let summaryLine = '';
+  if (p1Card.value > p2Card.value) {
+    game.scores[p1.id]++;
+    summaryLine = `Round ${game.round}: **${p1.displayName}** wins — ${cardLabel(p1Card)} vs ${cardLabel(p2Card)}`;
+  } else if (p2Card.value > p1Card.value) {
+    game.scores[p2.id]++;
+    summaryLine = `Round ${game.round}: **${p2.displayName}** wins — ${cardLabel(p2Card)} vs ${cardLabel(p1Card)}`;
+  } else {
+    summaryLine = `Round ${game.round}: 🤝 Tie — ${cardLabel(p1Card)} vs ${cardLabel(p2Card)} (no point)`;
+  }
+
+  game.roundHistory.push({ summary: summaryLine });
+  game.picks = {};
+  game.round++;
+
+  const p1Score = game.scores[p1.id];
+  const p2Score = game.scores[p2.id];
+  const handsEmpty = game.hands[p1.id].length === 0;
+  const hasWinner = p1Score >= 2 || p2Score >= 2;
+
+  if (handsEmpty || hasWinner) {
+    await endCardDuelGame(game);
+  } else {
+    if (game.gameMessage) {
+      try {
+        await game.gameMessage.edit({
+          embeds: [buildCardDuelGameEmbed(game)],
+          components: [
+            new ActionRowBuilder().addComponents(
+              new ButtonBuilder()
+                .setCustomId(`cduel_pick_${game.gameId}`)
+                .setLabel('🃏 Pick Your Card')
+                .setStyle(ButtonStyle.Primary)
+            )
+          ]
+        });
+      } catch (e) {}
+    }
+  }
+}
+
+async function endCardDuelGame(game) {
+  const [p1, p2] = game.players;
+  const p1Score = game.scores[p1.id];
+  const p2Score = game.scores[p2.id];
+  game.phase = 'finished';
+
+  let resultTitle = '';
+  let resultDesc = '';
+  let color = 0x99AAB5;
+
+  if (p1Score > p2Score) {
+    const winnerData = await getUser(p1.id);
+    winnerData.cash += game.totalPot;
+    await saveUser(p1.id);
+    resultTitle = `🏆 ${p1.displayName} Wins the Card Duel!`;
+    resultDesc = `**${p1.displayName}** takes the pot of **$${game.totalPot.toLocaleString()}**!`;
+    color = 0xFFD700;
+  } else if (p2Score > p1Score) {
+    const winnerData = await getUser(p2.id);
+    winnerData.cash += game.totalPot;
+    await saveUser(p2.id);
+    resultTitle = `🏆 ${p2.displayName} Wins the Card Duel!`;
+    resultDesc = `**${p2.displayName}** takes the pot of **$${game.totalPot.toLocaleString()}**!`;
+    color = 0xFFD700;
+  } else {
+    const u1 = await getUser(p1.id);
+    const u2 = await getUser(p2.id);
+    u1.cash += game.bet;
+    u2.cash += game.bet;
+    await saveUser(p1.id);
+    await saveUser(p2.id);
+    resultTitle = '🤝 Card Duel — Draw!';
+    resultDesc = `All rounds tied — both players refunded **$${game.bet.toLocaleString()}**.`;
+    color = 0x99AAB5;
+  }
+
+  const historyStr = game.roundHistory.map(r => r.summary).join('\n') || '*No rounds played*';
+
+  const finalEmbed = new EmbedBuilder()
+    .setTitle(resultTitle)
+    .setDescription(resultDesc)
+    .addFields(
+      { name: '📊 Final Score', value: `**${p1.displayName}** ${p1Score} — ${p2Score} **${p2.displayName}**`, inline: false },
+      { name: '📜 Round History', value: historyStr, inline: false }
+    )
+    .setColor(color)
+    .setTimestamp();
+
+  delete global.activeCardDuelGames[game.gameId];
+
+  if (game.gameMessage) {
+    try {
+      await game.gameMessage.edit({ embeds: [finalEmbed], components: [] });
+    } catch (e) {}
+  }
 }
 
 client.login(token);[]
