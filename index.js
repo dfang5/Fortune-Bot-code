@@ -8646,7 +8646,8 @@ async function handleObserveCommand(interaction, observerId) {
     const isShiny = name.startsWith('✨ SHINY ') && name.endsWith(' ✨');
     const sellDisplay = isShiny ? tierSell * 5 : tierSell;
     const countSuffix = count > 1 ? ` [${count}]` : '';
-    return `${name} (${rarity ? rarity.name : 'Unknown'} T${tier} — $${sellDisplay.toLocaleString()})${countSuffix}`;
+    const emoji = getRarityEmoji(rarity ? rarity.name : '');
+    return `${emoji} ${name} (${rarity ? rarity.name : 'Unknown'} T${tier} — $${sellDisplay.toLocaleString()})${countSuffix}`;
   });
 
   // Items summary
