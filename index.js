@@ -3807,7 +3807,7 @@ function buildInventoryPayload(user, userXpData, bankCapacity, page) {
     const rarity = getRarityByArtefact(name);
     const sell = calcArtefactSellValue(name, rarity);
     const value = isShinyName(name) ? sell * 5 : sell;
-    const emoji = isShinyName(name) ? '' : `${getRarityEmoji(rarity ? rarity.name : '')} `;
+    const emoji = `${getRarityEmoji(rarity ? rarity.name : '')} `;
     lines.push(`**${count}x** ${emoji}${name} (~$${value.toLocaleString()})`);
   }
 
