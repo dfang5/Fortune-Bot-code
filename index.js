@@ -3667,7 +3667,7 @@ async function handleScavengeCommand(interaction, userId) {
       'You discovered a valuable artefact during your search!'))
     .addFields(
       { name: 'Artefact Found', value: `${finalArtefactName}`, inline: true },
-      { name: 'Rarity', value: `${selectedRarity.name}`, inline: true },
+      { name: 'Rarity', value: `${getRarityEmoji(selectedRarity.name)} ${selectedRarity.name}`, inline: true },
       { name: 'Tier', value: `T${getArtefactTier(artefact)}`, inline: true },
       { name: 'Estimated Value', value: `$${(isShiny ? calcArtefactSellValue(finalArtefactName, selectedRarity) * 5 : calcArtefactSellValue(finalArtefactName, selectedRarity)).toLocaleString()}`, inline: true },
       { name: 'Next Scavenge', value: 'Available in 2 hours', inline: false }
