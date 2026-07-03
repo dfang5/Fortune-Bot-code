@@ -589,16 +589,16 @@ async function saveUserData() {
 
 // Rarity and artefact config
 const rarities = [
-  { name:'Common',    chance:65, color:0xAAAAAA, value:100,   sell:150,   items:['Quartz','Mica','Olivine','Condensed Quartz','Calcite Crystal','Feldspar','Flint Chip','Shale Flake','Agate Cluster','Basalt Prism','Diorite Slab','Lignite Chip','Travertine Fragment','Smoky Quartz','Sandstone Carving','Pumice Dome'] },
-  { name:'Uncommon',  chance:20, color:0x00FF00, value:500,   sell:500,   items:['Garnet','Talc','Magnetite','Lithium Battery','Hornblende','Limestone Tablet','Serpentine','Ring of Malachite','Jade Scarab','Dolomite Tablet','Augite Crystal','Stibnite Wand','Chalcopyrite','Crown of Gypsum','Rhodochrosite'] },
-  { name:'Rare',      chance:10, color:0x00008B, value:1500,  sell:1500,  items:['Eye of Monazite','Chest of Xenotime','Euxenite','Beryl','Loparite','Amber Fossil','Obsidian Blade','Scepter of Rhodonite','Turquoise Idol','Spectrolite Lens','Vanadinite Cluster','Wulfenite Plate','Brazilianite Shard','Mask of Dioptase','Alexandrite Prism'] },
-  { name:'Legendary', chance:4,  color:0xFFD700, value:5000,  sell:5000,  items:['Watch of Scandium','Statue of Bastnasite','Allanite','Fluorite Shard','Ixiolite','Lapis Lazuli','Nephrite Goblet','Citrine Crest','Staff of Chrysoberyl','Relic of Moissanite','Orb of Tanzanite','Spessartine Dagger','Demantoid Shard','Crown of Benitoite','Throne of Jadeite','Taaffeite Pendant'] },
-  { name:'Unknown',   chance:1,  color:0x000000, value:15000, sell:15000, items:['Gem of Diamond','Kyawthuite','Hazenite Droplet','Ephemeral Allanite','Meteorite Shard','Coesite Fragment','Painite Crystal','Scepter of Onyx','Primordial Opal','Musgravite Fragment','Pezzottaite Core','Void Calcite','Serendibite Relic','Grandidierite Prism','Stellar Obsidian'] }
+  { name:'1-Star', chance:65, color:0xAAAAAA, value:100,   sell:150,   stars:1, items:['Quartz','Mica','Olivine','Condensed Quartz','Calcite Crystal','Feldspar','Flint Chip','Shale Flake','Agate Cluster','Basalt Prism','Diorite Slab','Lignite Chip','Travertine Fragment','Smoky Quartz','Sandstone Carving','Pumice Dome'] },
+  { name:'2-Star', chance:20, color:0x00FF00, value:500,   sell:500,   stars:2, items:['Garnet','Talc','Magnetite','Lithium Battery','Hornblende','Limestone Tablet','Serpentine','Ring of Malachite','Jade Scarab','Dolomite Tablet','Augite Crystal','Stibnite Wand','Chalcopyrite','Crown of Gypsum','Rhodochrosite'] },
+  { name:'3-Star', chance:10, color:0x00008B, value:1500,  sell:1500,  stars:3, items:['Eye of Monazite','Chest of Xenotime','Euxenite','Beryl','Loparite','Amber Fossil','Obsidian Blade','Scepter of Rhodonite','Turquoise Idol','Spectrolite Lens','Vanadinite Cluster','Wulfenite Plate','Brazilianite Shard','Mask of Dioptase','Alexandrite Prism'] },
+  { name:'4-Star', chance:4,  color:0xFFD700, value:4000,  sell:4000,  stars:4, items:['Watch of Scandium','Statue of Bastnasite','Allanite','Fluorite Shard','Ixiolite','Lapis Lazuli','Nephrite Goblet','Citrine Crest','Staff of Chrysoberyl','Relic of Moissanite','Orb of Tanzanite','Spessartine Dagger','Demantoid Shard','Crown of Benitoite','Throne of Jadeite','Taaffeite Pendant'] },
+  { name:'5-Star', chance:1,  color:0x000000, value:10000, sell:10000, stars:5, items:['Gem of Diamond','Kyawthuite','Hazenite Droplet','Ephemeral Allanite','Meteorite Shard','Coesite Fragment','Painite Crystal','Scepter of Onyx','Primordial Opal','Musgravite Fragment','Pezzottaite Core','Void Calcite','Serendibite Relic','Grandidierite Prism','Stellar Obsidian'] }
 ];
 
 // Tier for each artefact — T1=65% value, T2=75%, T3=100%, T4=125%, T5=135%
 const artefactTiers = {
-  // Common
+  // 1-Star
   'Quartz': 2, 'Mica': 2, 'Olivine': 2,
   'Condensed Quartz': 2,
   'Calcite Crystal': 3,
@@ -606,14 +606,14 @@ const artefactTiers = {
   'Agate Cluster': 3, 'Basalt Prism': 3,
   'Diorite Slab': 4, 'Lignite Chip': 4, 'Travertine Fragment': 4,
   'Smoky Quartz': 5, 'Sandstone Carving': 5, 'Pumice Dome': 5,
-  // Uncommon
+  // 2-Star
   'Garnet': 2, 'Talc': 2, 'Magnetite': 2,
   'Lithium Battery': 3,
   'Hornblende': 1, 'Limestone Tablet': 1, 'Serpentine': 1,
   'Ring of Malachite': 3, 'Jade Scarab': 3,
   'Dolomite Tablet': 4, 'Augite Crystal': 4, 'Stibnite Wand': 4,
   'Chalcopyrite': 5, 'Crown of Gypsum': 5, 'Rhodochrosite': 5,
-  // Rare
+  // 3-Star
   'Eye of Monazite': 2, 'Chest of Xenotime': 2, 'Euxenite': 2,
   'Beryl': 1,
   'Loparite': 3,
@@ -621,7 +621,7 @@ const artefactTiers = {
   'Scepter of Rhodonite': 3, 'Turquoise Idol': 3,
   'Spectrolite Lens': 4, 'Vanadinite Cluster': 4, 'Wulfenite Plate': 4,
   'Brazilianite Shard': 5, 'Mask of Dioptase': 5, 'Alexandrite Prism': 5,
-  // Legendary
+  // 4-Star
   'Watch of Scandium': 2, 'Statue of Bastnasite': 2, 'Allanite': 2,
   'Fluorite Shard': 1, 'Nephrite Goblet': 1,
   'Ixiolite': 2,
@@ -630,7 +630,7 @@ const artefactTiers = {
   'Staff of Chrysoberyl': 3, 'Relic of Moissanite': 3,
   'Orb of Tanzanite': 4, 'Spessartine Dagger': 4, 'Demantoid Shard': 4,
   'Crown of Benitoite': 5, 'Throne of Jadeite': 5, 'Taaffeite Pendant': 5,
-  // Unknown
+  // 5-Star
   'Gem of Diamond': 2, 'Kyawthuite': 2,
   'Hazenite Droplet': 1,
   'Ephemeral Allanite': 3,
@@ -688,11 +688,11 @@ const MARKET_MULT_CEILING = 3.0;
 // `stay` = chance the multiplier is left unchanged this refresh.
 // Otherwise the price moves up or down by `swing` (50/50).
 const MARKET_VOLATILITY = {
-  Common:    { stay: 0.90, swing: 0.02 },
-  Uncommon:  { stay: 0.80, swing: 0.05 },
-  Rare:      { stay: 0.70, swing: 0.10 },
-  Legendary: { stay: 0.50, swing: 0.12 },
-  Unknown:   { stay: 0.40, swing: 0.15 }
+  '1-Star': { stay: 0.90, swing: 0.02 },
+  '2-Star': { stay: 0.80, swing: 0.05 },
+  '3-Star': { stay: 0.70, swing: 0.10 },
+  '4-Star': { stay: 0.50, swing: 0.12 },
+  '5-Star': { stay: 0.40, swing: 0.15 }
 };
 
 const MARKET_CACHE = {
@@ -717,7 +717,7 @@ function getAllArtefactNames() {
 }
 
 function rollNewMultiplier(currentMult, rarityName) {
-  const profile = MARKET_VOLATILITY[rarityName] || MARKET_VOLATILITY.Common;
+  const profile = MARKET_VOLATILITY[rarityName] || MARKET_VOLATILITY['1-Star'];
   if (Math.random() < profile.stay) return currentMult;
   const goingUp = Math.random() < 0.5;
   const next = goingUp ? currentMult * (1 + profile.swing) : currentMult * (1 - profile.swing);
@@ -3222,7 +3222,7 @@ async function handleInfoCommand(interaction) {
         name: 'The Market',
         value: [
           '`/market` — See current top gainers, top losers, biggest movers, and the next refresh countdown',
-          'Artefact prices **fluctuate every 6 hours**. Higher rarities swing harder — Common rarely moves, Unknown can swing up to ±15% per refresh.',
+          'Artefact prices **fluctuate every 6 hours**. Higher rarities swing harder — 1-Star rarely moves, 5-Star can swing up to ±15% per refresh.',
           'Every price you see (in inventory, sell, collection, scavenge results) reflects the live market — buy low, sell high.'
         ].join('\n'),
         inline: false
@@ -3239,7 +3239,7 @@ async function handleInfoCommand(interaction) {
       {
         name: 'Events',
         value: [
-          '**Weekly Market Events:** Once a week a random rarity is hit by either a **Market Crash** (-10%) or a **Speculative Bubble** (+15%). Announced in your server\'s announcement channel if one is set.',
+          '**Weekly Market Events:** Once a week a random star-rarity is hit by either a **Market Crash** (-10%) or a **Speculative Bubble** (+15%). Announced in your server\'s announcement channel if one is set.',
           '**Mining Crises:** Periodic 24-hour events where one artefact becomes unscavengeable while another doubles in find rate.',
           'Use `/mining-status` to check the current Mining Crisis.'
         ].join('\n'),
@@ -3258,7 +3258,7 @@ async function handleInfoCommand(interaction) {
       {
         name: 'Artefact Rarity & Tier Scaling',
         value: [
-          '**Common** (65%) · **Uncommon** (20%) · **Rare** (10%) · **Legendary** (4%) · **Unknown** (1%)',
+          '**⭐ 1-Star** (65%) · **⭐⭐ 2-Star** (20%) · **⭐⭐⭐ 3-Star** (10%) · **⭐⭐⭐⭐ 4-Star** (4%) · **⭐⭐⭐⭐⭐ 5-Star** (1%)',
           'Each artefact has a tier (T1–T5) that scales its sell value: T1=65%  T2=75%  T3=100%  T4=125%  T5=135%.',
           'Shiny variants (✨) sell for 20× the base tier value — and they count toward set completion.'
         ].join('\n'),
@@ -3757,11 +3757,12 @@ const INVENTORY_PAGE_SIZE = 12;
 
 function getRarityEmoji(rarityName) {
   switch (rarityName) {
-    case 'Common':    return '🩶';
-    case 'Uncommon':  return '💚';
-    case 'Rare':      return '💙';
-    case 'Legendary': return '💛';
-    default:          return '❓';
+    case '1-Star': return '⭐';
+    case '2-Star': return '⭐⭐';
+    case '3-Star': return '⭐⭐⭐';
+    case '4-Star': return '⭐⭐⭐⭐';
+    case '5-Star': return '⭐⭐⭐⭐⭐';
+    default:       return '❓';
   }
 }
 
@@ -3770,11 +3771,11 @@ function getArtefactRarityRank(name) {
   const rarity = getRarityByArtefact(name);
   if (!rarity) return 5;
   switch (rarity.name) {
-    case 'Legendary': return 1;
-    case 'Rare':      return 2;
-    case 'Uncommon':  return 3;
-    case 'Common':    return 4;
-    default:          return 5;
+    case '4-Star': return 1;
+    case '3-Star': return 2;
+    case '2-Star': return 3;
+    case '1-Star': return 4;
+    default:       return 5;
   }
 }
 
@@ -3849,7 +3850,7 @@ function buildInventoryPayload(user, userXpData, bankCapacity, page) {
       { name: 'Purchased Items',   value: itemsList,                                                inline: false }
     )
     .setColor(0x339AF0)
-    .setFooter({ text: `🩶 Common  💚 Uncommon  💙 Rare  💛 Legendary  ✨ Shiny  •  /convert: 1 XP = $2` })
+    .setFooter({ text: `⭐ 1-Star  ⭐⭐ 2-Star  ⭐⭐⭐ 3-Star  ⭐⭐⭐⭐ 4-Star  ⭐⭐⭐⭐⭐ 5-Star  ✨ Shiny  •  /convert: 1 XP = $2` })
     .setTimestamp();
 
   // Navigation buttons (only show when there are multiple pages)
@@ -8510,7 +8511,7 @@ function buildCollectionPage(user, pageIndex) {
   const totalCount = items.length;
   const progressBar = buildProgressBar(collectedCount, totalCount);
 
-  const rarityEmoji = { Common: '⬜', Uncommon: '🟩', Rare: '🟦', Legendary: '🟨', Unknown: '⬛' };
+  const rarityEmoji = { '1-Star': '⭐', '2-Star': '⭐⭐', '3-Star': '⭐⭐⭐', '4-Star': '⭐⭐⭐⭐', '5-Star': '⭐⭐⭐⭐⭐' };
   const tierLabel = { 1: 'Tier I  ·  ×0.65 value', 2: 'Tier II  ·  ×0.75 value', 3: 'Tier III  ·  ×1.0 value', 4: 'Tier IV  ·  ×1.25 value', 5: 'Tier V  ·  ×1.35 value' };
 
   const fields = [];
