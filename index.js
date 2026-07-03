@@ -657,12 +657,12 @@ function calcArtefactSellValue(name, rarity) {
   return Math.floor(base * TIER_MULTIPLIERS[tier] * mult);
 }
 
-// Trade-only value: includes the 20× shiny premium displayed in trade embeds/pickers.
+// Trade-only value: includes the 5× shiny premium displayed in trade embeds/pickers.
 // Do NOT use this for /sell, /inventory, or scavenge — those apply their own shiny bonus.
 function calcArtefactTradeValue(name, rarity) {
   const isShiny = name.startsWith('✨ SHINY ') && name.endsWith(' ✨');
   const base = calcArtefactSellValue(name, rarity);
-  return isShiny ? base * 20 : base;
+  return isShiny ? base * 5 : base;
 }
 
 function calcArtefactValue(name, rarity) {
@@ -803,8 +803,8 @@ async function maybeRefreshMarket() {
 // a Speculative Bubble (+15%). The shift is applied to every artefact in
 // that rarity by multiplying their current multiplier and clamping.
 const CRASHOUT_INTERVAL = 7 * 24 * 60 * 60 * 1000; // 7 days
-const CRASHOUT_CRASH_FACTOR = 0.90;   // -10%
-const CRASHOUT_BUBBLE_FACTOR = 1.15;  // +15%
+const CRASHOUT_CRASH_FACTOR = 0.85;   // -15%
+const CRASHOUT_BUBBLE_FACTOR = 1.10;  // +10%
 const CRASHOUT_HISTORY_LIMIT = 10;
 
 // In-memory cache for per-guild announcement channels (mirror of guildSettings)
@@ -896,7 +896,7 @@ async function runCrashout() {
   console.log(`Crashout event: ${type.toUpperCase()} on ${rarity.name} (factor ${factor})`);
 
   // Build announcement embed and broadcast
-  const pctLabel = isBubble ? '+15%' : '-10%';
+  const pctLabel = isBubble ? '+10%' : '-15%';
   const embed = new EmbedBuilder()
     .setTitle(isBubble ? 'Speculative Bubble!' : 'Market Crash!')
     .setDescription(
@@ -3260,7 +3260,7 @@ async function handleInfoCommand(interaction) {
         value: [
           '**⭐ 1-Star** (65%) · **⭐⭐ 2-Star** (20%) · **⭐⭐⭐ 3-Star** (10%) · **⭐⭐⭐⭐ 4-Star** (4%) · **⭐⭐⭐⭐⭐ 5-Star** (1%)',
           'Each artefact has a tier (T1–T5) that scales its sell value: T1=65%  T2=75%  T3=100%  T4=125%  T5=135%.',
-          'Shiny variants (✨) sell for 20× the base tier value — and they count toward set completion.'
+          'Shiny variants (✨) sell for 5× the base tier value — and they count toward set completion.'
         ].join('\n'),
         inline: false
       }
@@ -3669,7 +3669,7 @@ async function handleScavengeCommand(interaction, userId) {
       { name: 'Artefact Found', value: `${finalArtefactName}`, inline: true },
       { name: 'Rarity', value: `${selectedRarity.name}`, inline: true },
       { name: 'Tier', value: `T${getArtefactTier(artefact)}`, inline: true },
-      { name: 'Estimated Value', value: `$${(isShiny ? calcArtefactSellValue(finalArtefactName, selectedRarity) * 20 : calcArtefactSellValue(finalArtefactName, selectedRarity)).toLocaleString()}`, inline: true },
+      { name: 'Estimated Value', value: `$${(isShiny ? calcArtefactSellValue(finalArtefactName, selectedRarity) * 5 : calcArtefactSellValue(finalArtefactName, selectedRarity)).toLocaleString()}`, inline: true },
       { name: 'Next Scavenge', value: 'Available in 2 hours', inline: false }
     )
     .setColor(scavengeColor)
@@ -3806,7 +3806,7 @@ function buildInventoryPayload(user, userXpData, bankCapacity, page) {
     const count = counts[name];
     const rarity = getRarityByArtefact(name);
     const sell = calcArtefactSellValue(name, rarity);
-    const value = isShinyName(name) ? sell * 20 : sell;
+    const value = isShinyName(name) ? sell * 5 : sell;
     const emoji = isShinyName(name) ? '' : `${getRarityEmoji(rarity ? rarity.name : '')} `;
     lines.push(`**${count}x** ${emoji}${name} (~$${value.toLocaleString()})`);
   }
@@ -3819,7 +3819,7 @@ function buildInventoryPayload(user, userXpData, bankCapacity, page) {
   const totalValue = user.artefacts.reduce((sum, name) => {
     const rarity = getRarityByArtefact(name);
     const sell = calcArtefactSellValue(name, rarity);
-    return sum + (isShinyName(name) ? sell * 20 : sell);
+    return sum + (isShinyName(name) ? sell * 5 : sell);
   }, 0);
 
   // Purchased items
@@ -4306,7 +4306,7 @@ function getMassSellValue(name) {
   const rarity = getRarityByArtefact(name);
   const tier = getArtefactTier(name);
   const tierSell = calcArtefactSellValue(name, rarity);
-  return { isShiny, rarity, tier, finalValue: isShiny ? tierSell * 20 : tierSell };
+  return { isShiny, rarity, tier, finalValue: isShiny ? tierSell * 5 : tierSell };
 }
 
 function massSellMatchesQuery(name, query) {
@@ -5468,7 +5468,7 @@ function buildTradePickerComponents(tradeId, picker, entries, valueKey) {
       const safeValue = name.length > 100 ? name.slice(0, 100) : name;
       return {
         label: name.length > 100 ? name.slice(0, 97) + '...' : name,
-        description: `${rarity ? rarity.name : 'Unknown'} T${tier}${isShiny ? ' ✨20×' : ''} — ~$${val.toLocaleString()} (${count} ${picker.mode === 'add' ? 'available' : 'in offer'})`,
+        description: `${rarity ? rarity.name : 'Unknown'} T${tier}${isShiny ? ' ✨5×' : ''} — ~$${val.toLocaleString()} (${count} ${picker.mode === 'add' ? 'available' : 'in offer'})`,
         value: safeValue
       };
     });
@@ -5616,7 +5616,7 @@ function formatOfferDetailed(offer) {
     const val = calcArtefactTradeValue(name, rarity);
     const rarityName = rarity ? rarity.name : 'Unknown';
     const isShiny = name.startsWith('✨ SHINY ') && name.endsWith(' ✨');
-    const shinyTag = isShiny ? ' ✨20×' : '';
+    const shinyTag = isShiny ? ' ✨5×' : '';
     if (count > 1) {
       const totalVal = val * count;
       lines.push(`${name}${shinyTag} ×${count} (${rarityName}, T${tier}, ~$${val.toLocaleString()} ea / ~$${totalVal.toLocaleString()} total)`);
@@ -8623,7 +8623,7 @@ async function handleObserveCommand(interaction, observerId) {
     const isShiny = name.startsWith('✨ SHINY ') && name.endsWith(' ✨');
     const rarity = getRarityByArtefact(name);
     const tierSell = calcArtefactSellValue(name, rarity);
-    return sum + (isShiny ? tierSell * 20 : tierSell);
+    return sum + (isShiny ? tierSell * 5 : tierSell);
   }, 0);
 
   const xp = target.xpData?.xp || 0;
@@ -8644,7 +8644,7 @@ async function handleObserveCommand(interaction, observerId) {
     const tier = getArtefactTier(name);
     const tierSell = calcArtefactSellValue(name, rarity);
     const isShiny = name.startsWith('✨ SHINY ') && name.endsWith(' ✨');
-    const sellDisplay = isShiny ? tierSell * 20 : tierSell;
+    const sellDisplay = isShiny ? tierSell * 5 : tierSell;
     const countSuffix = count > 1 ? ` [${count}]` : '';
     return `${name} (${rarity ? rarity.name : 'Unknown'} T${tier} — $${sellDisplay.toLocaleString()})${countSuffix}`;
   });
